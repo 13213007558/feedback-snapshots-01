@@ -29,6 +29,7 @@ class AsynchronousSearchClient(NamespacedClient):
         id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Deletes any responses from an asynchronous search.
@@ -54,6 +55,7 @@ class AsynchronousSearchClient(NamespacedClient):
             _make_path("_plugins", "_asynchronous_search", id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -63,6 +65,7 @@ class AsynchronousSearchClient(NamespacedClient):
         id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Gets partial responses from an asynchronous search.
@@ -88,6 +91,7 @@ class AsynchronousSearchClient(NamespacedClient):
             _make_path("_plugins", "_asynchronous_search", id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -107,6 +111,7 @@ class AsynchronousSearchClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Performs an asynchronous search.
@@ -144,6 +149,7 @@ class AsynchronousSearchClient(NamespacedClient):
             "/_plugins/_asynchronous_search",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -153,6 +159,7 @@ class AsynchronousSearchClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Monitors any asynchronous searches that are `running`, `completed`, or
@@ -176,4 +183,5 @@ class AsynchronousSearchClient(NamespacedClient):
             "/_plugins/_asynchronous_search/stats",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )

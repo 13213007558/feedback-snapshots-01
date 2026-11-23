@@ -29,6 +29,7 @@ class ObservabilityClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Creates a new observability object.
@@ -51,6 +52,7 @@ class ObservabilityClient(NamespacedClient):
             "/_plugins/_observability/object",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -61,6 +63,7 @@ class ObservabilityClient(NamespacedClient):
         object_id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Deletes specific observability object specified by ID.
@@ -87,6 +90,7 @@ class ObservabilityClient(NamespacedClient):
             _make_path("_plugins", "_observability", "object", object_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -103,6 +107,7 @@ class ObservabilityClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Deletes specific observability objects specified by ID or a list of IDs.
@@ -125,7 +130,11 @@ class ObservabilityClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return await self.transport.perform_request(
-            "DELETE", "/_plugins/_observability/object", params=params, headers=headers
+            "DELETE",
+            "/_plugins/_observability/object",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -134,6 +143,7 @@ class ObservabilityClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Retrieves local stats of all observability objects.
@@ -156,6 +166,7 @@ class ObservabilityClient(NamespacedClient):
             "/_plugins/_observability/_local/stats",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -165,6 +176,7 @@ class ObservabilityClient(NamespacedClient):
         object_id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Retrieves specific observability object specified by ID.
@@ -191,6 +203,7 @@ class ObservabilityClient(NamespacedClient):
             _make_path("_plugins", "_observability", "object", object_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -199,6 +212,7 @@ class ObservabilityClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Retrieves list of all observability objects.
@@ -217,7 +231,11 @@ class ObservabilityClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return await self.transport.perform_request(
-            "GET", "/_plugins/_observability/object", params=params, headers=headers
+            "GET",
+            "/_plugins/_observability/object",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -228,6 +246,7 @@ class ObservabilityClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Updates an existing observability object.
@@ -254,5 +273,6 @@ class ObservabilityClient(NamespacedClient):
             _make_path("_plugins", "_observability", "object", object_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )

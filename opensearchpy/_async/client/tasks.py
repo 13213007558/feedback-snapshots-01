@@ -60,6 +60,7 @@ class TasksClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns a list of tasks.
@@ -95,7 +96,11 @@ class TasksClient(NamespacedClient):
             completed. Default is false.
         """
         return await self.transport.perform_request(
-            "GET", "/_tasks", params=params, headers=headers
+            "GET",
+            "/_tasks",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -115,6 +120,7 @@ class TasksClient(NamespacedClient):
         task_id: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Cancels a task, if it can be cancelled through an API.
@@ -150,6 +156,7 @@ class TasksClient(NamespacedClient):
             _make_path("_tasks", task_id, "_cancel"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -167,6 +174,7 @@ class TasksClient(NamespacedClient):
         task_id: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns information about a task.
@@ -198,5 +206,9 @@ class TasksClient(NamespacedClient):
             )
 
         return await self.transport.perform_request(
-            "GET", _make_path("_tasks", task_id), params=params, headers=headers
+            "GET",
+            _make_path("_tasks", task_id),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )

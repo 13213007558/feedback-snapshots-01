@@ -32,7 +32,12 @@ from .utils import NamespacedClient, query_params
 
 class FeaturesClient(NamespacedClient):
     @query_params("master_timeout", "cluster_manager_timeout")
-    async def get_features(self, params: Any = None, headers: Any = None) -> Any:
+    async def get_features(
+        self,
+        params: Any = None,
+        headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
+    ) -> Any:
         """
         Gets a list of features which can be included in snapshots using the
         feature_states field when creating a snapshot
@@ -44,11 +49,20 @@ class FeaturesClient(NamespacedClient):
             to cluster_manager node
         """
         return await self.transport.perform_request(
-            "GET", "/_features", params=params, headers=headers
+            "GET",
+            "/_features",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params()
-    async def reset_features(self, params: Any = None, headers: Any = None) -> Any:
+    async def reset_features(
+        self,
+        params: Any = None,
+        headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
+    ) -> Any:
         """
         Resets the internal state of features, usually by deleting system indices
 
@@ -59,5 +73,9 @@ class FeaturesClient(NamespacedClient):
             or be removed in a future version
         """
         return await self.transport.perform_request(
-            "POST", "/_features/_reset", params=params, headers=headers
+            "POST",
+            "/_features/_reset",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )

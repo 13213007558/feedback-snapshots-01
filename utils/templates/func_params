@@ -13,3 +13,4 @@
 
 params: Any=None,
 headers: Any=None,
+allowed_mimetypes: Any = {{ api.allowed_mimetypes_default }},

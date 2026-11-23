@@ -40,6 +40,7 @@ class FlowFrameworkClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Creates a new workflow template.
@@ -72,6 +73,7 @@ class FlowFrameworkClient(NamespacedClient):
             "/_plugins/_flow_framework/workflow",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -84,6 +86,7 @@ class FlowFrameworkClient(NamespacedClient):
         workflow_id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Deletes a workflow template.
@@ -115,6 +118,7 @@ class FlowFrameworkClient(NamespacedClient):
             _make_path("_plugins", "_flow_framework", "workflow", workflow_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -126,6 +130,7 @@ class FlowFrameworkClient(NamespacedClient):
         workflow_id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Deprovision workflow's resources when you no longer need them.
@@ -158,6 +163,7 @@ class FlowFrameworkClient(NamespacedClient):
             ),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -167,6 +173,7 @@ class FlowFrameworkClient(NamespacedClient):
         workflow_id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Retrieves a workflow template.
@@ -195,6 +202,7 @@ class FlowFrameworkClient(NamespacedClient):
             _make_path("_plugins", "_flow_framework", "workflow", workflow_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("all", "error_trace", "filter_path", "human", "pretty", "source")
@@ -204,6 +212,7 @@ class FlowFrameworkClient(NamespacedClient):
         workflow_id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Retrieves the current workflow provisioning status.
@@ -236,6 +245,7 @@ class FlowFrameworkClient(NamespacedClient):
             ),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -246,6 +256,7 @@ class FlowFrameworkClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Retrieves available workflow steps.
@@ -269,6 +280,7 @@ class FlowFrameworkClient(NamespacedClient):
             "/_plugins/_flow_framework/workflow/_steps",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -279,6 +291,7 @@ class FlowFrameworkClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Provisioning a workflow. This API is also executed when the Create or Update
@@ -310,6 +323,7 @@ class FlowFrameworkClient(NamespacedClient):
             ),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -320,6 +334,7 @@ class FlowFrameworkClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Search for workflows by using a query matching a field.
@@ -345,6 +360,7 @@ class FlowFrameworkClient(NamespacedClient):
             "/_plugins/_flow_framework/workflow/_search",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -355,6 +371,7 @@ class FlowFrameworkClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Search for workflows by using a query matching a field.
@@ -380,6 +397,7 @@ class FlowFrameworkClient(NamespacedClient):
             "/_plugins/_flow_framework/workflow/state/_search",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -402,6 +420,7 @@ class FlowFrameworkClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Updates a workflow template that has not been provisioned.
@@ -440,5 +459,6 @@ class FlowFrameworkClient(NamespacedClient):
             _make_path("_plugins", "_flow_framework", "workflow", workflow_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )

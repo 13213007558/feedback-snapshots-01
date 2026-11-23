@@ -301,9 +301,18 @@ class Urllib3HttpConnection(Connection):
         self._raise_warnings(warning_headers)
 
         # raise errors based on http status codes, let the client handle those if needed
+        response_headers = self.get_response_headers(response)
+
         if not (200 <= response.status < 300) and response.status not in ignore:
             self.log_request_fail(
-                method, full_url, url, orig_body, duration, response.status, raw_data
+                method,
+                full_url,
+                url,
+                orig_body,
+                duration,
+                response.status,
+                raw_data,
+                content_type=response_headers.get("content-type"),
             )
             self._raise_error(
                 response.status,
@@ -312,7 +321,14 @@ class Urllib3HttpConnection(Connection):
             )
 
         self.log_request_success(
-            method, full_url, url, orig_body, response.status, raw_data, duration
+            method,
+            full_url,
+            url,
+            orig_body,
+            response.status,
+            raw_data,
+            duration,
+            content_type=response_headers.get("content-type"),
         )
 
         return response.status, response.headers, raw_data

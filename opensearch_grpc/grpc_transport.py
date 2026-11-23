@@ -394,6 +394,7 @@ class GrpcTransport(Transport):
         timeout: Optional[Union[int, float]] = None,
         ignore: Collection[int] = (),
         headers: Optional[Mapping[str, str]] = None,
+        allowed_mimetypes: Optional[Any] = None,
     ) -> Any:
         """Route to gRPC or REST based on the URL pattern."""
         handler = self._get_grpc_handler(method, url)
@@ -433,6 +434,7 @@ class GrpcTransport(Transport):
             timeout=timeout,
             ignore=ignore,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     # Matches: /_bulk or /<index>/_bulk

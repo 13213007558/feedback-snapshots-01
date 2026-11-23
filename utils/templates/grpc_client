@@ -135,6 +135,7 @@ class OpenSearchGrpc(OpenSearch):
         index: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
         **kwargs: Any,
     ) -> Any:
         """Override to bypass NDJSON serialization for gRPC path.
@@ -156,6 +157,7 @@ class OpenSearchGrpc(OpenSearch):
             params=params,
             headers=headers,
             body=body,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     def predict_model_stream(

@@ -7,7 +7,7 @@
 # Modifications Copyright OpenSearch Contributors. See
 # GitHub history for details.
 
-from typing import Any, Mapping, Optional
+from typing import Any, Collection, Mapping, Optional, Union
 
 from .client import Client
 from .utils import NamespacedClient
@@ -23,6 +23,9 @@ class HttpClient(NamespacedClient):
         headers: Optional[Mapping[str, Any]] = None,
         params: Optional[Mapping[str, Any]] = None,
         body: Any = None,
+        allowed_mimetypes: Optional[Union[Collection[str], Mapping[str, Any]]] = (
+            "application/json",
+        ),
     ) -> Any:
         """
         Perform a GET request and return the data.
@@ -34,9 +37,18 @@ class HttpClient(NamespacedClient):
             underlying :class:`~opensearchpy.Connection` class for serialization
         :arg body: body of the request, will be serialized using serializer and
             passed to the connection
+        :arg allowed_mimetypes: response media types approved for this request.
+            Defaults to JSON only. Pass ``None`` to leave every registered
+            decoder available. This is a local setting and is never sent to
+            the server.
         """
         return await self.transport.perform_request(
-            "GET", url=url, headers=headers, params=params, body=body
+            "GET",
+            url=url,
+            headers=headers,
+            params=params,
+            body=body,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     async def head(
@@ -45,6 +57,9 @@ class HttpClient(NamespacedClient):
         headers: Optional[Mapping[str, Any]] = None,
         params: Optional[Mapping[str, Any]] = None,
         body: Any = None,
+        allowed_mimetypes: Optional[Union[Collection[str], Mapping[str, Any]]] = (
+            "application/json",
+        ),
     ) -> Any:
         """
         Perform a HEAD request and return the data.
@@ -56,9 +71,18 @@ class HttpClient(NamespacedClient):
             underlying :class:`~opensearchpy.Connection` class for serialization
         :arg body: body of the request, will be serialized using serializer and
             passed to the connection
+        :arg allowed_mimetypes: response media types approved for this request.
+            Defaults to JSON only. Pass ``None`` to leave every registered
+            decoder available. This is a local setting and is never sent to
+            the server.
         """
         return await self.transport.perform_request(
-            "HEAD", url=url, headers=headers, params=params, body=body
+            "HEAD",
+            url=url,
+            headers=headers,
+            params=params,
+            body=body,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     async def post(
@@ -67,6 +91,9 @@ class HttpClient(NamespacedClient):
         headers: Optional[Mapping[str, Any]] = None,
         params: Optional[Mapping[str, Any]] = None,
         body: Any = None,
+        allowed_mimetypes: Optional[Union[Collection[str], Mapping[str, Any]]] = (
+            "application/json",
+        ),
     ) -> Any:
         """
         Perform a POST request and return the data.
@@ -78,9 +105,18 @@ class HttpClient(NamespacedClient):
             underlying :class:`~opensearchpy.Connection` class for serialization
         :arg body: body of the request, will be serialized using serializer and
             passed to the connection
+        :arg allowed_mimetypes: response media types approved for this request.
+            Defaults to JSON only. Pass ``None`` to leave every registered
+            decoder available. This is a local setting and is never sent to
+            the server.
         """
         return await self.transport.perform_request(
-            "POST", url=url, headers=headers, params=params, body=body
+            "POST",
+            url=url,
+            headers=headers,
+            params=params,
+            body=body,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     async def delete(
@@ -89,6 +125,9 @@ class HttpClient(NamespacedClient):
         headers: Optional[Mapping[str, Any]] = None,
         params: Optional[Mapping[str, Any]] = None,
         body: Any = None,
+        allowed_mimetypes: Optional[Union[Collection[str], Mapping[str, Any]]] = (
+            "application/json",
+        ),
     ) -> Any:
         """
         Perform a DELETE request and return the data.
@@ -100,9 +139,18 @@ class HttpClient(NamespacedClient):
             underlying :class:`~opensearchpy.Connection` class for serialization
         :arg body: body of the request, will be serialized using serializer and
             passed to the connection
+        :arg allowed_mimetypes: response media types approved for this request.
+            Defaults to JSON only. Pass ``None`` to leave every registered
+            decoder available. This is a local setting and is never sent to
+            the server.
         """
         return await self.transport.perform_request(
-            "DELETE", url=url, headers=headers, params=params, body=body
+            "DELETE",
+            url=url,
+            headers=headers,
+            params=params,
+            body=body,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     async def put(
@@ -111,6 +159,9 @@ class HttpClient(NamespacedClient):
         headers: Optional[Mapping[str, Any]] = None,
         params: Optional[Mapping[str, Any]] = None,
         body: Any = None,
+        allowed_mimetypes: Optional[Union[Collection[str], Mapping[str, Any]]] = (
+            "application/json",
+        ),
     ) -> Any:
         """
         Perform a PUT request and return the data.
@@ -122,7 +173,16 @@ class HttpClient(NamespacedClient):
             underlying :class:`~opensearchpy.Connection` class for serialization
         :arg body: body of the request, will be serialized using serializer and
             passed to the connection
+        :arg allowed_mimetypes: response media types approved for this request.
+            Defaults to JSON only. Pass ``None`` to leave every registered
+            decoder available. This is a local setting and is never sent to
+            the server.
         """
         return await self.transport.perform_request(
-            "PUT", url=url, headers=headers, params=params, body=body
+            "PUT",
+            url=url,
+            headers=headers,
+            params=params,
+            body=body,
+            allowed_mimetypes=allowed_mimetypes,
         )

@@ -55,6 +55,7 @@ class IngestClient(NamespacedClient):
         id: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns an ingest pipeline.
@@ -82,7 +83,11 @@ class IngestClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return await self.transport.perform_request(
-            "GET", _make_path("_ingest", "pipeline", id), params=params, headers=headers
+            "GET",
+            _make_path("_ingest", "pipeline", id),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -102,6 +107,7 @@ class IngestClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Creates or updates an ingest pipeline.
@@ -137,6 +143,7 @@ class IngestClient(NamespacedClient):
             _make_path("_ingest", "pipeline", id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -156,6 +163,7 @@ class IngestClient(NamespacedClient):
         id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Deletes an ingest pipeline.
@@ -191,6 +199,7 @@ class IngestClient(NamespacedClient):
             _make_path("_ingest", "pipeline", id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source", "verbose")
@@ -201,6 +210,7 @@ class IngestClient(NamespacedClient):
         id: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Simulates an ingest pipeline with example documents.
@@ -231,6 +241,7 @@ class IngestClient(NamespacedClient):
             _make_path("_ingest", "pipeline", id, "_simulate"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -240,6 +251,7 @@ class IngestClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns a list of built-in grok patterns.
@@ -260,5 +272,9 @@ class IngestClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return await self.transport.perform_request(
-            "GET", "/_ingest/processor/grok", params=params, headers=headers
+            "GET",
+            "/_ingest/processor/grok",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )

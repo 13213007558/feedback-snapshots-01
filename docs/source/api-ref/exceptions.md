@@ -49,6 +49,10 @@
 ```
 
 ```{eval-rst}
+.. autoclass:: opensearchpy.UnsupportedResponseFormatError
+```
+
+```{eval-rst}
 .. autoclass:: opensearchpy.SSLError
 ```
 

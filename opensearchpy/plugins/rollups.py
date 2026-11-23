@@ -29,6 +29,7 @@ class RollupsClient(NamespacedClient):
         id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Deletes an index rollup job configuration.
@@ -55,6 +56,7 @@ class RollupsClient(NamespacedClient):
             _make_path("_plugins", "_rollup", "jobs", id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -64,6 +66,7 @@ class RollupsClient(NamespacedClient):
         id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Retrieves the execution status information for an index rollup job.
@@ -90,6 +93,7 @@ class RollupsClient(NamespacedClient):
             _make_path("_plugins", "_rollup", "jobs", id, "_explain"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -99,6 +103,7 @@ class RollupsClient(NamespacedClient):
         id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Retrieves an index rollup job configuration by ID.
@@ -125,6 +130,7 @@ class RollupsClient(NamespacedClient):
             _make_path("_plugins", "_rollup", "jobs", id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -143,6 +149,7 @@ class RollupsClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Creates or updates an index rollup job configuration.
@@ -173,6 +180,7 @@ class RollupsClient(NamespacedClient):
             _make_path("_plugins", "_rollup", "jobs", id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -183,6 +191,7 @@ class RollupsClient(NamespacedClient):
         id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Starts the execution of an index rollup job.
@@ -209,6 +218,7 @@ class RollupsClient(NamespacedClient):
             _make_path("_plugins", "_rollup", "jobs", id, "_start"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -218,6 +228,7 @@ class RollupsClient(NamespacedClient):
         id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Stops the execution of an index rollup job.
@@ -244,4 +255,5 @@ class RollupsClient(NamespacedClient):
             _make_path("_plugins", "_rollup", "jobs", id, "_stop"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )

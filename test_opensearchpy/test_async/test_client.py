@@ -52,6 +52,7 @@ class DummyTransport(AsyncTransport):
         timeout: Optional[Union[int, float]] = None,
         ignore: Collection[int] = (),
         headers: Optional[Mapping[str, str]] = None,
+        allowed_mimetypes: Optional[Any] = None,
     ) -> Any:
         resp: Any = (200, {})
         if self.responses:

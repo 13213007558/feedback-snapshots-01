@@ -25,6 +25,7 @@
 #  under the License.
 
 
+import asyncio
 import gzip
 import io
 import json
@@ -33,7 +34,7 @@ import sys
 import warnings
 from platform import python_version
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import aiohttp
 import pytest
@@ -41,11 +42,24 @@ from _pytest.mark.structures import MarkDecorator
 from multidict import CIMultiDict
 from pytest import raises
 
-from opensearchpy import AIOHttpConnection, AsyncOpenSearch, __versionstr__, serializer
+from opensearchpy import (
+    AIOHttpConnection,
+    AsyncOpenSearch,
+    AsyncTransport,
+    __versionstr__,
+    serializer,
+)
 from opensearchpy.compat import reraise_exceptions
 from opensearchpy.connection import Connection, async_connections
-from opensearchpy.exceptions import ConnectionError, NotFoundError, TransportError
+from opensearchpy.exceptions import (
+    ConnectionError,
+    NotFoundError,
+    TransportError,
+    UnsupportedResponseFormatError,
+)
 from test_opensearchpy.test_http_server import TestHTTPServer
+
+from .test_transport import PluginFormatSerializer
 
 pytestmark: MarkDecorator = pytest.mark.asyncio
 
@@ -80,6 +94,45 @@ class TestAIOHttpConnection:
 
         con.session.request = _dummy_request
         return con
+
+    async def test_trace_preview_skipped_for_rejected_response(self) -> None:
+        from unittest.mock import AsyncMock
+
+        from opensearchpy.connection.base import Connection
+
+        serializer = PluginFormatSerializer()
+        transport = AsyncTransport(
+            [{"host": "localhost", "port": 9200}],
+            serializers={serializer.mimetype: serializer},
+        )
+        await transport._async_call()
+        connection = transport.get_connection()
+
+        response = Mock(
+            status=200, headers=CIMultiDict({"content-type": serializer.mimetype})
+        )
+        response.text = AsyncMock(return_value='{"answer":42}')
+        context = MagicMock()
+        context.__aenter__.return_value = response
+        connection.loop = asyncio.get_running_loop()
+        connection.session = Mock(close=AsyncMock())
+        connection.session.request.return_value = context
+
+        with patch(
+            "opensearchpy.connection.base.Connection._pretty_json",
+            autospec=True,
+            side_effect=Connection._pretty_json,
+        ) as pretty:
+            with patch("opensearchpy.connection.base.tracer") as tracer:
+                tracer.isEnabledFor.return_value = True
+                tracer.handlers = [MagicMock()]
+                with pytest.raises(UnsupportedResponseFormatError):
+                    await transport.perform_request(
+                        "GET", "/_search", allowed_mimetypes=("application/json",)
+                    )
+
+        pretty.assert_not_called()
+        assert 0 == serializer.load_calls
 
     async def test_ssl_context(self) -> None:
         try:

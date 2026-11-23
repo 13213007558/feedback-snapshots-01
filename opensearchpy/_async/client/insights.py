@@ -28,6 +28,7 @@ class InsightsClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Retrieves the top queries based on the given metric type (latency, CPU, or
@@ -47,5 +48,9 @@ class InsightsClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return await self.transport.perform_request(
-            "GET", "/_insights/top_queries", params=params, headers=headers
+            "GET",
+            "/_insights/top_queries",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )

@@ -31,6 +31,7 @@ __all__ = [
     "ImproperlyConfigured",
     "OpenSearchException",
     "SerializationError",
+    "UnsupportedResponseFormatError",
     "TransportError",
     "NotFoundError",
     "ConflictError",
@@ -67,6 +68,23 @@ class SerializationError(OpenSearchException):
     Data passed in failed to serialize properly in the ``Serializer`` being
     used.
     """
+
+
+class UnsupportedResponseFormatError(SerializationError):
+    """
+    A response declared a media type that the request did not allow.
+
+    The response body was not passed to any decoder. The error is raised
+    locally by the client and must not be retried on another node.
+    """
+
+    def __init__(self, mimetype: str, allowed_mimetypes: Any) -> None:
+        self.mimetype = mimetype
+        self.allowed_mimetypes = tuple(allowed_mimetypes or ())
+        super().__init__(
+            f"Mimetype '{mimetype}' is not an allowed response format "
+            f"for this request: {self.allowed_mimetypes}"
+        )
 
 
 class TransportError(OpenSearchException):

@@ -37,6 +37,7 @@ class RemoteStoreClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Restores from remote store.
@@ -63,5 +64,10 @@ class RemoteStoreClient(NamespacedClient):
             raise ValueError("Empty value passed for a required argument 'body'.")
 
         return await self.transport.perform_request(
-            "POST", "/_remotestore/_restore", params=params, headers=headers, body=body
+            "POST",
+            "/_remotestore/_restore",
+            params=params,
+            headers=headers,
+            body=body,
+            allowed_mimetypes=allowed_mimetypes,
         )

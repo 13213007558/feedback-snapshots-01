@@ -29,6 +29,7 @@ class GeospatialClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Use an OpenSearch query to upload `GeoJSON`, operation will fail if index
@@ -57,6 +58,7 @@ class GeospatialClient(NamespacedClient):
             "/_plugins/geospatial/geojson/_upload",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -67,6 +69,7 @@ class GeospatialClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Use an OpenSearch query to upload `GeoJSON` regardless if index exists. - When
@@ -95,6 +98,7 @@ class GeospatialClient(NamespacedClient):
             "/_plugins/geospatial/geojson/_upload",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -104,6 +108,7 @@ class GeospatialClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Retrieves statistics for all geospatial uploads.
@@ -122,7 +127,11 @@ class GeospatialClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return await self.transport.perform_request(
-            "GET", "/_plugins/geospatial/_upload/stats", params=params, headers=headers
+            "GET",
+            "/_plugins/geospatial/_upload/stats",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -132,6 +141,7 @@ class GeospatialClient(NamespacedClient):
         name: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Delete a specific IP2Geo data source.
@@ -157,6 +167,7 @@ class GeospatialClient(NamespacedClient):
             _make_path("_plugins", "geospatial", "ip2geo", "datasource", name),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -166,6 +177,7 @@ class GeospatialClient(NamespacedClient):
         name: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Get one or more IP2Geo data sources, defaulting to returning all if no names
@@ -189,6 +201,7 @@ class GeospatialClient(NamespacedClient):
             _make_path("_plugins", "geospatial", "ip2geo", "datasource", name),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -199,6 +212,7 @@ class GeospatialClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Create a specific IP2Geo data source. Default values:   - `endpoint`:
@@ -226,6 +240,7 @@ class GeospatialClient(NamespacedClient):
             _make_path("_plugins", "geospatial", "ip2geo", "datasource", name),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -237,6 +252,7 @@ class GeospatialClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Update a specific IP2Geo data source.
@@ -265,5 +281,6 @@ class GeospatialClient(NamespacedClient):
             ),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )

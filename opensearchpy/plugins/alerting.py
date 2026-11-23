@@ -15,7 +15,13 @@ from ..client.utils import NamespacedClient, _make_path, query_params
 
 class AlertingClient(NamespacedClient):
     @query_params()
-    def search_monitor(self, body: Any, params: Any = None, headers: Any = None) -> Any:
+    def search_monitor(
+        self,
+        body: Any,
+        params: Any = None,
+        headers: Any = None,
+        allowed_mimetypes: Any = None,
+    ) -> Any:
         """
         Returns the search result for a monitor.
 
@@ -26,12 +32,17 @@ class AlertingClient(NamespacedClient):
             _make_path("_plugins", "_alerting", "monitors", "_search"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
     @query_params()
     def get_monitor(
-        self, monitor_id: Any, params: Any = None, headers: Any = None
+        self,
+        monitor_id: Any,
+        params: Any = None,
+        headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Returns the details of a specific monitor.
@@ -43,11 +54,16 @@ class AlertingClient(NamespacedClient):
             _make_path("_plugins", "_alerting", "monitors", monitor_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("dryrun")
     def run_monitor(
-        self, monitor_id: Any, params: Any = None, headers: Any = None
+        self,
+        monitor_id: Any,
+        params: Any = None,
+        headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Runs/Executes a specific monitor.
@@ -60,11 +76,16 @@ class AlertingClient(NamespacedClient):
             _make_path("_plugins", "_alerting", "monitors", monitor_id, "_execute"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params()
     def create_monitor(
-        self, body: Any = None, params: Any = None, headers: Any = None
+        self,
+        body: Any = None,
+        params: Any = None,
+        headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Creates a monitor with inputs, triggers, and actions.
@@ -76,12 +97,18 @@ class AlertingClient(NamespacedClient):
             _make_path("_plugins", "_alerting", "monitors"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
     @query_params()
     def update_monitor(
-        self, monitor_id: Any, body: Any = None, params: Any = None, headers: Any = None
+        self,
+        monitor_id: Any,
+        body: Any = None,
+        params: Any = None,
+        headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Updates a monitor's inputs, triggers, and actions.
@@ -94,12 +121,17 @@ class AlertingClient(NamespacedClient):
             _make_path("_plugins", "_alerting", "monitors", monitor_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
     @query_params()
     def delete_monitor(
-        self, monitor_id: Any, params: Any = None, headers: Any = None
+        self,
+        monitor_id: Any,
+        params: Any = None,
+        headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Deletes a specific monitor.
@@ -111,11 +143,16 @@ class AlertingClient(NamespacedClient):
             _make_path("_plugins", "_alerting", "monitors", monitor_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params()
     def get_destination(
-        self, destination_id: Any = None, params: Any = None, headers: Any = None
+        self,
+        destination_id: Any = None,
+        params: Any = None,
+        headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Returns the details of a specific destination.
@@ -131,11 +168,16 @@ class AlertingClient(NamespacedClient):
             ),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params()
     def create_destination(
-        self, body: Any = None, params: Any = None, headers: Any = None
+        self,
+        body: Any = None,
+        params: Any = None,
+        headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Creates a destination for slack, mail, or custom-webhook.
@@ -147,6 +189,7 @@ class AlertingClient(NamespacedClient):
             _make_path("_plugins", "_alerting", "destinations"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -157,6 +200,7 @@ class AlertingClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Updates a destination's inputs, triggers, and actions.
@@ -169,12 +213,17 @@ class AlertingClient(NamespacedClient):
             _make_path("_plugins", "_alerting", "destinations", destination_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
     @query_params()
     def delete_destination(
-        self, destination_id: Any, params: Any = None, headers: Any = None
+        self,
+        destination_id: Any,
+        params: Any = None,
+        headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Deletes a specific destination.
@@ -186,10 +235,13 @@ class AlertingClient(NamespacedClient):
             _make_path("_plugins", "_alerting", "destinations", destination_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params()
-    def get_alerts(self, params: Any = None, headers: Any = None) -> Any:
+    def get_alerts(
+        self, params: Any = None, headers: Any = None, allowed_mimetypes: Any = None
+    ) -> Any:
         """
         Returns all alerts.
 
@@ -199,11 +251,17 @@ class AlertingClient(NamespacedClient):
             _make_path("_plugins", "_alerting", "monitors", "alerts"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params()
     def acknowledge_alert(
-        self, monitor_id: Any, body: Any = None, params: Any = None, headers: Any = None
+        self,
+        monitor_id: Any,
+        body: Any = None,
+        params: Any = None,
+        headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Acknowledges an alert.
@@ -223,5 +281,6 @@ class AlertingClient(NamespacedClient):
             ),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )

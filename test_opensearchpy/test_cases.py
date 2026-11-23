@@ -48,6 +48,7 @@ class DummyTransport:
         params: Optional[Mapping[str, Any]] = None,
         body: Optional[bytes] = None,
         headers: Optional[Mapping[str, str]] = None,
+        allowed_mimetypes: Optional[Any] = None,
     ) -> Any:
         resp: Any = (200, {})
         if self.responses:

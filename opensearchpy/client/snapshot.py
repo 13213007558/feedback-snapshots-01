@@ -58,6 +58,7 @@ class SnapshotClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Creates a snapshot within an existing repository.
@@ -101,6 +102,7 @@ class SnapshotClient(NamespacedClient):
             _make_path("_snapshot", repository, snapshot),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -120,6 +122,7 @@ class SnapshotClient(NamespacedClient):
         snapshot: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Deletes a snapshot.
@@ -157,6 +160,7 @@ class SnapshotClient(NamespacedClient):
             _make_path("_snapshot", repository, snapshot),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -177,6 +181,7 @@ class SnapshotClient(NamespacedClient):
         snapshot: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns information about a snapshot.
@@ -228,6 +233,7 @@ class SnapshotClient(NamespacedClient):
             _make_path("_snapshot", repository, snapshot),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -246,6 +252,7 @@ class SnapshotClient(NamespacedClient):
         repository: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Deletes a snapshot repository.
@@ -282,6 +289,7 @@ class SnapshotClient(NamespacedClient):
             _make_path("_snapshot", repository),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -300,6 +308,7 @@ class SnapshotClient(NamespacedClient):
         repository: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns information about a snapshot repository.
@@ -329,7 +338,11 @@ class SnapshotClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return self.transport.perform_request(
-            "GET", _make_path("_snapshot", repository), params=params, headers=headers
+            "GET",
+            _make_path("_snapshot", repository),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -350,6 +363,7 @@ class SnapshotClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Creates a snapshot repository.
@@ -389,6 +403,7 @@ class SnapshotClient(NamespacedClient):
             _make_path("_snapshot", repository),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -410,6 +425,7 @@ class SnapshotClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Restores a snapshot.
@@ -454,6 +470,7 @@ class SnapshotClient(NamespacedClient):
             _make_path("_snapshot", repository, snapshot, "_restore"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -474,6 +491,7 @@ class SnapshotClient(NamespacedClient):
         snapshot: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns information about the status of a snapshot.
@@ -510,6 +528,7 @@ class SnapshotClient(NamespacedClient):
             _make_path("_snapshot", repository, snapshot, "_status"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -528,6 +547,7 @@ class SnapshotClient(NamespacedClient):
         repository: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Verifies a repository.
@@ -564,6 +584,7 @@ class SnapshotClient(NamespacedClient):
             _make_path("_snapshot", repository, "_verify"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -582,6 +603,7 @@ class SnapshotClient(NamespacedClient):
         repository: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Removes any stale data from a snapshot repository.
@@ -617,6 +639,7 @@ class SnapshotClient(NamespacedClient):
             _make_path("_snapshot", repository, "_cleanup"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -637,6 +660,7 @@ class SnapshotClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Creates a clone of all or part of a snapshot in the same repository as the
@@ -677,5 +701,6 @@ class SnapshotClient(NamespacedClient):
             _make_path("_snapshot", repository, snapshot, "_clone", target_snapshot),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )

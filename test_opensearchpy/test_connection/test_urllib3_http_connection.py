@@ -429,3 +429,66 @@ class TestSignerWithFrozenCredentials(TestUrllib3HttpConnection):
         self.assertIn("X-Amz-Security-Token", headers)
         self.assertIn("X-Amz-Content-SHA256", headers)
         mock_session.get_frozen_credentials.assert_called_once()
+
+
+class TestResponseTracePolicy:
+    """The DEBUG trace must not parse a response the request rejects."""
+
+    plugin_mimetype = "application/vnd.opensearch.plugin+json"
+
+    def _transport(self, content_type: str) -> Any:
+        from opensearchpy import Transport
+        from opensearchpy.exceptions import UnsupportedResponseFormatError
+        from opensearchpy.serializer import Serializer
+
+        class PluginSerializer(Serializer):
+            mimetype = self.plugin_mimetype
+
+            def loads(self, s: str) -> Any:
+                raise AssertionError("custom decoder must not be called")
+
+            def dumps(self, data: Any) -> Any:
+                return str(data)
+
+        transport = Transport(
+            [{"host": "localhost", "port": 9200}],
+            serializers={self.plugin_mimetype: PluginSerializer()},
+        )
+        connection = transport.get_connection()
+        connection.pool = Mock()
+        connection.pool.urlopen.return_value = urllib3.HTTPResponse(
+            status=200,
+            headers={"content-type": content_type},
+            body=b'{"answer":42}',
+        )
+        return transport, UnsupportedResponseFormatError
+
+    def test_trace_preview_skipped_for_rejected_response(self) -> None:
+        transport, error = self._transport(self.plugin_mimetype)
+
+        with patch(
+            "opensearchpy.connection.base.Connection._pretty_json",
+            autospec=True,
+            side_effect=Connection._pretty_json,
+        ) as pretty:
+            with patch("opensearchpy.connection.base.tracer") as tracer:
+                tracer.isEnabledFor.return_value = True
+                tracer.handlers = [MagicMock()]
+                with pytest.raises(error):
+                    transport.perform_request(
+                        "GET", "/_search", allowed_mimetypes=("application/json",)
+                    )
+
+        pretty.assert_not_called()
+
+    def test_trace_preview_kept_for_allowed_response(self) -> None:
+        transport, _ = self._transport("application/json")
+
+        with patch("opensearchpy.connection.base.tracer") as tracer:
+            tracer.isEnabledFor.return_value = True
+            tracer.handlers = [MagicMock()]
+            result = transport.perform_request(
+                "GET", "/_search", allowed_mimetypes=("application/json",)
+            )
+
+        assert result == {"answer": 42}

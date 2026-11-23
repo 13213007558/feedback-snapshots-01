@@ -29,6 +29,7 @@ class NotificationsClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Create channel configuration.
@@ -54,6 +55,7 @@ class NotificationsClient(NamespacedClient):
             "/_plugins/_notifications/configs",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -64,6 +66,7 @@ class NotificationsClient(NamespacedClient):
         config_id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Delete a channel configuration.
@@ -90,6 +93,7 @@ class NotificationsClient(NamespacedClient):
             _make_path("_plugins", "_notifications", "configs", config_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -106,6 +110,7 @@ class NotificationsClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Delete multiple channel configurations.
@@ -127,7 +132,11 @@ class NotificationsClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return await self.transport.perform_request(
-            "DELETE", "/_plugins/_notifications/configs", params=params, headers=headers
+            "DELETE",
+            "/_plugins/_notifications/configs",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -137,6 +146,7 @@ class NotificationsClient(NamespacedClient):
         config_id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Get a specific channel configuration.
@@ -162,6 +172,7 @@ class NotificationsClient(NamespacedClient):
             _make_path("_plugins", "_notifications", "configs", config_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -217,6 +228,7 @@ class NotificationsClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Get multiple channel configurations with filtering.
@@ -244,6 +256,7 @@ class NotificationsClient(NamespacedClient):
             "/_plugins/_notifications/configs",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -253,6 +266,7 @@ class NotificationsClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         List supported channel configurations.
@@ -271,7 +285,11 @@ class NotificationsClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return await self.transport.perform_request(
-            "GET", "/_plugins/_notifications/features", params=params, headers=headers
+            "GET",
+            "/_plugins/_notifications/features",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -281,6 +299,7 @@ class NotificationsClient(NamespacedClient):
         config_id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Send a test notification.
@@ -306,6 +325,7 @@ class NotificationsClient(NamespacedClient):
             _make_path("_plugins", "_notifications", "feature", "test", config_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -316,6 +336,7 @@ class NotificationsClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Update channel configuration.
@@ -342,6 +363,7 @@ class NotificationsClient(NamespacedClient):
             _make_path("_plugins", "_notifications", "configs", config_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -351,6 +373,7 @@ class NotificationsClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         List created notification channels.
@@ -369,5 +392,9 @@ class NotificationsClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return await self.transport.perform_request(
-            "GET", "/_plugins/_notifications/channels", params=params, headers=headers
+            "GET",
+            "/_plugins/_notifications/channels",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )

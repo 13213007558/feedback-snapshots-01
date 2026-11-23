@@ -329,6 +329,26 @@ class API:
     def __init__(self, namespace: str, name: str, definition: Any) -> None:
         self.namespace = namespace
         self.name = name
+        self.is_plugin = bool(
+            list((CODE_ROOT / "opensearchpy/_async/plugins").glob(f"{namespace}.py"))
+        )
+
+    @property
+    def allowed_mimetypes_default(self) -> str:
+        """
+        Response media types approved by default for this operation.
+
+        Plugin namespaces keep the registered decoders available. A few
+        public endpoints answer with text unless ``format=json`` is given,
+        so their default accepts both text and JSON.
+        """
+        if self.is_plugin:
+            return "None"
+        if self.namespace == "cat" or (
+            self.namespace == "nodes" and self.name == "hot_threads"
+        ):
+            return '("application/json", "text/plain")'
+        return '("application/json",)' 
 
         # overwrite the dict to maintain key order
         definition["params"] = {
@@ -551,6 +571,7 @@ class API:
             api=self,
             substitutions={v: k for k, v in SUBSTITUTIONS.items()},
             global_query_params=GLOBAL_QUERY_PARAMS,
+            allowed_mimetypes_default=api.allowed_mimetypes_default,
         )
 
 

@@ -238,6 +238,7 @@ class RequestsHttpConnection(Connection):
                 duration,
                 response.status_code,
                 raw_data,
+                content_type=response.headers.get("Content-Type"),
             )
             self._raise_error(
                 response.status_code,
@@ -253,6 +254,7 @@ class RequestsHttpConnection(Connection):
             response.status_code,
             raw_data,
             duration,
+            content_type=response.headers.get("Content-Type"),
         )
 
         return response.status_code, response.headers, raw_data

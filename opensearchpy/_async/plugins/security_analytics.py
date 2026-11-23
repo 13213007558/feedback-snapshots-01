@@ -46,6 +46,7 @@ class SecurityAnalyticsClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Retrieve alerts related to a specific detector type or detector ID.
@@ -92,6 +93,7 @@ class SecurityAnalyticsClient(NamespacedClient):
             "/_plugins/_security_analytics/alerts",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -119,6 +121,7 @@ class SecurityAnalyticsClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Retrieve findings related to a specific detector type or detector ID.
@@ -173,6 +176,7 @@ class SecurityAnalyticsClient(NamespacedClient):
             "/_plugins/_security_analytics/findings/_search",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -191,6 +195,7 @@ class SecurityAnalyticsClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         List correlations for a finding.
@@ -221,4 +226,5 @@ class SecurityAnalyticsClient(NamespacedClient):
             "/_plugins/_security_analytics/findings/correlate",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )

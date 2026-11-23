@@ -29,6 +29,7 @@ class WlmClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Creates a new query group and sets the resource limits for the new query group.
@@ -50,7 +51,12 @@ class WlmClient(NamespacedClient):
             raise ValueError("Empty value passed for a required argument 'body'.")
 
         return await self.transport.perform_request(
-            "PUT", "/_wlm/query_group", params=params, headers=headers, body=body
+            "PUT",
+            "/_wlm/query_group",
+            params=params,
+            headers=headers,
+            body=body,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -60,6 +66,7 @@ class WlmClient(NamespacedClient):
         name: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Deletes the specified query group.
@@ -86,6 +93,7 @@ class WlmClient(NamespacedClient):
             _make_path("_wlm", "query_group", name),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -95,6 +103,7 @@ class WlmClient(NamespacedClient):
         name: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Retrieves the specified query group. If no query group is specified, all query
@@ -119,6 +128,7 @@ class WlmClient(NamespacedClient):
             _make_path("_wlm", "query_group", name),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -129,6 +139,7 @@ class WlmClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Updates the specified query group.
@@ -156,5 +167,6 @@ class WlmClient(NamespacedClient):
             _make_path("_wlm", "query_group", name),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )

@@ -209,6 +209,12 @@ class AsyncOpenSearch(Client):
         :arg kwargs: any additional arguments will be passed on to the
             :class:`~opensearchpy.Transport` class and, subsequently, to the
             :class:`~opensearchpy.Connection` instances.
+
+        Response media types are approved per operation. The client methods
+        default to JSON only, while plugin namespaces keep the decoders
+        registered through ``serializers=`` available. Every method also
+        accepts ``allowed_mimetypes=`` for this one request. The setting stays
+        local and is never sent to the server.
         """
         super().__init__(hosts, transport_class, **kwargs)
 
@@ -265,6 +271,7 @@ class AsyncOpenSearch(Client):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns whether the cluster is running.
@@ -284,7 +291,11 @@ class AsyncOpenSearch(Client):
         """
         try:
             return await self.transport.perform_request(
-                "HEAD", "/", params=params, headers=headers
+                "HEAD",
+                "/",
+                params=params,
+                headers=headers,
+                allowed_mimetypes=allowed_mimetypes,
             )
         except TransportError:
             return False
@@ -295,6 +306,7 @@ class AsyncOpenSearch(Client):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns basic information about the cluster.
@@ -313,7 +325,11 @@ class AsyncOpenSearch(Client):
             libraries that do not accept a request body for non-POST requests.
         """
         return await self.transport.perform_request(
-            "GET", "/", params=params, headers=headers
+            "GET",
+            "/",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -338,6 +354,7 @@ class AsyncOpenSearch(Client):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Creates a new document in the index.  Returns a 409 response when a document
@@ -393,7 +410,12 @@ class AsyncOpenSearch(Client):
         path = _make_path(index, "_create", id)
 
         return await self.transport.perform_request(
-            "PUT", path, params=params, headers=headers, body=body
+            "PUT",
+            path,
+            params=params,
+            headers=headers,
+            body=body,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -422,6 +444,7 @@ class AsyncOpenSearch(Client):
         id: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Creates or updates a document in an index.
@@ -486,6 +509,7 @@ class AsyncOpenSearch(Client):
             _make_path(index, "_doc", id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -512,6 +536,7 @@ class AsyncOpenSearch(Client):
         index: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Allows to perform multiple index/update/delete operations in a single request.
@@ -568,6 +593,7 @@ class AsyncOpenSearch(Client):
             _make_path(index, "_bulk"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -579,6 +605,7 @@ class AsyncOpenSearch(Client):
         scroll_id: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Explicitly clears the search context for a scroll.
@@ -608,7 +635,12 @@ class AsyncOpenSearch(Client):
             params["scroll_id"] = scroll_id
 
         return await self.transport.perform_request(
-            "DELETE", "/_search/scroll", params=params, headers=headers, body=body
+            "DELETE",
+            "/_search/scroll",
+            params=params,
+            headers=headers,
+            body=body,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -639,6 +671,7 @@ class AsyncOpenSearch(Client):
         index: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns number of documents matching a query.
@@ -701,6 +734,7 @@ class AsyncOpenSearch(Client):
             _make_path(index, "_count"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -726,6 +760,7 @@ class AsyncOpenSearch(Client):
         id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Removes a document from the index.
@@ -770,7 +805,11 @@ class AsyncOpenSearch(Client):
                 raise ValueError("Empty value passed for a required argument.")
 
         return await self.transport.perform_request(
-            "DELETE", _make_path(index, "_doc", id), params=params, headers=headers
+            "DELETE",
+            _make_path(index, "_doc", id),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -820,6 +859,7 @@ class AsyncOpenSearch(Client):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Deletes documents matching the provided query.
@@ -930,6 +970,7 @@ class AsyncOpenSearch(Client):
             _make_path(index, "_delete_by_query"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -942,6 +983,7 @@ class AsyncOpenSearch(Client):
         task_id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Changes the number of requests per second for a particular Delete By Query
@@ -971,6 +1013,7 @@ class AsyncOpenSearch(Client):
             _make_path("_delete_by_query", task_id, "_rethrottle"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -989,6 +1032,7 @@ class AsyncOpenSearch(Client):
         id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Deletes a script.
@@ -1020,7 +1064,11 @@ class AsyncOpenSearch(Client):
             raise ValueError("Empty value passed for a required argument 'id'.")
 
         return await self.transport.perform_request(
-            "DELETE", _make_path("_scripts", id), params=params, headers=headers
+            "DELETE",
+            _make_path("_scripts", id),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -1047,6 +1095,7 @@ class AsyncOpenSearch(Client):
         id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns information about whether a document exists in an index.
@@ -1095,7 +1144,11 @@ class AsyncOpenSearch(Client):
                 raise ValueError("Empty value passed for a required argument.")
 
         return await self.transport.perform_request(
-            "HEAD", _make_path(index, "_doc", id), params=params, headers=headers
+            "HEAD",
+            _make_path(index, "_doc", id),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -1121,6 +1174,7 @@ class AsyncOpenSearch(Client):
         id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns information about whether a document source exists in an index.
@@ -1167,7 +1221,11 @@ class AsyncOpenSearch(Client):
         path = _make_path(index, "_source", id)
 
         return await self.transport.perform_request(
-            "HEAD", path, params=params, headers=headers
+            "HEAD",
+            path,
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -1197,6 +1255,7 @@ class AsyncOpenSearch(Client):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns information about why a specific document matches (or doesn't match) a
@@ -1250,7 +1309,12 @@ class AsyncOpenSearch(Client):
         path = _make_path(index, "_explain", id)
 
         return await self.transport.perform_request(
-            "POST", path, params=params, headers=headers, body=body
+            "POST",
+            path,
+            params=params,
+            headers=headers,
+            body=body,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -1272,6 +1336,7 @@ class AsyncOpenSearch(Client):
         index: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns the information about the capabilities of fields among multiple
@@ -1316,6 +1381,7 @@ class AsyncOpenSearch(Client):
             _make_path(index, "_field_caps"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -1343,6 +1409,7 @@ class AsyncOpenSearch(Client):
         id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns a document.
@@ -1391,7 +1458,11 @@ class AsyncOpenSearch(Client):
                 raise ValueError("Empty value passed for a required argument.")
 
         return await self.transport.perform_request(
-            "GET", _make_path(index, "_doc", id), params=params, headers=headers
+            "GET",
+            _make_path(index, "_doc", id),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -1409,6 +1480,7 @@ class AsyncOpenSearch(Client):
         id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns a script.
@@ -1436,7 +1508,11 @@ class AsyncOpenSearch(Client):
             raise ValueError("Empty value passed for a required argument 'id'.")
 
         return await self.transport.perform_request(
-            "GET", _make_path("_scripts", id), params=params, headers=headers
+            "GET",
+            _make_path("_scripts", id),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -1462,6 +1538,7 @@ class AsyncOpenSearch(Client):
         id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns the source of a document.
@@ -1508,7 +1585,11 @@ class AsyncOpenSearch(Client):
         path = _make_path(index, "_source", id)
 
         return await self.transport.perform_request(
-            "GET", path, params=params, headers=headers
+            "GET",
+            path,
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -1533,6 +1614,7 @@ class AsyncOpenSearch(Client):
         index: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Allows to get multiple documents in one request.
@@ -1584,6 +1666,7 @@ class AsyncOpenSearch(Client):
             _make_path(index, "_mget"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -1608,6 +1691,7 @@ class AsyncOpenSearch(Client):
         index: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Allows to execute several search operations in one request.
@@ -1661,6 +1745,7 @@ class AsyncOpenSearch(Client):
             _make_path(index, "_msearch"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -1683,6 +1768,7 @@ class AsyncOpenSearch(Client):
         index: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Allows to execute several search template operations in one request.
@@ -1726,6 +1812,7 @@ class AsyncOpenSearch(Client):
             _make_path(index, "_msearch", "template"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -1755,6 +1842,7 @@ class AsyncOpenSearch(Client):
         index: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns multiple termvectors in one request.
@@ -1812,7 +1900,12 @@ class AsyncOpenSearch(Client):
         path = _make_path(index, "_mtermvectors")
 
         return await self.transport.perform_request(
-            "POST", path, params=params, headers=headers, body=body
+            "POST",
+            path,
+            params=params,
+            headers=headers,
+            body=body,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -1833,6 +1926,7 @@ class AsyncOpenSearch(Client):
         context: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Creates or updates a script.
@@ -1874,6 +1968,7 @@ class AsyncOpenSearch(Client):
             _make_path("_scripts", id, context),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -1895,6 +1990,7 @@ class AsyncOpenSearch(Client):
         index: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Allows to evaluate the quality of ranked search results over a set of typical
@@ -1940,6 +2036,7 @@ class AsyncOpenSearch(Client):
             _make_path(index, "_rank_eval"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -1965,6 +2062,7 @@ class AsyncOpenSearch(Client):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Allows to copy documents from one index to another, optionally filtering the
@@ -2009,7 +2107,12 @@ class AsyncOpenSearch(Client):
             raise ValueError("Empty value passed for a required argument 'body'.")
 
         return await self.transport.perform_request(
-            "POST", "/_reindex", params=params, headers=headers, body=body
+            "POST",
+            "/_reindex",
+            params=params,
+            headers=headers,
+            body=body,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -2021,6 +2124,7 @@ class AsyncOpenSearch(Client):
         task_id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Changes the number of requests per second for a particular reindex operation.
@@ -2049,6 +2153,7 @@ class AsyncOpenSearch(Client):
             _make_path("_reindex", task_id, "_rethrottle"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -2059,6 +2164,7 @@ class AsyncOpenSearch(Client):
         id: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Allows to use the Mustache language to pre-render a search definition.
@@ -2084,6 +2190,7 @@ class AsyncOpenSearch(Client):
             _make_path("_render", "template", id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -2094,6 +2201,7 @@ class AsyncOpenSearch(Client):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Allows an arbitrary script to be executed and a result to be returned.
@@ -2117,6 +2225,7 @@ class AsyncOpenSearch(Client):
             "/_scripts/painless/_execute",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -2136,6 +2245,7 @@ class AsyncOpenSearch(Client):
         scroll_id: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Allows to retrieve a large numbers of results from a single search request.
@@ -2167,7 +2277,12 @@ class AsyncOpenSearch(Client):
             params["scroll_id"] = scroll_id
 
         return await self.transport.perform_request(
-            "POST", "/_search/scroll", params=params, headers=headers, body=body
+            "POST",
+            "/_search/scroll",
+            params=params,
+            headers=headers,
+            body=body,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -2231,6 +2346,7 @@ class AsyncOpenSearch(Client):
         index: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns results matching a query.
@@ -2442,6 +2558,7 @@ class AsyncOpenSearch(Client):
             _make_path(index, "_search"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -2465,6 +2582,7 @@ class AsyncOpenSearch(Client):
         index: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns information about the indexes and shards that a search request would be
@@ -2509,6 +2627,7 @@ class AsyncOpenSearch(Client):
             _make_path(index, "_search_shards"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -2541,6 +2660,7 @@ class AsyncOpenSearch(Client):
         index: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Allows to use the Mustache language to pre-render a search definition.
@@ -2605,6 +2725,7 @@ class AsyncOpenSearch(Client):
             _make_path(index, "_search", "template"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -2634,6 +2755,7 @@ class AsyncOpenSearch(Client):
         id: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns information and statistics about terms in the fields of a particular
@@ -2692,7 +2814,12 @@ class AsyncOpenSearch(Client):
         path = _make_path(index, "_termvectors", id)
 
         return await self.transport.perform_request(
-            "POST", path, params=params, headers=headers, body=body
+            "POST",
+            path,
+            params=params,
+            headers=headers,
+            body=body,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -2722,6 +2849,7 @@ class AsyncOpenSearch(Client):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Updates a document with a script or partial document.
@@ -2780,7 +2908,12 @@ class AsyncOpenSearch(Client):
         path = _make_path(index, "_update", id)
 
         return await self.transport.perform_request(
-            "POST", path, params=params, headers=headers, body=body
+            "POST",
+            path,
+            params=params,
+            headers=headers,
+            body=body,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -2831,6 +2964,7 @@ class AsyncOpenSearch(Client):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Performs an update on every document in the index without changing the source,
@@ -2945,6 +3079,7 @@ class AsyncOpenSearch(Client):
             _make_path(index, "_update_by_query"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -2957,6 +3092,7 @@ class AsyncOpenSearch(Client):
         task_id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Changes the number of requests per second for a particular Update By Query
@@ -2986,6 +3122,7 @@ class AsyncOpenSearch(Client):
             _make_path("_update_by_query", task_id, "_rethrottle"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -2994,6 +3131,7 @@ class AsyncOpenSearch(Client):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns all script contexts.
@@ -3012,7 +3150,11 @@ class AsyncOpenSearch(Client):
             libraries that do not accept a request body for non-POST requests.
         """
         return await self.transport.perform_request(
-            "GET", "/_script_context", params=params, headers=headers
+            "GET",
+            "/_script_context",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -3021,6 +3163,7 @@ class AsyncOpenSearch(Client):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns available script types, languages and contexts.
@@ -3039,7 +3182,11 @@ class AsyncOpenSearch(Client):
             libraries that do not accept a request body for non-POST requests.
         """
         return await self.transport.perform_request(
-            "GET", "/_script_language", params=params, headers=headers
+            "GET",
+            "/_script_language",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -3060,6 +3207,7 @@ class AsyncOpenSearch(Client):
         index: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Creates point in time context.
@@ -3096,6 +3244,7 @@ class AsyncOpenSearch(Client):
             _make_path(index, "_search", "point_in_time"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -3104,6 +3253,7 @@ class AsyncOpenSearch(Client):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Deletes all active point in time searches.
@@ -3122,7 +3272,11 @@ class AsyncOpenSearch(Client):
             libraries that do not accept a request body for non-POST requests.
         """
         return await self.transport.perform_request(
-            "DELETE", "/_search/point_in_time/_all", params=params, headers=headers
+            "DELETE",
+            "/_search/point_in_time/_all",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -3132,6 +3286,7 @@ class AsyncOpenSearch(Client):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Deletes one or more point in time searches based on the IDs passed.
@@ -3155,6 +3310,7 @@ class AsyncOpenSearch(Client):
             "/_search/point_in_time",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -3164,6 +3320,7 @@ class AsyncOpenSearch(Client):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Lists all active point in time searches.
@@ -3182,7 +3339,11 @@ class AsyncOpenSearch(Client):
             libraries that do not accept a request body for non-POST requests.
         """
         return await self.transport.perform_request(
-            "GET", "/_search/point_in_time/_all", params=params, headers=headers
+            "GET",
+            "/_search/point_in_time/_all",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -3210,6 +3371,7 @@ class AsyncOpenSearch(Client):
         index: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Allows to perform multiple index/update/delete operations using request
@@ -3272,5 +3434,6 @@ class AsyncOpenSearch(Client):
             _make_path(index, "_bulk", "stream"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )

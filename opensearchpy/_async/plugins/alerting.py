@@ -19,6 +19,7 @@ class AlertingClient(NamespacedClient):
         body: Any,
         params: Union[Any, None] = None,
         headers: Union[Any, None] = None,
+        allowed_mimetypes: Any = None,
     ) -> Union[bool, Any]:
         """
         Returns the search result for a monitor.
@@ -30,6 +31,7 @@ class AlertingClient(NamespacedClient):
             _make_path("_plugins", "_alerting", "monitors", "_search"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -39,6 +41,7 @@ class AlertingClient(NamespacedClient):
         monitor_id: Any,
         params: Union[Any, None] = None,
         headers: Union[Any, None] = None,
+        allowed_mimetypes: Any = None,
     ) -> Union[bool, Any]:
         """
         Returns the details of a specific monitor.
@@ -50,6 +53,7 @@ class AlertingClient(NamespacedClient):
             _make_path("_plugins", "_alerting", "monitors", monitor_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("dryrun")
@@ -58,6 +62,7 @@ class AlertingClient(NamespacedClient):
         monitor_id: Any,
         params: Union[Any, None] = None,
         headers: Union[Any, None] = None,
+        allowed_mimetypes: Any = None,
     ) -> Union[bool, Any]:
         """
         Runs/Executes a specific monitor.
@@ -70,6 +75,7 @@ class AlertingClient(NamespacedClient):
             _make_path("_plugins", "_alerting", "monitors", monitor_id, "_execute"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params()
@@ -78,6 +84,7 @@ class AlertingClient(NamespacedClient):
         body: Union[Any, None] = None,
         params: Union[Any, None] = None,
         headers: Union[Any, None] = None,
+        allowed_mimetypes: Any = None,
     ) -> Union[bool, Any]:
         """
         Creates a monitor with inputs, triggers, and actions.
@@ -89,6 +96,7 @@ class AlertingClient(NamespacedClient):
             _make_path("_plugins", "_alerting", "monitors"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -99,6 +107,7 @@ class AlertingClient(NamespacedClient):
         body: Union[Any, None] = None,
         params: Union[Any, None] = None,
         headers: Union[Any, None] = None,
+        allowed_mimetypes: Any = None,
     ) -> Union[bool, Any]:
         """
         Updates a monitor's inputs, triggers, and actions.
@@ -111,6 +120,7 @@ class AlertingClient(NamespacedClient):
             _make_path("_plugins", "_alerting", "monitors", monitor_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -120,6 +130,7 @@ class AlertingClient(NamespacedClient):
         monitor_id: Any,
         params: Union[Any, None] = None,
         headers: Union[Any, None] = None,
+        allowed_mimetypes: Any = None,
     ) -> Union[bool, Any]:
         """
         Deletes a specific monitor.
@@ -131,6 +142,7 @@ class AlertingClient(NamespacedClient):
             _make_path("_plugins", "_alerting", "monitors", monitor_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params()
@@ -139,6 +151,7 @@ class AlertingClient(NamespacedClient):
         destination_id: Union[Any, None] = None,
         params: Union[Any, None] = None,
         headers: Union[Any, None] = None,
+        allowed_mimetypes: Any = None,
     ) -> Union[bool, Any]:
         """
         Returns the details of a specific destination.
@@ -154,6 +167,7 @@ class AlertingClient(NamespacedClient):
             ),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params()
@@ -162,6 +176,7 @@ class AlertingClient(NamespacedClient):
         body: Union[Any, None] = None,
         params: Union[Any, None] = None,
         headers: Union[Any, None] = None,
+        allowed_mimetypes: Any = None,
     ) -> Union[bool, Any]:
         """
         Creates a destination for slack, mail, or custom-webhook.
@@ -173,6 +188,7 @@ class AlertingClient(NamespacedClient):
             _make_path("_plugins", "_alerting", "destinations"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -183,6 +199,7 @@ class AlertingClient(NamespacedClient):
         body: Union[Any, None] = None,
         params: Union[Any, None] = None,
         headers: Union[Any, None] = None,
+        allowed_mimetypes: Any = None,
     ) -> Union[bool, Any]:
         """
         Updates a destination's inputs, triggers, and actions.
@@ -195,6 +212,7 @@ class AlertingClient(NamespacedClient):
             _make_path("_plugins", "_alerting", "destinations", destination_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -204,6 +222,7 @@ class AlertingClient(NamespacedClient):
         destination_id: Any,
         params: Union[Any, None] = None,
         headers: Union[Any, None] = None,
+        allowed_mimetypes: Any = None,
     ) -> Union[bool, Any]:
         """
         Deletes a specific destination.
@@ -215,11 +234,15 @@ class AlertingClient(NamespacedClient):
             _make_path("_plugins", "_alerting", "destinations", destination_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params()
     async def get_alerts(
-        self, params: Union[Any, None] = None, headers: Union[Any, None] = None
+        self,
+        params: Union[Any, None] = None,
+        headers: Union[Any, None] = None,
+        allowed_mimetypes: Any = None,
     ) -> Union[bool, Any]:
         """
         Returns all alerts.
@@ -230,6 +253,7 @@ class AlertingClient(NamespacedClient):
             _make_path("_plugins", "_alerting", "monitors", "alerts"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params()
@@ -239,6 +263,7 @@ class AlertingClient(NamespacedClient):
         body: Union[Any, None] = None,
         params: Union[Any, None] = None,
         headers: Union[Any, None] = None,
+        allowed_mimetypes: Any = None,
     ) -> Union[bool, Any]:
         """
         Acknowledges an alert.
@@ -258,5 +283,6 @@ class AlertingClient(NamespacedClient):
             ),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )

@@ -57,6 +57,7 @@ class DanglingIndicesClient(NamespacedClient):
         index_uuid: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Deletes the specified dangling index.
@@ -91,6 +92,7 @@ class DanglingIndicesClient(NamespacedClient):
             _make_path("_dangling", index_uuid),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -110,6 +112,7 @@ class DanglingIndicesClient(NamespacedClient):
         index_uuid: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Imports the specified dangling index.
@@ -140,7 +143,11 @@ class DanglingIndicesClient(NamespacedClient):
             raise ValueError("Empty value passed for a required argument 'index_uuid'.")
 
         return self.transport.perform_request(
-            "POST", _make_path("_dangling", index_uuid), params=params, headers=headers
+            "POST",
+            _make_path("_dangling", index_uuid),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -149,6 +156,7 @@ class DanglingIndicesClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns all dangling indexes.
@@ -167,5 +175,9 @@ class DanglingIndicesClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return self.transport.perform_request(
-            "GET", "/_dangling", params=params, headers=headers
+            "GET",
+            "/_dangling",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )

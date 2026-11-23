@@ -28,6 +28,7 @@ class LtrClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Retrieves cache statistics for all feature stores.
@@ -46,7 +47,11 @@ class LtrClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return await self.transport.perform_request(
-            "GET", "/_ltr/_cachestats", params=params, headers=headers
+            "GET",
+            "/_ltr/_cachestats",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -56,6 +61,7 @@ class LtrClient(NamespacedClient):
         store: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Clears the store caches.
@@ -80,6 +86,7 @@ class LtrClient(NamespacedClient):
             _make_path("_ltr", store, "_clearcache"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -88,6 +95,7 @@ class LtrClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Creates the default feature store.
@@ -106,7 +114,11 @@ class LtrClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return await self.transport.perform_request(
-            "PUT", "/_ltr", params=params, headers=headers
+            "PUT",
+            "/_ltr",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -116,6 +128,7 @@ class LtrClient(NamespacedClient):
         store: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Creates a new feature store with the specified name.
@@ -138,7 +151,11 @@ class LtrClient(NamespacedClient):
             raise ValueError("Empty value passed for a required argument 'store'.")
 
         return await self.transport.perform_request(
-            "PUT", _make_path("_ltr", store), params=params, headers=headers
+            "PUT",
+            _make_path("_ltr", store),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -147,6 +164,7 @@ class LtrClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Deletes the default feature store.
@@ -165,7 +183,11 @@ class LtrClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return await self.transport.perform_request(
-            "DELETE", "/_ltr", params=params, headers=headers
+            "DELETE",
+            "/_ltr",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -175,6 +197,7 @@ class LtrClient(NamespacedClient):
         store: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Deletes a feature store with the specified name.
@@ -197,7 +220,11 @@ class LtrClient(NamespacedClient):
             raise ValueError("Empty value passed for a required argument 'store'.")
 
         return await self.transport.perform_request(
-            "DELETE", _make_path("_ltr", store), params=params, headers=headers
+            "DELETE",
+            _make_path("_ltr", store),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -207,6 +234,7 @@ class LtrClient(NamespacedClient):
         store: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Checks if a store exists.
@@ -229,7 +257,11 @@ class LtrClient(NamespacedClient):
             raise ValueError("Empty value passed for a required argument 'store'.")
 
         return await self.transport.perform_request(
-            "GET", _make_path("_ltr", store), params=params, headers=headers
+            "GET",
+            _make_path("_ltr", store),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -238,6 +270,7 @@ class LtrClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Lists all available feature stores.
@@ -256,7 +289,11 @@ class LtrClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return await self.transport.perform_request(
-            "GET", "/_ltr", params=params, headers=headers
+            "GET",
+            "/_ltr",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source", "timeout")
@@ -267,6 +304,7 @@ class LtrClient(NamespacedClient):
         stat: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Provides information about the current status of the LTR plugin.
@@ -296,6 +334,7 @@ class LtrClient(NamespacedClient):
             _make_path("_plugins", "_ltr", node_id, "stats", stat),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -316,6 +355,7 @@ class LtrClient(NamespacedClient):
         store: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Add features to an existing feature set in the default feature store.
@@ -349,6 +389,7 @@ class LtrClient(NamespacedClient):
             _make_path("_ltr", store, "_featureset", name, "_addfeatures"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -370,6 +411,7 @@ class LtrClient(NamespacedClient):
         store: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Add features to an existing feature set in the default feature store.
@@ -406,6 +448,7 @@ class LtrClient(NamespacedClient):
             _make_path("_ltr", store, "_featureset", name, "_addfeatures", query),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "routing", "source")
@@ -417,6 +460,7 @@ class LtrClient(NamespacedClient):
         store: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Create or update a feature in the default feature store.
@@ -446,6 +490,7 @@ class LtrClient(NamespacedClient):
             _make_path("_ltr", store, "_feature", id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -458,6 +503,7 @@ class LtrClient(NamespacedClient):
         store: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Create or update a feature set in the default feature store.
@@ -487,6 +533,7 @@ class LtrClient(NamespacedClient):
             _make_path("_ltr", store, "_featureset", id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -499,6 +546,7 @@ class LtrClient(NamespacedClient):
         store: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Create or update a model in the default feature store.
@@ -528,6 +576,7 @@ class LtrClient(NamespacedClient):
             _make_path("_ltr", store, "_model", id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -540,6 +589,7 @@ class LtrClient(NamespacedClient):
         store: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Create a model from an existing feature set in the default feature store.
@@ -570,6 +620,7 @@ class LtrClient(NamespacedClient):
             _make_path("_ltr", store, "_featureset", name, "_createmodel"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -581,6 +632,7 @@ class LtrClient(NamespacedClient):
         store: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Delete a feature from the default feature store.
@@ -608,6 +660,7 @@ class LtrClient(NamespacedClient):
             _make_path("_ltr", store, "_feature", id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -618,6 +671,7 @@ class LtrClient(NamespacedClient):
         store: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Delete a feature set from the default feature store.
@@ -645,6 +699,7 @@ class LtrClient(NamespacedClient):
             _make_path("_ltr", store, "_featureset", id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -655,6 +710,7 @@ class LtrClient(NamespacedClient):
         store: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Delete a model from the default feature store.
@@ -682,6 +738,7 @@ class LtrClient(NamespacedClient):
             _make_path("_ltr", store, "_model", id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -692,6 +749,7 @@ class LtrClient(NamespacedClient):
         store: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Get a feature from the default feature store.
@@ -719,6 +777,7 @@ class LtrClient(NamespacedClient):
             _make_path("_ltr", store, "_feature", id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -729,6 +788,7 @@ class LtrClient(NamespacedClient):
         store: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Get a feature set from the default feature store.
@@ -756,6 +816,7 @@ class LtrClient(NamespacedClient):
             _make_path("_ltr", store, "_featureset", id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -766,6 +827,7 @@ class LtrClient(NamespacedClient):
         store: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Get a model from the default feature store.
@@ -793,6 +855,7 @@ class LtrClient(NamespacedClient):
             _make_path("_ltr", store, "_model", id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -811,6 +874,7 @@ class LtrClient(NamespacedClient):
         store: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Search for features in a feature store.
@@ -838,7 +902,11 @@ class LtrClient(NamespacedClient):
             params["from"] = params.pop("from_")
 
         return await self.transport.perform_request(
-            "GET", _make_path("_ltr", store, "_feature"), params=params, headers=headers
+            "GET",
+            _make_path("_ltr", store, "_feature"),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -857,6 +925,7 @@ class LtrClient(NamespacedClient):
         store: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Search for feature sets in a feature store.
@@ -888,6 +957,7 @@ class LtrClient(NamespacedClient):
             _make_path("_ltr", store, "_featureset"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -906,6 +976,7 @@ class LtrClient(NamespacedClient):
         store: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Search for models in a feature store.
@@ -933,7 +1004,11 @@ class LtrClient(NamespacedClient):
             params["from"] = params.pop("from_")
 
         return await self.transport.perform_request(
-            "GET", _make_path("_ltr", store, "_model"), params=params, headers=headers
+            "GET",
+            _make_path("_ltr", store, "_model"),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "routing", "source")
@@ -945,6 +1020,7 @@ class LtrClient(NamespacedClient):
         store: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Update a feature in the default feature store.
@@ -974,6 +1050,7 @@ class LtrClient(NamespacedClient):
             _make_path("_ltr", store, "_feature", id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -986,6 +1063,7 @@ class LtrClient(NamespacedClient):
         store: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Update a feature set in the default feature store.
@@ -1015,5 +1093,6 @@ class LtrClient(NamespacedClient):
             _make_path("_ltr", store, "_featureset", id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )

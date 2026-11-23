@@ -16,7 +16,12 @@ from ..client.utils import SKIP_IN_PATH, NamespacedClient, _make_path, query_par
 class IndexManagementClient(NamespacedClient):
     @query_params()
     async def put_policy(
-        self, policy: Any, body: Any = None, params: Any = None, headers: Any = None
+        self,
+        policy: Any,
+        body: Any = None,
+        params: Any = None,
+        headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Creates, or updates, a policy.
@@ -31,12 +36,18 @@ class IndexManagementClient(NamespacedClient):
             _make_path("_plugins", "_ism", "policies", policy),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
     @query_params()
     async def add_policy(
-        self, index: Any, body: Any = None, params: Any = None, headers: Any = None
+        self,
+        index: Any,
+        body: Any = None,
+        params: Any = None,
+        headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Adds a policy to an index. This operation does not change the policy if the index already has one.
@@ -51,12 +62,17 @@ class IndexManagementClient(NamespacedClient):
             _make_path("_plugins", "_ism", "add", index),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
     @query_params()
     async def get_policy(
-        self, policy: Any = None, params: Any = None, headers: Any = None
+        self,
+        policy: Any = None,
+        params: Any = None,
+        headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Gets the policy by `policy_id`; returns all policies if no policy_id is provided.
@@ -69,11 +85,16 @@ class IndexManagementClient(NamespacedClient):
             _make_path("_plugins", "_ism", "policies", policy),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params()
     async def remove_policy_from_index(
-        self, index: Any, params: Any = None, headers: Any = None
+        self,
+        index: Any,
+        params: Any = None,
+        headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Removes any ISM policy from the index.
@@ -88,11 +109,17 @@ class IndexManagementClient(NamespacedClient):
             _make_path("_plugins", "_ism", "remove", index),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params()
     async def change_policy(
-        self, index: Any, body: Any = None, params: Any = None, headers: Any = None
+        self,
+        index: Any,
+        body: Any = None,
+        params: Any = None,
+        headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Updates the managed index policy to a new policy (or to a new version of the policy).
@@ -107,12 +134,18 @@ class IndexManagementClient(NamespacedClient):
             _make_path("_plugins", "_ism", "change_policy", index),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
     @query_params()
     async def retry(
-        self, index: Any, body: Any = None, params: Any = None, headers: Any = None
+        self,
+        index: Any,
+        body: Any = None,
+        params: Any = None,
+        headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Retries the failed action for an index.
@@ -127,12 +160,17 @@ class IndexManagementClient(NamespacedClient):
             _make_path("_plugins", "_ism", "retry", index),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
     @query_params("show_policy")
     async def explain_index(
-        self, index: Any, params: Any = None, headers: Any = None
+        self,
+        index: Any,
+        params: Any = None,
+        headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Gets the current state of the index.
@@ -147,11 +185,16 @@ class IndexManagementClient(NamespacedClient):
             _make_path("_plugins", "_ism", "explain", index),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params()
     async def delete_policy(
-        self, policy: Any, params: Any = None, headers: Any = None
+        self,
+        policy: Any,
+        params: Any = None,
+        headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Deletes the policy by `policy_id`.
@@ -166,4 +209,5 @@ class IndexManagementClient(NamespacedClient):
             _make_path("_plugins", "_ism", "policies", policy),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )

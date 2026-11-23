@@ -41,6 +41,7 @@ class NeuralClient(NamespacedClient):
         stat: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Provides information about the current status of the neural-search plugin.
@@ -87,4 +88,5 @@ class NeuralClient(NamespacedClient):
             _make_path("_plugins", "_neural", node_id, "stats", stat),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )

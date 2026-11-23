@@ -36,6 +36,7 @@ class SearchPipelineClient(NamespacedClient):
         id: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Retrieves information about a specified search pipeline.
@@ -58,7 +59,11 @@ class SearchPipelineClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return self.transport.perform_request(
-            "GET", _make_path("_search", "pipeline", id), params=params, headers=headers
+            "GET",
+            _make_path("_search", "pipeline", id),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -76,6 +81,7 @@ class SearchPipelineClient(NamespacedClient):
         id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Deletes the specified search pipeline.
@@ -105,6 +111,7 @@ class SearchPipelineClient(NamespacedClient):
             _make_path("_search", "pipeline", id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -123,6 +130,7 @@ class SearchPipelineClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Creates or replaces the specified search pipeline.
@@ -153,5 +161,6 @@ class SearchPipelineClient(NamespacedClient):
             _make_path("_search", "pipeline", id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )

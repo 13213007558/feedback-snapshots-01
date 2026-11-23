@@ -31,6 +31,7 @@ class SqlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Closes an open cursor to free server-side resources.
@@ -52,7 +53,12 @@ class SqlClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return await self.transport.perform_request(
-            "POST", "/_plugins/_sql/close", params=params, headers=headers, body=body
+            "POST",
+            "/_plugins/_sql/close",
+            params=params,
+            headers=headers,
+            body=body,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -64,6 +70,7 @@ class SqlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Returns the execution plan for a SQL or PPL query.
@@ -85,7 +92,12 @@ class SqlClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return await self.transport.perform_request(
-            "POST", "/_plugins/_sql/_explain", params=params, headers=headers, body=body
+            "POST",
+            "/_plugins/_sql/_explain",
+            params=params,
+            headers=headers,
+            body=body,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -96,6 +108,7 @@ class SqlClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Retrieves performance metrics for the SQL plugin.
@@ -117,7 +130,11 @@ class SqlClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return await self.transport.perform_request(
-            "GET", "/_plugins/_sql/stats", params=params, headers=headers
+            "GET",
+            "/_plugins/_sql/stats",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -129,6 +146,7 @@ class SqlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Retrieves filtered performance metrics for the SQL plugin.
@@ -150,7 +168,12 @@ class SqlClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return await self.transport.perform_request(
-            "POST", "/_plugins/_sql/stats", params=params, headers=headers, body=body
+            "POST",
+            "/_plugins/_sql/stats",
+            params=params,
+            headers=headers,
+            body=body,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -162,6 +185,7 @@ class SqlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Executes SQL or PPL queries against OpenSearch indexes.
@@ -183,7 +207,12 @@ class SqlClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return await self.transport.perform_request(
-            "POST", "/_plugins/_sql", params=params, headers=headers, body=body
+            "POST",
+            "/_plugins/_sql",
+            params=params,
+            headers=headers,
+            body=body,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "format", "human", "pretty", "source")
@@ -193,6 +222,7 @@ class SqlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Updates SQL plugin settings in the OpenSearch cluster configuration.
@@ -216,5 +246,6 @@ class SqlClient(NamespacedClient):
             "/_plugins/_query/settings",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )

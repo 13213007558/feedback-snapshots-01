@@ -29,6 +29,7 @@ class QueryClient(NamespacedClient):
         datasource_name: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Deletes a specific data source by name.
@@ -57,6 +58,7 @@ class QueryClient(NamespacedClient):
             _make_path("_plugins", "_query", "_datasources", datasource_name),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -66,6 +68,7 @@ class QueryClient(NamespacedClient):
         datasource_name: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Retrieves a specific data source by name.
@@ -94,6 +97,7 @@ class QueryClient(NamespacedClient):
             _make_path("_plugins", "_query", "_datasources", datasource_name),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -103,6 +107,7 @@ class QueryClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Creates a new query data source.
@@ -125,6 +130,7 @@ class QueryClient(NamespacedClient):
             "/_plugins/_query/_datasources",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -134,6 +140,7 @@ class QueryClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Retrieves a list of all available data sources.
@@ -152,7 +159,11 @@ class QueryClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return await self.transport.perform_request(
-            "GET", "/_plugins/_query/_datasources", params=params, headers=headers
+            "GET",
+            "/_plugins/_query/_datasources",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -162,6 +173,7 @@ class QueryClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Updates an existing query data source.
@@ -184,5 +196,6 @@ class QueryClient(NamespacedClient):
             "/_plugins/_query/_datasources",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )

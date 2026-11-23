@@ -30,6 +30,7 @@ class SmClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Creates a snapshot management policy.
@@ -59,6 +60,7 @@ class SmClient(NamespacedClient):
             _make_path("_plugins", "_sm", "policies", policy_name),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -69,6 +71,7 @@ class SmClient(NamespacedClient):
         policy_name: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Deletes a snapshot management policy.
@@ -98,6 +101,7 @@ class SmClient(NamespacedClient):
             _make_path("_plugins", "_sm", "policies", policy_name),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -107,6 +111,7 @@ class SmClient(NamespacedClient):
         policy_name: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Explains the state of the snapshot management policy.
@@ -136,6 +141,7 @@ class SmClient(NamespacedClient):
             _make_path("_plugins", "_sm", "policies", policy_name, "_explain"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -155,6 +161,7 @@ class SmClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Retrieves all snapshot management policies with optional pagination and
@@ -187,7 +194,11 @@ class SmClient(NamespacedClient):
             params["from"] = params.pop("from_")
 
         return self.transport.perform_request(
-            "GET", "/_plugins/_sm/policies", params=params, headers=headers
+            "GET",
+            "/_plugins/_sm/policies",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -197,6 +208,7 @@ class SmClient(NamespacedClient):
         policy_name: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Retrieves a specific snapshot management policy by name.
@@ -226,6 +238,7 @@ class SmClient(NamespacedClient):
             _make_path("_plugins", "_sm", "policies", policy_name),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -235,6 +248,7 @@ class SmClient(NamespacedClient):
         policy_name: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Starts a snapshot management policy.
@@ -264,6 +278,7 @@ class SmClient(NamespacedClient):
             _make_path("_plugins", "_sm", "policies", policy_name, "_start"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -273,6 +288,7 @@ class SmClient(NamespacedClient):
         policy_name: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Stops a snapshot management policy.
@@ -302,6 +318,7 @@ class SmClient(NamespacedClient):
             _make_path("_plugins", "_sm", "policies", policy_name, "_stop"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -320,6 +337,7 @@ class SmClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Updates an existing snapshot management policy. Requires `if_seq_no` and
@@ -352,5 +370,6 @@ class SmClient(NamespacedClient):
             _make_path("_plugins", "_sm", "policies", policy_name),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )

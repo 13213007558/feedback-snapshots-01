@@ -25,7 +25,8 @@
 #  under the License.
 
 
-from typing import Any, Dict, Optional
+from contextvars import ContextVar, Token
+from typing import Any, Collection, Dict, Mapping, NamedTuple, Optional
 
 try:
     import simplejson as json
@@ -37,7 +38,11 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from .compat import string_types
-from .exceptions import ImproperlyConfigured, SerializationError
+from .exceptions import (
+    ImproperlyConfigured,
+    SerializationError,
+    UnsupportedResponseFormatError,
+)
 from .helpers.utils import AttrList
 
 INTEGER_TYPES = ()
@@ -167,6 +172,96 @@ DEFAULT_SERIALIZERS: Dict[str, Serializer] = {
 }
 
 
+def normalize_mimetype(mimetype: Optional[str]) -> Optional[str]:
+    """
+    Normalize a response media type for comparison.
+
+    Strips media type parameters (e.g. ``charset``), surrounding whitespace
+    and case, and maps vendor JSON types to ``application/json``. Returns
+    ``None`` when no media type is given.
+    """
+    if not mimetype:
+        return None
+    if not isinstance(mimetype, str):
+        return None
+    normalized = mimetype.partition(";")[0].strip().lower()
+    if not normalized:
+        return None
+    if normalized == "application/vnd.elasticsearch+json":
+        return JSONSerializer.mimetype
+    return normalized
+
+
+def _allowed_mimetypes_to_mapping(
+    allowed_mimetypes: Optional[Collection[str]],
+) -> Optional[Dict[str, Optional[Serializer]]]:
+    if allowed_mimetypes is None:
+        return None
+    if isinstance(allowed_mimetypes, str):
+        allowed_mimetypes = (allowed_mimetypes,)
+    if isinstance(allowed_mimetypes, Mapping):
+        return {
+            normalize_mimetype(mimetype) or mimetype: serializer
+            for mimetype, serializer in allowed_mimetypes.items()
+        }
+    return {
+        normalize_mimetype(mimetype) or mimetype: None for mimetype in allowed_mimetypes
+    }
+
+
+class _ResponsePolicy(NamedTuple):
+    allowed_mimetypes: Optional[Collection[str]]
+    default_mimetype: Optional[str]
+
+
+# The operation currently executing on this context. It lets the connection
+# layer keep trace previews away from responses the request may not decode.
+# A single context variable keeps the set/reset pair atomic even when
+# requests are nested.
+_CURRENT_POLICY: ContextVar[Optional[_ResponsePolicy]] = ContextVar(
+    "opensearchpy_response_policy", default=None
+)
+
+
+def set_allowed_mimetypes(
+    allowed_mimetypes: Optional[Collection[str]],
+    default_mimetype: Optional[str] = None,
+) -> "Token[Optional[_ResponsePolicy]]":
+    """
+    Record the response media types approved for the operation currently
+    being executed.
+    """
+    if allowed_mimetypes is None:
+        normalized = None
+    else:
+        if isinstance(allowed_mimetypes, str):
+            allowed_mimetypes = (allowed_mimetypes,)
+        normalized = tuple(
+            normalize_mimetype(mimetype) or mimetype for mimetype in allowed_mimetypes
+        )
+    policy = _ResponsePolicy(
+        allowed_mimetypes=normalized,
+        default_mimetype=normalize_mimetype(default_mimetype),
+    )
+    return _CURRENT_POLICY.set(policy)
+
+
+def reset_allowed_mimetypes(
+    token: "Token[Optional[_ResponsePolicy]]",
+) -> None:
+    _CURRENT_POLICY.reset(token)
+
+
+def current_allowed_mimetypes() -> Optional[Collection[str]]:
+    policy = _CURRENT_POLICY.get()
+    return policy.allowed_mimetypes if policy is not None else None
+
+
+def current_default_mimetype() -> Optional[str]:
+    policy = _CURRENT_POLICY.get()
+    return policy.default_mimetype if policy is not None else None
+
+
 class Deserializer:
     def __init__(
         self,
@@ -180,26 +275,45 @@ class Deserializer:
                 f"Cannot find default serializer ({default_mimetype})"
             )
         self.serializers = serializers
+        self.default_mimetype = default_mimetype
 
-    def loads(self, s: str, mimetype: Optional[str] = None) -> Any:
-        if not mimetype:
-            deserializer = self.default
-        else:
-            # Treat 'application/vnd.elasticsearch+json'
-            # as application/json for compatibility.
-            if mimetype == "application/vnd.elasticsearch+json":
-                mimetype = "application/json"
+    def _resolve(
+        self,
+        mimetype: Optional[str],
+        allowed_mimetypes: Optional[Collection[str]] = None,
+    ) -> Serializer:
+        """
+        Resolve the decoder for a response under a per-request allowlist.
 
-            # split out charset
-            mimetype, _, _ = mimetype.partition(";")
-            try:
-                deserializer = self.serializers[mimetype]
-            except KeyError:
-                raise SerializationError(
-                    f"Unknown mimetype, unable to deserialize: {mimetype}"
-                )
+        ``allowed_mimetypes`` may be a collection of media types or a mapping
+        of media types to serializer instances. A mapping entry supplies the
+        decoder for that request without changing the client-wide registry.
+        """
+        declared = normalize_mimetype(mimetype)
+        effective = declared or normalize_mimetype(self.default_mimetype)
+        assert effective is not None
 
-        return deserializer.loads(s)
+        allowed = _allowed_mimetypes_to_mapping(allowed_mimetypes)
+        if allowed is not None and effective not in allowed:
+            raise UnsupportedResponseFormatError(effective, allowed.keys())
+
+        if allowed is not None and allowed.get(effective) is not None:
+            return allowed[effective]  # type: ignore[return-value]
+
+        try:
+            return self.serializers[effective]
+        except KeyError:
+            raise SerializationError(
+                f"Unknown mimetype, unable to deserialize: {effective}"
+            )
+
+    def loads(
+        self,
+        s: str,
+        mimetype: Optional[str] = None,
+        allowed_mimetypes: Optional[Collection[str]] = None,
+    ) -> Any:
+        return self._resolve(mimetype, allowed_mimetypes).loads(s)
 
 
 class AttrJSONSerializer(JSONSerializer):

@@ -29,6 +29,7 @@ class TransformsClient(NamespacedClient):
         id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Delete an index transform.
@@ -55,6 +56,7 @@ class TransformsClient(NamespacedClient):
             _make_path("_plugins", "_transform", id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -64,6 +66,7 @@ class TransformsClient(NamespacedClient):
         id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Returns the status and metadata of a transform job.
@@ -90,6 +93,7 @@ class TransformsClient(NamespacedClient):
             _make_path("_plugins", "_transform", id, "_explain"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -99,6 +103,7 @@ class TransformsClient(NamespacedClient):
         id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Returns the status and metadata of a transform job.
@@ -125,6 +130,7 @@ class TransformsClient(NamespacedClient):
             _make_path("_plugins", "_transform", id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -134,6 +140,7 @@ class TransformsClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Returns a preview of what a transformed index would look like.
@@ -156,6 +163,7 @@ class TransformsClient(NamespacedClient):
             "/_plugins/_transform/_preview",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -175,6 +183,7 @@ class TransformsClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Create an index transform, or update a transform if `if_seq_no` and
@@ -206,6 +215,7 @@ class TransformsClient(NamespacedClient):
             _make_path("_plugins", "_transform", id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -226,6 +236,7 @@ class TransformsClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Returns the details of all transform jobs.
@@ -255,7 +266,11 @@ class TransformsClient(NamespacedClient):
             params["from"] = params.pop("from_")
 
         return self.transport.perform_request(
-            "GET", "/_plugins/_transform", params=params, headers=headers
+            "GET",
+            "/_plugins/_transform",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -265,6 +280,7 @@ class TransformsClient(NamespacedClient):
         id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Start transform.
@@ -291,6 +307,7 @@ class TransformsClient(NamespacedClient):
             _make_path("_plugins", "_transform", id, "_start"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -300,6 +317,7 @@ class TransformsClient(NamespacedClient):
         id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Stop transform.
@@ -326,4 +344,5 @@ class TransformsClient(NamespacedClient):
             _make_path("_plugins", "_transform", id, "_stop"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )

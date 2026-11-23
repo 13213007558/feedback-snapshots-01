@@ -29,6 +29,7 @@ class KnnClient(NamespacedClient):
         model_id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Used to delete a particular model in the cluster.
@@ -55,6 +56,7 @@ class KnnClient(NamespacedClient):
             _make_path("_plugins", "_knn", "models", model_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -64,6 +66,7 @@ class KnnClient(NamespacedClient):
         model_id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Used to retrieve information about models present in the cluster.
@@ -90,6 +93,7 @@ class KnnClient(NamespacedClient):
             _make_path("_plugins", "_knn", "models", model_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -147,6 +151,7 @@ class KnnClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Use an OpenSearch query to search for models in the index.
@@ -264,6 +269,7 @@ class KnnClient(NamespacedClient):
             "/_plugins/_knn/models/_search",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -275,6 +281,7 @@ class KnnClient(NamespacedClient):
         stat: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Provides information about the current status of the k-NN plugin.
@@ -304,6 +311,7 @@ class KnnClient(NamespacedClient):
             _make_path("_plugins", "_knn", node_id, "stats", stat),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -316,6 +324,7 @@ class KnnClient(NamespacedClient):
         model_id: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Create and train a model that can be used for initializing k-NN native library
@@ -341,6 +350,7 @@ class KnnClient(NamespacedClient):
             _make_path("_plugins", "_knn", "models", model_id, "_train"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -351,6 +361,7 @@ class KnnClient(NamespacedClient):
         index: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Preloads native library files into memory, reducing initial search latency for
@@ -379,4 +390,5 @@ class KnnClient(NamespacedClient):
             _make_path("_plugins", "_knn", "warmup", index),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )

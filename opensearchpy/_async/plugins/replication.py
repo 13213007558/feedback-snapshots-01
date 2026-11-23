@@ -28,6 +28,7 @@ class ReplicationClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Retrieves information about any auto-follow activity and any replication rules
@@ -51,6 +52,7 @@ class ReplicationClient(NamespacedClient):
             "/_plugins/_replication/autofollow_stats",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -60,6 +62,7 @@ class ReplicationClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Automatically starts the replication on indexes matching a specified pattern.
@@ -85,6 +88,7 @@ class ReplicationClient(NamespacedClient):
             "/_plugins/_replication/_autofollow",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -95,6 +99,7 @@ class ReplicationClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Deletes the specified replication rule.
@@ -120,6 +125,7 @@ class ReplicationClient(NamespacedClient):
             "/_plugins/_replication/_autofollow",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -129,6 +135,7 @@ class ReplicationClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Retrieves information about any follower (syncing) indexes on a specified
@@ -152,6 +159,7 @@ class ReplicationClient(NamespacedClient):
             "/_plugins/_replication/follower_stats",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -160,6 +168,7 @@ class ReplicationClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Retrieves information about any replicated leader indexes on a specified
@@ -179,7 +188,11 @@ class ReplicationClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return await self.transport.perform_request(
-            "GET", "/_plugins/_replication/leader_stats", params=params, headers=headers
+            "GET",
+            "/_plugins/_replication/leader_stats",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -190,6 +203,7 @@ class ReplicationClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Pauses the replication of the leader index.
@@ -218,6 +232,7 @@ class ReplicationClient(NamespacedClient):
             _make_path("_plugins", "_replication", index, "_pause"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -229,6 +244,7 @@ class ReplicationClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Resumes replication of the leader index.
@@ -257,6 +273,7 @@ class ReplicationClient(NamespacedClient):
             _make_path("_plugins", "_replication", index, "_resume"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -268,6 +285,7 @@ class ReplicationClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Initiates the replication of an index from the leader cluster to the follower
@@ -297,6 +315,7 @@ class ReplicationClient(NamespacedClient):
             _make_path("_plugins", "_replication", index, "_start"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -307,6 +326,7 @@ class ReplicationClient(NamespacedClient):
         index: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Retrieves the the status of an index replication.
@@ -334,6 +354,7 @@ class ReplicationClient(NamespacedClient):
             _make_path("_plugins", "_replication", index, "_status"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -344,6 +365,7 @@ class ReplicationClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Terminates the replication and converts the follower index to a standard index.
@@ -372,6 +394,7 @@ class ReplicationClient(NamespacedClient):
             _make_path("_plugins", "_replication", index, "_stop"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -383,6 +406,7 @@ class ReplicationClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Updates any settings on the follower index.
@@ -411,5 +435,6 @@ class ReplicationClient(NamespacedClient):
             _make_path("_plugins", "_replication", index, "_update"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )

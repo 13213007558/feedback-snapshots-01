@@ -48,6 +48,7 @@ class NodesClient(NamespacedClient):
         node_id: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Reloads secure settings.
@@ -77,6 +78,7 @@ class NodesClient(NamespacedClient):
             _make_path("_nodes", node_id, "reload_secure_settings"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -97,6 +99,7 @@ class NodesClient(NamespacedClient):
         node_id_or_metric: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns information about nodes in the cluster.
@@ -127,7 +130,11 @@ class NodesClient(NamespacedClient):
             returns an error.
         """
         return await self.transport.perform_request(
-            "GET", _make_path("_nodes", node_id, metric), params=params, headers=headers
+            "GET",
+            _make_path("_nodes", node_id, metric),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -153,6 +160,7 @@ class NodesClient(NamespacedClient):
         index_metric: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns statistical information about nodes in the cluster.
@@ -201,6 +209,7 @@ class NodesClient(NamespacedClient):
             _make_path("_nodes", node_id, "stats", metric, index_metric),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -222,6 +231,7 @@ class NodesClient(NamespacedClient):
         node_id: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json", "text/plain"),
     ) -> Any:
         """
         Returns information about hot threads on each node in the cluster.
@@ -266,6 +276,7 @@ class NodesClient(NamespacedClient):
             _make_path("_nodes", node_id, "hot_threads"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source", "timeout")
@@ -276,6 +287,7 @@ class NodesClient(NamespacedClient):
         metric: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns low-level information about REST actions usage on nodes.
@@ -308,4 +320,5 @@ class NodesClient(NamespacedClient):
             _make_path("_nodes", node_id, "usage", metric),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )

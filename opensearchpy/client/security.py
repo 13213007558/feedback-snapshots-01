@@ -28,6 +28,7 @@ class SecurityClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns account information for the current user.
@@ -46,7 +47,11 @@ class SecurityClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return self.transport.perform_request(
-            "GET", "/_plugins/_security/api/account", params=params, headers=headers
+            "GET",
+            "/_plugins/_security/api/account",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -56,6 +61,7 @@ class SecurityClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Changes the password for the current user.
@@ -81,6 +87,7 @@ class SecurityClient(NamespacedClient):
             "/_plugins/_security/api/account",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -91,6 +98,7 @@ class SecurityClient(NamespacedClient):
         action_group: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Retrieves one action group.
@@ -119,6 +127,7 @@ class SecurityClient(NamespacedClient):
             _make_path("_plugins", "_security", "api", "actiongroups", action_group),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -127,6 +136,7 @@ class SecurityClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Retrieves all action groups.
@@ -149,6 +159,7 @@ class SecurityClient(NamespacedClient):
             "/_plugins/_security/api/actiongroups",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -158,6 +169,7 @@ class SecurityClient(NamespacedClient):
         action_group: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Deletes the specified action group.
@@ -186,6 +198,7 @@ class SecurityClient(NamespacedClient):
             _make_path("_plugins", "_security", "api", "actiongroups", action_group),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -196,6 +209,7 @@ class SecurityClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Creates or replaces the specified action group.
@@ -224,6 +238,7 @@ class SecurityClient(NamespacedClient):
             _make_path("_plugins", "_security", "api", "actiongroups", action_group),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -235,6 +250,7 @@ class SecurityClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Updates the individual attributes of an action group.
@@ -262,6 +278,7 @@ class SecurityClient(NamespacedClient):
             _make_path("_plugins", "_security", "api", "actiongroups", action_group),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -272,6 +289,7 @@ class SecurityClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Creates, updates, or deletes multiple action groups in a single request.
@@ -297,6 +315,7 @@ class SecurityClient(NamespacedClient):
             "/_plugins/_security/api/actiongroups",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -307,6 +326,7 @@ class SecurityClient(NamespacedClient):
         username: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Retrieve information about the specified internal user.
@@ -333,6 +353,7 @@ class SecurityClient(NamespacedClient):
             _make_path("_plugins", "_security", "api", "internalusers", username),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -341,6 +362,7 @@ class SecurityClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Retrieve all internal users.
@@ -363,6 +385,7 @@ class SecurityClient(NamespacedClient):
             "/_plugins/_security/api/internalusers",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -372,6 +395,7 @@ class SecurityClient(NamespacedClient):
         username: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Deletes the specified internal user.
@@ -398,6 +422,7 @@ class SecurityClient(NamespacedClient):
             _make_path("_plugins", "_security", "api", "internalusers", username),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -408,6 +433,7 @@ class SecurityClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Creates or replaces the specified user.
@@ -435,6 +461,7 @@ class SecurityClient(NamespacedClient):
             _make_path("_plugins", "_security", "api", "internalusers", username),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -446,6 +473,7 @@ class SecurityClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Updates individual attributes for an internal user.
@@ -473,6 +501,7 @@ class SecurityClient(NamespacedClient):
             _make_path("_plugins", "_security", "api", "internalusers", username),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -483,6 +512,7 @@ class SecurityClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Creates, updates, or deletes multiple internal users in a single request.
@@ -508,6 +538,7 @@ class SecurityClient(NamespacedClient):
             "/_plugins/_security/api/internalusers",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -518,6 +549,7 @@ class SecurityClient(NamespacedClient):
         role: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Retrieves one role.
@@ -544,6 +576,7 @@ class SecurityClient(NamespacedClient):
             _make_path("_plugins", "_security", "api", "roles", role),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -552,6 +585,7 @@ class SecurityClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Retrieves all roles.
@@ -570,7 +604,11 @@ class SecurityClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return self.transport.perform_request(
-            "GET", "/_plugins/_security/api/roles", params=params, headers=headers
+            "GET",
+            "/_plugins/_security/api/roles",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -580,6 +618,7 @@ class SecurityClient(NamespacedClient):
         role: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Deletes the specified role.
@@ -606,6 +645,7 @@ class SecurityClient(NamespacedClient):
             _make_path("_plugins", "_security", "api", "roles", role),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -616,6 +656,7 @@ class SecurityClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Creates or replaces the specified role.
@@ -643,6 +684,7 @@ class SecurityClient(NamespacedClient):
             _make_path("_plugins", "_security", "api", "roles", role),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -654,6 +696,7 @@ class SecurityClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Updates the individual attributes of a role.
@@ -681,6 +724,7 @@ class SecurityClient(NamespacedClient):
             _make_path("_plugins", "_security", "api", "roles", role),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -691,6 +735,7 @@ class SecurityClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Creates, updates, or deletes multiple roles in a single call.
@@ -716,6 +761,7 @@ class SecurityClient(NamespacedClient):
             "/_plugins/_security/api/roles",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -726,6 +772,7 @@ class SecurityClient(NamespacedClient):
         role: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Retrieves the specified role mapping.
@@ -752,6 +799,7 @@ class SecurityClient(NamespacedClient):
             _make_path("_plugins", "_security", "api", "rolesmapping", role),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -760,6 +808,7 @@ class SecurityClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Retrieves all role mappings.
@@ -782,6 +831,7 @@ class SecurityClient(NamespacedClient):
             "/_plugins/_security/api/rolesmapping",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -791,6 +841,7 @@ class SecurityClient(NamespacedClient):
         role: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Deletes the specified role mapping.
@@ -818,6 +869,7 @@ class SecurityClient(NamespacedClient):
             _make_path("_plugins", "_security", "api", "rolesmapping", role),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -828,6 +880,7 @@ class SecurityClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Creates or replaces the specified role mapping.
@@ -856,6 +909,7 @@ class SecurityClient(NamespacedClient):
             _make_path("_plugins", "_security", "api", "rolesmapping", role),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -867,6 +921,7 @@ class SecurityClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Updates the individual attributes of a role mapping.
@@ -894,6 +949,7 @@ class SecurityClient(NamespacedClient):
             _make_path("_plugins", "_security", "api", "rolesmapping", role),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -904,6 +960,7 @@ class SecurityClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Creates or updates multiple role mappings in a single request.
@@ -929,6 +986,7 @@ class SecurityClient(NamespacedClient):
             "/_plugins/_security/api/rolesmapping",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -939,6 +997,7 @@ class SecurityClient(NamespacedClient):
         tenant: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Retrieves the specified tenant.
@@ -965,6 +1024,7 @@ class SecurityClient(NamespacedClient):
             _make_path("_plugins", "_security", "api", "tenants", tenant),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -973,6 +1033,7 @@ class SecurityClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Retrieves all tenants.
@@ -991,7 +1052,11 @@ class SecurityClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return self.transport.perform_request(
-            "GET", "/_plugins/_security/api/tenants", params=params, headers=headers
+            "GET",
+            "/_plugins/_security/api/tenants",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -1001,6 +1066,7 @@ class SecurityClient(NamespacedClient):
         tenant: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Deletes the specified tenant.
@@ -1027,6 +1093,7 @@ class SecurityClient(NamespacedClient):
             _make_path("_plugins", "_security", "api", "tenants", tenant),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -1037,6 +1104,7 @@ class SecurityClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Creates or replaces the specified tenant.
@@ -1064,6 +1132,7 @@ class SecurityClient(NamespacedClient):
             _make_path("_plugins", "_security", "api", "tenants", tenant),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -1075,6 +1144,7 @@ class SecurityClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Adds, deletes, or modifies a single tenant.
@@ -1102,6 +1172,7 @@ class SecurityClient(NamespacedClient):
             _make_path("_plugins", "_security", "api", "tenants", tenant),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -1112,6 +1183,7 @@ class SecurityClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Adds, deletes, or modifies multiple tenants in a single request.
@@ -1137,6 +1209,7 @@ class SecurityClient(NamespacedClient):
             "/_plugins/_security/api/tenants",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -1146,6 +1219,7 @@ class SecurityClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns the current Security plugin configuration in a JSON format.
@@ -1168,6 +1242,7 @@ class SecurityClient(NamespacedClient):
             "/_plugins/_security/api/securityconfig",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -1177,6 +1252,7 @@ class SecurityClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Updates the settings for an existing security configuration. Requires super
@@ -1203,6 +1279,7 @@ class SecurityClient(NamespacedClient):
             "/_plugins/_security/api/securityconfig/config",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -1213,6 +1290,7 @@ class SecurityClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Updates the existing security configuration using the REST API. Requires super
@@ -1239,6 +1317,7 @@ class SecurityClient(NamespacedClient):
             "/_plugins/_security/api/securityconfig",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -1248,6 +1327,7 @@ class SecurityClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Retrieves all node distinguished names. Requires super admin or REST API
@@ -1269,7 +1349,11 @@ class SecurityClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return self.transport.perform_request(
-            "GET", "/_plugins/_security/api/nodesdn", params=params, headers=headers
+            "GET",
+            "/_plugins/_security/api/nodesdn",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -1278,6 +1362,7 @@ class SecurityClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Retrieves the cluster security certificates.
@@ -1296,7 +1381,11 @@ class SecurityClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return self.transport.perform_request(
-            "GET", "/_plugins/_security/api/ssl/certs", params=params, headers=headers
+            "GET",
+            "/_plugins/_security/api/ssl/certs",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -1305,6 +1394,7 @@ class SecurityClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Reloads the transport communication certificates.
@@ -1327,6 +1417,7 @@ class SecurityClient(NamespacedClient):
             "/_plugins/_security/api/ssl/transport/reloadcerts",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -1335,6 +1426,7 @@ class SecurityClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Reloads the HTTP communication certificates.
@@ -1357,6 +1449,7 @@ class SecurityClient(NamespacedClient):
             "/_plugins/_security/api/ssl/http/reloadcerts",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -1365,6 +1458,7 @@ class SecurityClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Flushes the Security plugin's user, authentication, and authorization cache.
@@ -1383,7 +1477,11 @@ class SecurityClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return self.transport.perform_request(
-            "DELETE", "/_plugins/_security/api/cache", params=params, headers=headers
+            "DELETE",
+            "/_plugins/_security/api/cache",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "mode", "pretty", "source")
@@ -1392,6 +1490,7 @@ class SecurityClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Checks to see if the Security plugin is running.
@@ -1414,7 +1513,11 @@ class SecurityClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return self.transport.perform_request(
-            "GET", "/_plugins/_security/health", params=params, headers=headers
+            "GET",
+            "/_plugins/_security/health",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -1423,6 +1526,7 @@ class SecurityClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Retrieves the audit configuration.
@@ -1441,7 +1545,11 @@ class SecurityClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return self.transport.perform_request(
-            "GET", "/_plugins/_security/api/audit", params=params, headers=headers
+            "GET",
+            "/_plugins/_security/api/audit",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -1451,6 +1559,7 @@ class SecurityClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Updates the audit configuration.
@@ -1476,6 +1585,7 @@ class SecurityClient(NamespacedClient):
             "/_plugins/_security/api/audit/config",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -1486,6 +1596,7 @@ class SecurityClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Updates the specified fields in the audit configuration.
@@ -1511,6 +1622,7 @@ class SecurityClient(NamespacedClient):
             "/_plugins/_security/api/audit",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -1521,6 +1633,7 @@ class SecurityClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Bulk updates specified node distinguished names. Requires super admin or REST
@@ -1547,6 +1660,7 @@ class SecurityClient(NamespacedClient):
             "/_plugins/_security/api/nodesdn",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -1564,6 +1678,7 @@ class SecurityClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns or updates authentication information for the currently authenticated
@@ -1585,7 +1700,11 @@ class SecurityClient(NamespacedClient):
         :arg verbose: Whether to return a verbose response.
         """
         return self.transport.perform_request(
-            "GET", "/_plugins/_security/authinfo", params=params, headers=headers
+            "GET",
+            "/_plugins/_security/authinfo",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -1594,6 +1713,7 @@ class SecurityClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns the authorization token for the current user.
@@ -1612,7 +1732,11 @@ class SecurityClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return self.transport.perform_request(
-            "POST", "/_plugins/_security/api/authtoken", params=params, headers=headers
+            "POST",
+            "/_plugins/_security/api/authtoken",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -1621,6 +1745,7 @@ class SecurityClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Not supported for the Cache API.
@@ -1639,7 +1764,11 @@ class SecurityClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return self.transport.perform_request(
-            "PUT", "/_plugins/_security/api/cache", params=params, headers=headers
+            "PUT",
+            "/_plugins/_security/api/cache",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -1648,6 +1777,7 @@ class SecurityClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Checks whether or not an upgrade can be performed and which security resources
@@ -1671,6 +1801,7 @@ class SecurityClient(NamespacedClient):
             "/_plugins/_security/api/_upgrade_check",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -1680,6 +1811,7 @@ class SecurityClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Assists the cluster operator with upgrading missing default values and stale
@@ -1703,6 +1835,7 @@ class SecurityClient(NamespacedClient):
             "/_plugins/_security/api/_upgrade_perform",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -1713,6 +1846,7 @@ class SecurityClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Creates or replaces APIs permitted for users on the allow list. Requires a
@@ -1739,6 +1873,7 @@ class SecurityClient(NamespacedClient):
             "/_plugins/_security/api/allowlist",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -1749,6 +1884,7 @@ class SecurityClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Creates or replaces the multi-tenancy configuration. Requires super admin or
@@ -1775,6 +1911,7 @@ class SecurityClient(NamespacedClient):
             "/_plugins/_security/api/tenancy/config",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -1786,6 +1923,7 @@ class SecurityClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Creates or replaces the specified user. Legacy API.
@@ -1813,6 +1951,7 @@ class SecurityClient(NamespacedClient):
             _make_path("_plugins", "_security", "api", "user", username),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -1823,6 +1962,7 @@ class SecurityClient(NamespacedClient):
         cluster_name: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Deletes all distinguished names in the specified cluster or node allowlist.
@@ -1853,6 +1993,7 @@ class SecurityClient(NamespacedClient):
             _make_path("_plugins", "_security", "api", "nodesdn", cluster_name),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -1862,6 +2003,7 @@ class SecurityClient(NamespacedClient):
         username: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Delete the specified user. Legacy API.
@@ -1888,6 +2030,7 @@ class SecurityClient(NamespacedClient):
             _make_path("_plugins", "_security", "api", "user", username),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -1897,6 +2040,7 @@ class SecurityClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Generates a `On-Behalf-Of` token for the current user.
@@ -1922,6 +2066,7 @@ class SecurityClient(NamespacedClient):
             "/_plugins/_security/api/generateonbehalfoftoken",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -1932,6 +2077,7 @@ class SecurityClient(NamespacedClient):
         username: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Generates an authorization token for the specified user.
@@ -1961,6 +2107,7 @@ class SecurityClient(NamespacedClient):
             ),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -1970,6 +2117,7 @@ class SecurityClient(NamespacedClient):
         username: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Generates authorization token for the given user. Legacy API. Not Implemented.
@@ -1997,6 +2145,7 @@ class SecurityClient(NamespacedClient):
             _make_path("_plugins", "_security", "api", "user", username, "authtoken"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -2005,6 +2154,7 @@ class SecurityClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Retrieves the current list of allowed APIs accessible to a normal user.
@@ -2023,7 +2173,11 @@ class SecurityClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return self.transport.perform_request(
-            "GET", "/_plugins/_security/api/allowlist", params=params, headers=headers
+            "GET",
+            "/_plugins/_security/api/allowlist",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -2032,6 +2186,7 @@ class SecurityClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Retrieves the current values for dynamic security settings for OpenSearch
@@ -2051,7 +2206,11 @@ class SecurityClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return self.transport.perform_request(
-            "GET", "/_plugins/_security/dashboardsinfo", params=params, headers=headers
+            "GET",
+            "/_plugins/_security/dashboardsinfo",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "show_all", "source")
@@ -2061,6 +2220,7 @@ class SecurityClient(NamespacedClient):
         cluster_name: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Retrieves all node distinguished names. Requires super admin or REST API
@@ -2093,6 +2253,7 @@ class SecurityClient(NamespacedClient):
             _make_path("_plugins", "_security", "api", "nodesdn", cluster_name),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -2101,6 +2262,7 @@ class SecurityClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Retrieves the evaluated REST API permissions for the currently logged in user.
@@ -2123,6 +2285,7 @@ class SecurityClient(NamespacedClient):
             "/_plugins/_security/api/permissionsinfo",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "show_dn", "source")
@@ -2131,6 +2294,7 @@ class SecurityClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Retrieves information about the SSL configuration.
@@ -2151,7 +2315,11 @@ class SecurityClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return self.transport.perform_request(
-            "GET", "/_opendistro/_security/sslinfo", params=params, headers=headers
+            "GET",
+            "/_opendistro/_security/sslinfo",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -2160,6 +2328,7 @@ class SecurityClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Retrieves the multi-tenancy configuration. Requires super admin or REST API
@@ -2183,6 +2352,7 @@ class SecurityClient(NamespacedClient):
             "/_plugins/_security/api/tenancy/config",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -2192,6 +2362,7 @@ class SecurityClient(NamespacedClient):
         username: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Retrieve one user. Legacy API.
@@ -2218,6 +2389,7 @@ class SecurityClient(NamespacedClient):
             _make_path("_plugins", "_security", "api", "user", username),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -2226,6 +2398,7 @@ class SecurityClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Retrieve all internal users. Legacy API.
@@ -2244,7 +2417,11 @@ class SecurityClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return self.transport.perform_request(
-            "GET", "/_plugins/_security/api/user", params=params, headers=headers
+            "GET",
+            "/_plugins/_security/api/user",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -2253,6 +2430,7 @@ class SecurityClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Migrates the security configuration from v6 to v7.
@@ -2271,7 +2449,11 @@ class SecurityClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return self.transport.perform_request(
-            "POST", "/_plugins/_security/api/migrate", params=params, headers=headers
+            "POST",
+            "/_plugins/_security/api/migrate",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -2281,6 +2463,7 @@ class SecurityClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Updates the current list of APIs accessible for users on the allow list.
@@ -2306,6 +2489,7 @@ class SecurityClient(NamespacedClient):
             "/_plugins/_security/api/allowlist",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -2317,6 +2501,7 @@ class SecurityClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Updates the distinguished cluster name for the specified cluster. Requires
@@ -2347,6 +2532,7 @@ class SecurityClient(NamespacedClient):
             _make_path("_plugins", "_security", "api", "nodesdn", cluster_name),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -2356,6 +2542,7 @@ class SecurityClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Retrieves the current values for dynamic security settings for OpenSearch
@@ -2375,7 +2562,11 @@ class SecurityClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return self.transport.perform_request(
-            "POST", "/_plugins/_security/dashboardsinfo", params=params, headers=headers
+            "POST",
+            "/_plugins/_security/dashboardsinfo",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -2384,6 +2575,7 @@ class SecurityClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Retrieves the names of current tenants. Requires super admin or `kibanaserver`
@@ -2403,7 +2595,11 @@ class SecurityClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return self.transport.perform_request(
-            "GET", "/_plugins/_security/tenantinfo", params=params, headers=headers
+            "GET",
+            "/_plugins/_security/tenantinfo",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -2414,6 +2610,7 @@ class SecurityClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Adds or updates the specified distinguished names in the cluster or node
@@ -2444,6 +2641,7 @@ class SecurityClient(NamespacedClient):
             _make_path("_plugins", "_security", "api", "nodesdn", cluster_name),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -2455,6 +2653,7 @@ class SecurityClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Checks whether the v6 security configuration is valid and ready to be migrated
@@ -2476,7 +2675,11 @@ class SecurityClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return self.transport.perform_request(
-            "GET", "/_plugins/_security/api/validate", params=params, headers=headers
+            "GET",
+            "/_plugins/_security/api/validate",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -2485,6 +2688,7 @@ class SecurityClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Gets the identity information for the user currently logged in.
@@ -2503,7 +2707,11 @@ class SecurityClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return self.transport.perform_request(
-            "GET", "/_plugins/_security/whoami", params=params, headers=headers
+            "GET",
+            "/_plugins/_security/whoami",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -2512,6 +2720,7 @@ class SecurityClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Gets the identity information for the user currently logged in. To use this
@@ -2532,7 +2741,11 @@ class SecurityClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return self.transport.perform_request(
-            "GET", "/_plugins/_security/whoamiprotected", params=params, headers=headers
+            "GET",
+            "/_plugins/_security/whoamiprotected",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -2549,6 +2762,7 @@ class SecurityClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Retrieves the cluster security certificates.
@@ -2575,6 +2789,7 @@ class SecurityClient(NamespacedClient):
             "/_plugins/_security/api/certificates",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -2592,6 +2807,7 @@ class SecurityClient(NamespacedClient):
         node_id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Retrieves the specified node's security certificates.
@@ -2622,4 +2838,5 @@ class SecurityClient(NamespacedClient):
             _make_path("_plugins", "_security", "api", "certificates", node_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )

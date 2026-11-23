@@ -69,6 +69,7 @@ from .exceptions import (
     SSLError,
     TransportError,
     UnknownDslObject,
+    UnsupportedResponseFormatError,
     ValidationException,
 )
 from .helpers import AWSV4SignerAuth, RequestsAWSV4SignerAuth, Urllib3AWSV4SignerAuth
@@ -155,6 +156,7 @@ __all__ = [
     "ImproperlyConfigured",
     "OpenSearchException",
     "SerializationError",
+    "UnsupportedResponseFormatError",
     "TransportError",
     "NotFoundError",
     "ConflictError",

@@ -29,6 +29,7 @@ class MlClient(NamespacedClient):
         model_id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Deletes a model.
@@ -54,6 +55,7 @@ class MlClient(NamespacedClient):
             _make_path("_plugins", "_ml", "models", model_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -63,6 +65,7 @@ class MlClient(NamespacedClient):
         model_group_id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Deletes a model group.
@@ -90,6 +93,7 @@ class MlClient(NamespacedClient):
             _make_path("_plugins", "_ml", "model_groups", model_group_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -99,6 +103,7 @@ class MlClient(NamespacedClient):
         model_group_id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Retrieves a model group.
@@ -126,6 +131,7 @@ class MlClient(NamespacedClient):
             _make_path("_plugins", "_ml", "model_groups", model_group_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -135,6 +141,7 @@ class MlClient(NamespacedClient):
         task_id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Retrieves a task.
@@ -160,6 +167,7 @@ class MlClient(NamespacedClient):
             _make_path("_plugins", "_ml", "tasks", task_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -169,6 +177,7 @@ class MlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Registers a model.
@@ -191,6 +200,7 @@ class MlClient(NamespacedClient):
             "/_plugins/_ml/models/_register",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -201,6 +211,7 @@ class MlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Registers a model group.
@@ -223,6 +234,7 @@ class MlClient(NamespacedClient):
             "/_plugins/_ml/model_groups/_register",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -233,6 +245,7 @@ class MlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Searches for models.
@@ -255,6 +268,7 @@ class MlClient(NamespacedClient):
             "/_plugins/_ml/models/_search",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -265,6 +279,7 @@ class MlClient(NamespacedClient):
         model_id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Deploys a model.
@@ -290,6 +305,7 @@ class MlClient(NamespacedClient):
             _make_path("_plugins", "_ml", "models", model_id, "_deploy"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -300,6 +316,7 @@ class MlClient(NamespacedClient):
         model_id: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Undeploys a model.
@@ -322,6 +339,7 @@ class MlClient(NamespacedClient):
             _make_path("_plugins", "_ml", "models", model_id, "_undeploy"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -332,6 +350,7 @@ class MlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Creates a standalone connector.
@@ -354,6 +373,7 @@ class MlClient(NamespacedClient):
             "/_plugins/_ml/connectors/_create",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -364,6 +384,7 @@ class MlClient(NamespacedClient):
         agent_id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Delete an agent.
@@ -389,6 +410,7 @@ class MlClient(NamespacedClient):
             _make_path("_plugins", "_ml", "agents", agent_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -398,6 +420,7 @@ class MlClient(NamespacedClient):
         connector_id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Deletes a standalone connector.
@@ -425,6 +448,7 @@ class MlClient(NamespacedClient):
             _make_path("_plugins", "_ml", "connectors", connector_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -434,6 +458,7 @@ class MlClient(NamespacedClient):
         task_id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Deletes a task.
@@ -459,6 +484,7 @@ class MlClient(NamespacedClient):
             _make_path("_plugins", "_ml", "tasks", task_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -468,6 +494,7 @@ class MlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Register an agent.
@@ -490,6 +517,7 @@ class MlClient(NamespacedClient):
             "/_plugins/_ml/agents/_register",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -502,6 +530,7 @@ class MlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Uploads model chunk.
@@ -531,6 +560,7 @@ class MlClient(NamespacedClient):
             _make_path("_plugins", "_ml", "models", model_id, "chunk", chunk_number),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -542,6 +572,7 @@ class MlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Creates a controller.
@@ -567,6 +598,7 @@ class MlClient(NamespacedClient):
             _make_path("_plugins", "_ml", "controllers", model_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -577,6 +609,7 @@ class MlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Create a memory.
@@ -595,7 +628,12 @@ class MlClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return self.transport.perform_request(
-            "POST", "/_plugins/_ml/memory", params=params, headers=headers, body=body
+            "POST",
+            "/_plugins/_ml/memory",
+            params=params,
+            headers=headers,
+            body=body,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -606,6 +644,7 @@ class MlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Create a message.
@@ -631,6 +670,7 @@ class MlClient(NamespacedClient):
             _make_path("_plugins", "_ml", "memory", memory_id, "messages"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -641,6 +681,7 @@ class MlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Registers model metadata.
@@ -666,6 +707,7 @@ class MlClient(NamespacedClient):
             "/_plugins/_ml/models/meta",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -676,6 +718,7 @@ class MlClient(NamespacedClient):
         model_id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Deletes a controller.
@@ -701,6 +744,7 @@ class MlClient(NamespacedClient):
             _make_path("_plugins", "_ml", "controllers", model_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -710,6 +754,7 @@ class MlClient(NamespacedClient):
         memory_id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Delete a memory.
@@ -735,6 +780,7 @@ class MlClient(NamespacedClient):
             _make_path("_plugins", "_ml", "memory", memory_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -745,6 +791,7 @@ class MlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Execute an agent.
@@ -770,6 +817,7 @@ class MlClient(NamespacedClient):
             _make_path("_plugins", "_ml", "agents", agent_id, "_execute"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -781,6 +829,7 @@ class MlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Execute an algorithm.
@@ -809,6 +858,7 @@ class MlClient(NamespacedClient):
             _make_path("_plugins", "_ml", "_execute", algorithm_name),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -819,6 +869,7 @@ class MlClient(NamespacedClient):
         agent_id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Get an agent.
@@ -844,6 +895,7 @@ class MlClient(NamespacedClient):
             _make_path("_plugins", "_ml", "agents", agent_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -860,6 +912,7 @@ class MlClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Get all memories.
@@ -886,7 +939,11 @@ class MlClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return self.transport.perform_request(
-            "GET", "/_plugins/_ml/memory", params=params, headers=headers
+            "GET",
+            "/_plugins/_ml/memory",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -904,6 +961,7 @@ class MlClient(NamespacedClient):
         memory_id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Get all messages in a memory.
@@ -929,6 +987,7 @@ class MlClient(NamespacedClient):
             _make_path("_plugins", "_ml", "memory", memory_id, "messages"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -937,6 +996,7 @@ class MlClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Get tools.
@@ -955,7 +1015,11 @@ class MlClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return self.transport.perform_request(
-            "GET", "/_plugins/_ml/tools", params=params, headers=headers
+            "GET",
+            "/_plugins/_ml/tools",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -965,6 +1029,7 @@ class MlClient(NamespacedClient):
         connector_id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Retrieves a standalone connector.
@@ -992,6 +1057,7 @@ class MlClient(NamespacedClient):
             _make_path("_plugins", "_ml", "connectors", connector_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -1001,6 +1067,7 @@ class MlClient(NamespacedClient):
         model_id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Retrieves a controller.
@@ -1026,6 +1093,7 @@ class MlClient(NamespacedClient):
             _make_path("_plugins", "_ml", "controllers", model_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -1035,6 +1103,7 @@ class MlClient(NamespacedClient):
         memory_id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Get a memory.
@@ -1060,6 +1129,7 @@ class MlClient(NamespacedClient):
             _make_path("_plugins", "_ml", "memory", memory_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -1069,6 +1139,7 @@ class MlClient(NamespacedClient):
         message_id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Get a message.
@@ -1094,6 +1165,7 @@ class MlClient(NamespacedClient):
             _make_path("_plugins", "_ml", "memory", "message", message_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -1111,6 +1183,7 @@ class MlClient(NamespacedClient):
         message_id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Get a message traces.
@@ -1136,6 +1209,7 @@ class MlClient(NamespacedClient):
             _make_path("_plugins", "_ml", "memory", "message", message_id, "traces"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -1145,6 +1219,7 @@ class MlClient(NamespacedClient):
         model_id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Retrieves a model.
@@ -1170,6 +1245,7 @@ class MlClient(NamespacedClient):
             _make_path("_plugins", "_ml", "models", model_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -1179,6 +1255,7 @@ class MlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Get a profile.
@@ -1197,7 +1274,12 @@ class MlClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return self.transport.perform_request(
-            "GET", "/_plugins/_ml/profile", params=params, headers=headers, body=body
+            "GET",
+            "/_plugins/_ml/profile",
+            params=params,
+            headers=headers,
+            body=body,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -1208,6 +1290,7 @@ class MlClient(NamespacedClient):
         model_id: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Get a profile models.
@@ -1230,6 +1313,7 @@ class MlClient(NamespacedClient):
             _make_path("_plugins", "_ml", "profile", "models", model_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -1241,6 +1325,7 @@ class MlClient(NamespacedClient):
         task_id: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Get a profile tasks.
@@ -1263,6 +1348,7 @@ class MlClient(NamespacedClient):
             _make_path("_plugins", "_ml", "profile", "tasks", task_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -1274,6 +1360,7 @@ class MlClient(NamespacedClient):
         stat: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Get stats.
@@ -1296,6 +1383,7 @@ class MlClient(NamespacedClient):
             _make_path("_plugins", "_ml", node_id, "stats", stat),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -1305,6 +1393,7 @@ class MlClient(NamespacedClient):
         tool_name: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Get tools.
@@ -1330,6 +1419,7 @@ class MlClient(NamespacedClient):
             _make_path("_plugins", "_ml", "tools", tool_name),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -1339,6 +1429,7 @@ class MlClient(NamespacedClient):
         model_id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Deploys a model.
@@ -1367,6 +1458,7 @@ class MlClient(NamespacedClient):
             _make_path("_plugins", "_ml", "models", model_id, "_load"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -1378,6 +1470,7 @@ class MlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Predicts new data with trained model.
@@ -1404,6 +1497,7 @@ class MlClient(NamespacedClient):
             _make_path("_plugins", "_ml", "_predict", algorithm_name, model_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -1415,6 +1509,7 @@ class MlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Predicts a model.
@@ -1440,6 +1535,7 @@ class MlClient(NamespacedClient):
             _make_path("_plugins", "_ml", "models", model_id, "_predict"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -1450,6 +1546,7 @@ class MlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Registers model metadata.
@@ -1472,6 +1569,7 @@ class MlClient(NamespacedClient):
             "/_plugins/_ml/models/_register_meta",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -1482,6 +1580,7 @@ class MlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Search agents.
@@ -1504,6 +1603,7 @@ class MlClient(NamespacedClient):
             "/_plugins/_ml/agents/_search",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -1514,6 +1614,7 @@ class MlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Searches for standalone connectors.
@@ -1536,6 +1637,7 @@ class MlClient(NamespacedClient):
             "/_plugins/_ml/connectors/_search",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -1546,6 +1648,7 @@ class MlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Search memory.
@@ -1568,6 +1671,7 @@ class MlClient(NamespacedClient):
             "/_plugins/_ml/memory/_search",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -1579,6 +1683,7 @@ class MlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Search messages.
@@ -1604,6 +1709,7 @@ class MlClient(NamespacedClient):
             _make_path("_plugins", "_ml", "memory", memory_id, "_search"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -1614,6 +1720,7 @@ class MlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Searches for model groups.
@@ -1636,6 +1743,7 @@ class MlClient(NamespacedClient):
             "/_plugins/_ml/model_groups/_search",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -1646,6 +1754,7 @@ class MlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Searches for tasks.
@@ -1668,6 +1777,7 @@ class MlClient(NamespacedClient):
             "/_plugins/_ml/tasks/_search",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -1679,6 +1789,7 @@ class MlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Trains a model synchronously.
@@ -1706,6 +1817,7 @@ class MlClient(NamespacedClient):
             _make_path("_plugins", "_ml", "_train", algorithm_name),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -1717,6 +1829,7 @@ class MlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Trains a model and predicts against the same training dataset.
@@ -1744,6 +1857,7 @@ class MlClient(NamespacedClient):
             _make_path("_plugins", "_ml", "_train_predict", algorithm_name),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -1755,6 +1869,7 @@ class MlClient(NamespacedClient):
         model_id: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Unloads a model.
@@ -1780,6 +1895,7 @@ class MlClient(NamespacedClient):
             _make_path("_plugins", "_ml", "models", model_id, "_unload"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -1791,6 +1907,7 @@ class MlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Updates a standalone connector.
@@ -1818,6 +1935,7 @@ class MlClient(NamespacedClient):
             _make_path("_plugins", "_ml", "connectors", connector_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -1829,6 +1947,7 @@ class MlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Updates a controller.
@@ -1854,6 +1973,7 @@ class MlClient(NamespacedClient):
             _make_path("_plugins", "_ml", "controllers", model_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -1865,6 +1985,7 @@ class MlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Update a memory.
@@ -1890,6 +2011,7 @@ class MlClient(NamespacedClient):
             _make_path("_plugins", "_ml", "memory", memory_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -1901,6 +2023,7 @@ class MlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Update a message.
@@ -1926,6 +2049,7 @@ class MlClient(NamespacedClient):
             _make_path("_plugins", "_ml", "memory", "message", message_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -1937,6 +2061,7 @@ class MlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Updates a model.
@@ -1962,6 +2087,7 @@ class MlClient(NamespacedClient):
             _make_path("_plugins", "_ml", "models", model_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -1973,6 +2099,7 @@ class MlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Updates a model group.
@@ -2000,6 +2127,7 @@ class MlClient(NamespacedClient):
             _make_path("_plugins", "_ml", "model_groups", model_group_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -2012,6 +2140,7 @@ class MlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Uploads model chunk.
@@ -2040,6 +2169,7 @@ class MlClient(NamespacedClient):
             ),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -2050,6 +2180,7 @@ class MlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Registers a model.
@@ -2075,6 +2206,7 @@ class MlClient(NamespacedClient):
             "/_plugins/_ml/models/_upload",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -2086,6 +2218,7 @@ class MlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Add agentic memory to a memory container.
@@ -2115,6 +2248,7 @@ class MlClient(NamespacedClient):
             ),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -2125,6 +2259,7 @@ class MlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Create a memory container.
@@ -2147,6 +2282,7 @@ class MlClient(NamespacedClient):
             "/_plugins/_ml/memory_containers/_create",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -2158,6 +2294,7 @@ class MlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Create session in a memory container.
@@ -2192,6 +2329,7 @@ class MlClient(NamespacedClient):
             ),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -2204,6 +2342,7 @@ class MlClient(NamespacedClient):
         id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Delete a specific memory by its type and ID.
@@ -2238,6 +2377,7 @@ class MlClient(NamespacedClient):
             ),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -2249,6 +2389,7 @@ class MlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Delete multiple memories using a query to match specific criteria.
@@ -2283,6 +2424,7 @@ class MlClient(NamespacedClient):
             ),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -2301,6 +2443,7 @@ class MlClient(NamespacedClient):
         memory_container_id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Delete a memory container.
@@ -2328,6 +2471,7 @@ class MlClient(NamespacedClient):
             _make_path("_plugins", "_ml", "memory_containers", memory_container_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -2338,6 +2482,7 @@ class MlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Execute an agent in streaming mode.
@@ -2363,6 +2508,7 @@ class MlClient(NamespacedClient):
             _make_path("_plugins", "_ml", "agents", agent_id, "_execute", "stream"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -2374,6 +2520,7 @@ class MlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Execute a tool.
@@ -2399,6 +2546,7 @@ class MlClient(NamespacedClient):
             _make_path("_plugins", "_ml", "tools", "_execute", tool_name),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -2411,6 +2559,7 @@ class MlClient(NamespacedClient):
         id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Get a specific memory by its type and ID.
@@ -2445,6 +2594,7 @@ class MlClient(NamespacedClient):
             ),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -2454,6 +2604,7 @@ class MlClient(NamespacedClient):
         memory_container_id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Get a memory container.
@@ -2481,6 +2632,7 @@ class MlClient(NamespacedClient):
             _make_path("_plugins", "_ml", "memory_containers", memory_container_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -2491,6 +2643,7 @@ class MlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Predicts a model in streaming mode.
@@ -2516,6 +2669,7 @@ class MlClient(NamespacedClient):
             _make_path("_plugins", "_ml", "models", model_id, "_predict", "stream"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -2528,6 +2682,7 @@ class MlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Search for memories of a specific type within a memory container.
@@ -2562,6 +2717,7 @@ class MlClient(NamespacedClient):
             ),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -2572,6 +2728,7 @@ class MlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Search memory containers.
@@ -2594,6 +2751,7 @@ class MlClient(NamespacedClient):
             "/_plugins/_ml/memory_containers/_search",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -2607,6 +2765,7 @@ class MlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Update a specific memory by its type and ID.
@@ -2641,6 +2800,7 @@ class MlClient(NamespacedClient):
             ),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -2652,6 +2812,7 @@ class MlClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Update a memory container.
@@ -2679,5 +2840,6 @@ class MlClient(NamespacedClient):
             _make_path("_plugins", "_ml", "memory_containers", memory_container_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )

@@ -38,6 +38,7 @@ class IngestionClient(NamespacedClient):
         index: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Use this API to retrieve the ingestion state for a given index.
@@ -67,6 +68,7 @@ class IngestionClient(NamespacedClient):
             _make_path(index, "ingestion", "_state"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -84,6 +86,7 @@ class IngestionClient(NamespacedClient):
         index: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Use this API to pause ingestion for a given index.
@@ -113,6 +116,7 @@ class IngestionClient(NamespacedClient):
             _make_path(index, "ingestion", "_pause"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -131,6 +135,7 @@ class IngestionClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Use this API to resume ingestion for the given index.
@@ -160,5 +165,6 @@ class IngestionClient(NamespacedClient):
             _make_path(index, "ingestion", "_resume"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )

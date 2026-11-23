@@ -48,6 +48,7 @@ class IndicesClient(NamespacedClient):
         index: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Performs the analysis process on a text and return the tokens breakdown of the
@@ -74,6 +75,7 @@ class IndicesClient(NamespacedClient):
             _make_path(index, "_analyze"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -93,6 +95,7 @@ class IndicesClient(NamespacedClient):
         index: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Performs the refresh operation in one or more indexes.
@@ -125,7 +128,11 @@ class IndicesClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return self.transport.perform_request(
-            "POST", _make_path(index, "_refresh"), params=params, headers=headers
+            "POST",
+            _make_path(index, "_refresh"),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -146,6 +153,7 @@ class IndicesClient(NamespacedClient):
         index: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Performs the flush operation on one or more indexes.
@@ -184,7 +192,11 @@ class IndicesClient(NamespacedClient):
             operation is running. Default is True.
         """
         return self.transport.perform_request(
-            "POST", _make_path(index, "_flush"), params=params, headers=headers
+            "POST",
+            _make_path(index, "_flush"),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -205,6 +217,7 @@ class IndicesClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Creates an index with optional settings and mappings.
@@ -242,7 +255,12 @@ class IndicesClient(NamespacedClient):
             raise ValueError("Empty value passed for a required argument 'index'.")
 
         return self.transport.perform_request(
-            "PUT", _make_path(index), params=params, headers=headers, body=body
+            "PUT",
+            _make_path(index),
+            params=params,
+            headers=headers,
+            body=body,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -266,6 +284,7 @@ class IndicesClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Clones an index.
@@ -313,6 +332,7 @@ class IndicesClient(NamespacedClient):
             _make_path(index, "_clone", target),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -337,6 +357,7 @@ class IndicesClient(NamespacedClient):
         index: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns information about one or more indexes.
@@ -387,7 +408,11 @@ class IndicesClient(NamespacedClient):
             raise ValueError("Empty value passed for a required argument 'index'.")
 
         return self.transport.perform_request(
-            "GET", _make_path(index), params=params, headers=headers
+            "GET",
+            _make_path(index),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -412,6 +437,7 @@ class IndicesClient(NamespacedClient):
         index: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Opens an index.
@@ -468,7 +494,11 @@ class IndicesClient(NamespacedClient):
             raise ValueError("Empty value passed for a required argument 'index'.")
 
         return self.transport.perform_request(
-            "POST", _make_path(index, "_open"), params=params, headers=headers
+            "POST",
+            _make_path(index, "_open"),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -491,6 +521,7 @@ class IndicesClient(NamespacedClient):
         index: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Closes an index.
@@ -538,7 +569,11 @@ class IndicesClient(NamespacedClient):
             raise ValueError("Empty value passed for a required argument 'index'.")
 
         return self.transport.perform_request(
-            "POST", _make_path(index, "_close"), params=params, headers=headers
+            "POST",
+            _make_path(index, "_close"),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -560,6 +595,7 @@ class IndicesClient(NamespacedClient):
         index: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Deletes an index.
@@ -605,7 +641,11 @@ class IndicesClient(NamespacedClient):
             raise ValueError("Empty value passed for a required argument 'index'.")
 
         return self.transport.perform_request(
-            "DELETE", _make_path(index), params=params, headers=headers
+            "DELETE",
+            _make_path(index),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -628,6 +668,7 @@ class IndicesClient(NamespacedClient):
         index: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns information about whether a particular index exists.
@@ -670,7 +711,11 @@ class IndicesClient(NamespacedClient):
             raise ValueError("Empty value passed for a required argument 'index'.")
 
         return self.transport.perform_request(
-            "HEAD", _make_path(index), params=params, headers=headers
+            "HEAD",
+            _make_path(index),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -694,6 +739,7 @@ class IndicesClient(NamespacedClient):
         index: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Updates the index mappings.
@@ -747,6 +793,7 @@ class IndicesClient(NamespacedClient):
             _make_path(index, "_mapping"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -769,6 +816,7 @@ class IndicesClient(NamespacedClient):
         index: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns mappings for one or more indexes.
@@ -809,7 +857,11 @@ class IndicesClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return self.transport.perform_request(
-            "GET", _make_path(index, "_mapping"), params=params, headers=headers
+            "GET",
+            _make_path(index, "_mapping"),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -831,6 +883,7 @@ class IndicesClient(NamespacedClient):
         index: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns mapping for one or more fields.
@@ -876,6 +929,7 @@ class IndicesClient(NamespacedClient):
             _make_path(index, "_mapping", "field", fields),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -896,6 +950,7 @@ class IndicesClient(NamespacedClient):
         index: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns information about whether a particular alias exists.
@@ -936,7 +991,11 @@ class IndicesClient(NamespacedClient):
             raise ValueError("Empty value passed for a required argument 'name'.")
 
         return self.transport.perform_request(
-            "HEAD", _make_path(index, "_alias", name), params=params, headers=headers
+            "HEAD",
+            _make_path(index, "_alias", name),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -957,6 +1016,7 @@ class IndicesClient(NamespacedClient):
         name: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns an alias.
@@ -994,7 +1054,11 @@ class IndicesClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return self.transport.perform_request(
-            "GET", _make_path(index, "_alias", name), params=params, headers=headers
+            "GET",
+            _make_path(index, "_alias", name),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -1013,6 +1077,7 @@ class IndicesClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Updates index aliases.
@@ -1044,7 +1109,12 @@ class IndicesClient(NamespacedClient):
             raise ValueError("Empty value passed for a required argument 'body'.")
 
         return self.transport.perform_request(
-            "POST", "/_aliases", params=params, headers=headers, body=body
+            "POST",
+            "/_aliases",
+            params=params,
+            headers=headers,
+            body=body,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -1064,6 +1134,7 @@ class IndicesClient(NamespacedClient):
         name: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Deletes an alias.
@@ -1099,7 +1170,11 @@ class IndicesClient(NamespacedClient):
                 raise ValueError("Empty value passed for a required argument.")
 
         return self.transport.perform_request(
-            "DELETE", _make_path(index, "_alias", name), params=params, headers=headers
+            "DELETE",
+            _make_path(index, "_alias", name),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -1120,6 +1195,7 @@ class IndicesClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Creates or updates an index template.
@@ -1160,6 +1236,7 @@ class IndicesClient(NamespacedClient):
             _make_path("_template", name),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -1180,6 +1257,7 @@ class IndicesClient(NamespacedClient):
         name: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns information about whether a particular index template exists.
@@ -1211,7 +1289,11 @@ class IndicesClient(NamespacedClient):
             raise ValueError("Empty value passed for a required argument 'name'.")
 
         return self.transport.perform_request(
-            "HEAD", _make_path("_template", name), params=params, headers=headers
+            "HEAD",
+            _make_path("_template", name),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -1231,6 +1313,7 @@ class IndicesClient(NamespacedClient):
         name: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns an index template.
@@ -1263,7 +1346,11 @@ class IndicesClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return self.transport.perform_request(
-            "GET", _make_path("_template", name), params=params, headers=headers
+            "GET",
+            _make_path("_template", name),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -1282,6 +1369,7 @@ class IndicesClient(NamespacedClient):
         name: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Deletes an index template.
@@ -1314,7 +1402,11 @@ class IndicesClient(NamespacedClient):
             raise ValueError("Empty value passed for a required argument 'name'.")
 
         return self.transport.perform_request(
-            "DELETE", _make_path("_template", name), params=params, headers=headers
+            "DELETE",
+            _make_path("_template", name),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -1339,6 +1431,7 @@ class IndicesClient(NamespacedClient):
         name: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns settings for one or more indexes.
@@ -1388,7 +1481,11 @@ class IndicesClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return self.transport.perform_request(
-            "GET", _make_path(index, "_settings", name), params=params, headers=headers
+            "GET",
+            _make_path(index, "_settings", name),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -1413,6 +1510,7 @@ class IndicesClient(NamespacedClient):
         index: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Updates the index settings.
@@ -1467,6 +1565,7 @@ class IndicesClient(NamespacedClient):
             _make_path(index, "_settings"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -1493,6 +1592,7 @@ class IndicesClient(NamespacedClient):
         metric: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Provides statistics on operations happening in an index.
@@ -1539,7 +1639,11 @@ class IndicesClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return self.transport.perform_request(
-            "GET", _make_path(index, "_stats", metric), params=params, headers=headers
+            "GET",
+            _make_path(index, "_stats", metric),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -1559,6 +1663,7 @@ class IndicesClient(NamespacedClient):
         index: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Provides low-level information about segments in a Lucene index.
@@ -1593,7 +1698,11 @@ class IndicesClient(NamespacedClient):
             Default is false.
         """
         return self.transport.perform_request(
-            "GET", _make_path(index, "_segments"), params=params, headers=headers
+            "GET",
+            _make_path(index, "_segments"),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -1622,6 +1731,7 @@ class IndicesClient(NamespacedClient):
         index: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Allows a user to validate a potentially expensive query without executing it.
@@ -1678,6 +1788,7 @@ class IndicesClient(NamespacedClient):
             _make_path(index, "_validate", "query"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -1702,6 +1813,7 @@ class IndicesClient(NamespacedClient):
         index: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Clears all or specific caches for one or more indexes.
@@ -1741,7 +1853,11 @@ class IndicesClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return self.transport.perform_request(
-            "POST", _make_path(index, "_cache", "clear"), params=params, headers=headers
+            "POST",
+            _make_path(index, "_cache", "clear"),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -1759,6 +1875,7 @@ class IndicesClient(NamespacedClient):
         index: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns information about ongoing index shard recoveries.
@@ -1784,7 +1901,11 @@ class IndicesClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return self.transport.perform_request(
-            "GET", _make_path(index, "_recovery"), params=params, headers=headers
+            "GET",
+            _make_path(index, "_recovery"),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -1805,6 +1926,7 @@ class IndicesClient(NamespacedClient):
         index: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         The `_upgrade` API is no longer useful and will be removed.
@@ -1837,7 +1959,11 @@ class IndicesClient(NamespacedClient):
             operation has completed before returning. Default is false.
         """
         return self.transport.perform_request(
-            "POST", _make_path(index, "_upgrade"), params=params, headers=headers
+            "POST",
+            _make_path(index, "_upgrade"),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -1856,6 +1982,7 @@ class IndicesClient(NamespacedClient):
         index: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         The `_upgrade` API is no longer useful and will be removed.
@@ -1884,7 +2011,11 @@ class IndicesClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return self.transport.perform_request(
-            "GET", _make_path(index, "_upgrade"), params=params, headers=headers
+            "GET",
+            _make_path(index, "_upgrade"),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -1904,6 +2035,7 @@ class IndicesClient(NamespacedClient):
         index: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Provides store information for shard copies of indexes.
@@ -1937,7 +2069,11 @@ class IndicesClient(NamespacedClient):
             request. Default is ['yellow', 'red'].
         """
         return self.transport.perform_request(
-            "GET", _make_path(index, "_shard_stores"), params=params, headers=headers
+            "GET",
+            _make_path(index, "_shard_stores"),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -1961,6 +2097,7 @@ class IndicesClient(NamespacedClient):
         index: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Performs the force merge operation on one or more indexes.
@@ -2001,7 +2138,11 @@ class IndicesClient(NamespacedClient):
             force merge is completed. Default is True.
         """
         return self.transport.perform_request(
-            "POST", _make_path(index, "_forcemerge"), params=params, headers=headers
+            "POST",
+            _make_path(index, "_forcemerge"),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -2026,6 +2167,7 @@ class IndicesClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Allow to shrink an existing index into a new index with fewer primary shards.
@@ -2075,6 +2217,7 @@ class IndicesClient(NamespacedClient):
             _make_path(index, "_shrink", target),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -2100,6 +2243,7 @@ class IndicesClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Allows you to split an existing index into a new index with more primary
@@ -2150,6 +2294,7 @@ class IndicesClient(NamespacedClient):
             _make_path(index, "_split", target),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -2173,6 +2318,7 @@ class IndicesClient(NamespacedClient):
         new_index: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Updates an alias to point to a new index when the existing index is considered
@@ -2220,6 +2366,7 @@ class IndicesClient(NamespacedClient):
             _make_path(alias, "_rollover", new_index),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -2231,6 +2378,7 @@ class IndicesClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Creates or updates a data stream.
@@ -2263,6 +2411,7 @@ class IndicesClient(NamespacedClient):
             _make_path("_data_stream", name),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -2273,6 +2422,7 @@ class IndicesClient(NamespacedClient):
         name: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Deletes a data stream.
@@ -2296,7 +2446,11 @@ class IndicesClient(NamespacedClient):
             raise ValueError("Empty value passed for a required argument 'name'.")
 
         return self.transport.perform_request(
-            "DELETE", _make_path("_data_stream", name), params=params, headers=headers
+            "DELETE",
+            _make_path("_data_stream", name),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -2315,6 +2469,7 @@ class IndicesClient(NamespacedClient):
         name: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Deletes an index template.
@@ -2351,6 +2506,7 @@ class IndicesClient(NamespacedClient):
             _make_path("_index_template", name),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -2370,6 +2526,7 @@ class IndicesClient(NamespacedClient):
         name: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns information about whether a particular index template exists.
@@ -2403,7 +2560,11 @@ class IndicesClient(NamespacedClient):
             raise ValueError("Empty value passed for a required argument 'name'.")
 
         return self.transport.perform_request(
-            "HEAD", _make_path("_index_template", name), params=params, headers=headers
+            "HEAD",
+            _make_path("_index_template", name),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -2423,6 +2584,7 @@ class IndicesClient(NamespacedClient):
         name: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns an index template.
@@ -2454,7 +2616,11 @@ class IndicesClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return self.transport.perform_request(
-            "GET", _make_path("_index_template", name), params=params, headers=headers
+            "GET",
+            _make_path("_index_template", name),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -2475,6 +2641,7 @@ class IndicesClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Creates or updates an index template.
@@ -2512,6 +2679,7 @@ class IndicesClient(NamespacedClient):
             _make_path("_index_template", name),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -2531,6 +2699,7 @@ class IndicesClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Simulate matching the given index name against the index templates in the
@@ -2566,6 +2735,7 @@ class IndicesClient(NamespacedClient):
             _make_path("_index_template", "_simulate_index", name),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -2576,6 +2746,7 @@ class IndicesClient(NamespacedClient):
         name: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns data streams.
@@ -2597,7 +2768,11 @@ class IndicesClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return self.transport.perform_request(
-            "GET", _make_path("_data_stream", name), params=params, headers=headers
+            "GET",
+            _make_path("_data_stream", name),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -2618,6 +2793,7 @@ class IndicesClient(NamespacedClient):
         name: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Simulate resolving the given template name or body.
@@ -2656,6 +2832,7 @@ class IndicesClient(NamespacedClient):
             _make_path("_index_template", "_simulate", name),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -2668,6 +2845,7 @@ class IndicesClient(NamespacedClient):
         name: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns information about any matching indexes, aliases, and data streams.
@@ -2697,7 +2875,11 @@ class IndicesClient(NamespacedClient):
             raise ValueError("Empty value passed for a required argument 'name'.")
 
         return self.transport.perform_request(
-            "GET", _make_path("_resolve", "index", name), params=params, headers=headers
+            "GET",
+            _make_path("_resolve", "index", name),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -2720,6 +2902,7 @@ class IndicesClient(NamespacedClient):
         block: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Adds a block to an index.
@@ -2759,7 +2942,11 @@ class IndicesClient(NamespacedClient):
                 raise ValueError("Empty value passed for a required argument.")
 
         return self.transport.perform_request(
-            "PUT", _make_path(index, "_block", block), params=params, headers=headers
+            "PUT",
+            _make_path(index, "_block", block),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -2769,6 +2956,7 @@ class IndicesClient(NamespacedClient):
         name: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Provides statistics on operations happening in a data stream.
@@ -2794,6 +2982,7 @@ class IndicesClient(NamespacedClient):
             _make_path("_data_stream", name, "_stats"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -2814,6 +3003,7 @@ class IndicesClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Creates or updates an alias.
@@ -2852,5 +3042,6 @@ class IndicesClient(NamespacedClient):
             _make_path(index, "_alias", name),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )

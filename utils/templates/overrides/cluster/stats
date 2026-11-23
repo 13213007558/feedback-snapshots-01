@@ -7,6 +7,6 @@
         index_metric: Any = None,
 {% endblock %}
 {% block request %}
-        return await self.transport.perform_request("{{ api.method }}", "/_cluster/stats" if node_id in SKIP_IN_PATH else _make_path("_cluster", "stats", metric, index_metric, "nodes", node_id), params=params, headers=headers)
+        return await self.transport.perform_request("{{ api.method }}", "/_cluster/stats" if node_id in SKIP_IN_PATH else _make_path("_cluster", "stats", metric, index_metric, "nodes", node_id), params=params, headers=headers, allowed_mimetypes=allowed_mimetypes)
 {% endblock%}
 

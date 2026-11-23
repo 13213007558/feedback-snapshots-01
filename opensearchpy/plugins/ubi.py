@@ -28,6 +28,7 @@ class UbiClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Initializes the UBI indexes.
@@ -46,5 +47,9 @@ class UbiClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return self.transport.perform_request(
-            "POST", "/_plugins/ubi/initialize", params=params, headers=headers
+            "POST",
+            "/_plugins/ubi/initialize",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )

@@ -29,6 +29,7 @@ class SearchRelevanceClient(NamespacedClient):
         experiment_id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Deletes a specified experiment.
@@ -57,6 +58,7 @@ class SearchRelevanceClient(NamespacedClient):
             _make_path("_plugins", "_search_relevance", "experiments", experiment_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -66,6 +68,7 @@ class SearchRelevanceClient(NamespacedClient):
         judgment_id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Deletes a specified judgment.
@@ -94,6 +97,7 @@ class SearchRelevanceClient(NamespacedClient):
             _make_path("_plugins", "_search_relevance", "judgments", judgment_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -103,6 +107,7 @@ class SearchRelevanceClient(NamespacedClient):
         query_set_id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Deletes a query set.
@@ -131,6 +136,7 @@ class SearchRelevanceClient(NamespacedClient):
             _make_path("_plugins", "_search_relevance", "query_sets", query_set_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -140,6 +146,7 @@ class SearchRelevanceClient(NamespacedClient):
         search_configuration_id: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Deletes a specified search configuration.
@@ -173,6 +180,7 @@ class SearchRelevanceClient(NamespacedClient):
             ),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -182,6 +190,7 @@ class SearchRelevanceClient(NamespacedClient):
         experiment_id: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Gets experiments.
@@ -205,6 +214,7 @@ class SearchRelevanceClient(NamespacedClient):
             _make_path("_plugins", "_search_relevance", "experiments", experiment_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -214,6 +224,7 @@ class SearchRelevanceClient(NamespacedClient):
         judgment_id: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Gets judgments.
@@ -237,6 +248,7 @@ class SearchRelevanceClient(NamespacedClient):
             _make_path("_plugins", "_search_relevance", "judgments", judgment_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -258,6 +270,7 @@ class SearchRelevanceClient(NamespacedClient):
         stat: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Gets stats by node.
@@ -291,6 +304,7 @@ class SearchRelevanceClient(NamespacedClient):
             _make_path("_plugins", "_search_relevance", node_id, "stats", stat),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -300,6 +314,7 @@ class SearchRelevanceClient(NamespacedClient):
         query_set_id: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Lists the current query sets available.
@@ -323,6 +338,7 @@ class SearchRelevanceClient(NamespacedClient):
             _make_path("_plugins", "_search_relevance", "query_sets", query_set_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -332,6 +348,7 @@ class SearchRelevanceClient(NamespacedClient):
         search_configuration_id: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Gets the search configurations.
@@ -360,6 +377,7 @@ class SearchRelevanceClient(NamespacedClient):
             ),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -380,6 +398,7 @@ class SearchRelevanceClient(NamespacedClient):
         stat: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Gets stats.
@@ -409,6 +428,7 @@ class SearchRelevanceClient(NamespacedClient):
             _make_path("_plugins", "_search_relevance", "stats", stat),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -418,6 +438,7 @@ class SearchRelevanceClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Creates a new query set by sampling queries from the user behavior data.
@@ -440,6 +461,7 @@ class SearchRelevanceClient(NamespacedClient):
             "/_plugins/_search_relevance/query_sets",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -450,6 +472,7 @@ class SearchRelevanceClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Creates an experiment.
@@ -472,6 +495,7 @@ class SearchRelevanceClient(NamespacedClient):
             "/_plugins/_search_relevance/experiments",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -482,6 +506,7 @@ class SearchRelevanceClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Creates a judgment.
@@ -504,6 +529,7 @@ class SearchRelevanceClient(NamespacedClient):
             "/_plugins/_search_relevance/judgments",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -514,6 +540,7 @@ class SearchRelevanceClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Creates a new query set by uploading manually.
@@ -536,6 +563,7 @@ class SearchRelevanceClient(NamespacedClient):
             "/_plugins/_search_relevance/query_sets",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -546,6 +574,7 @@ class SearchRelevanceClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Creates a search configuration.
@@ -568,5 +597,6 @@ class SearchRelevanceClient(NamespacedClient):
             "/_plugins/_search_relevance/search_configurations",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )

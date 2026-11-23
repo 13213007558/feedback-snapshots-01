@@ -31,6 +31,7 @@ class PplClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Returns the execution plan for a PPL query.
@@ -55,7 +56,12 @@ class PplClient(NamespacedClient):
             raise ValueError("Empty value passed for a required argument 'body'.")
 
         return self.transport.perform_request(
-            "POST", "/_plugins/_ppl/_explain", params=params, headers=headers, body=body
+            "POST",
+            "/_plugins/_ppl/_explain",
+            params=params,
+            headers=headers,
+            body=body,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -66,6 +72,7 @@ class PplClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Retrieves performance metrics for the PPL plugin.
@@ -87,7 +94,11 @@ class PplClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return self.transport.perform_request(
-            "GET", "/_plugins/_ppl/stats", params=params, headers=headers
+            "GET",
+            "/_plugins/_ppl/stats",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -99,6 +110,7 @@ class PplClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Retrieves filtered performance metrics for the PPL plugin.
@@ -123,7 +135,12 @@ class PplClient(NamespacedClient):
             raise ValueError("Empty value passed for a required argument 'body'.")
 
         return self.transport.perform_request(
-            "POST", "/_plugins/_ppl/stats", params=params, headers=headers, body=body
+            "POST",
+            "/_plugins/_ppl/stats",
+            params=params,
+            headers=headers,
+            body=body,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -135,6 +152,7 @@ class PplClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = None,
     ) -> Any:
         """
         Executes a PPL query against OpenSearch indexes.
@@ -159,5 +177,10 @@ class PplClient(NamespacedClient):
             raise ValueError("Empty value passed for a required argument 'body'.")
 
         return self.transport.perform_request(
-            "POST", "/_plugins/_ppl", params=params, headers=headers, body=body
+            "POST",
+            "/_plugins/_ppl",
+            params=params,
+            headers=headers,
+            body=body,
+            allowed_mimetypes=allowed_mimetypes,
         )

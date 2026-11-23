@@ -642,6 +642,7 @@ class TestRequestsHttpConnection(TestCase):
                 allow_redirects: Optional[bool] = True,
                 ignore: Collection[int] = (),
                 headers: Optional[Mapping[str, str]] = None,
+                allowed_mimetypes: Optional[Any] = None,
             ) -> Any:
                 nonlocal sent_url
                 sent_url = f"{self.host}{url}"

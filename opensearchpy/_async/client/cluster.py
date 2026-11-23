@@ -66,6 +66,7 @@ class ClusterClient(NamespacedClient):
         index: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns basic information about the health of the cluster.
@@ -130,6 +131,7 @@ class ClusterClient(NamespacedClient):
             _make_path("_cluster", "health", index),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -147,6 +149,7 @@ class ClusterClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns a list of pending cluster-level tasks, such as index creation, mapping
@@ -179,7 +182,11 @@ class ClusterClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return await self.transport.perform_request(
-            "GET", "/_cluster/pending_tasks", params=params, headers=headers
+            "GET",
+            "/_cluster/pending_tasks",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -205,6 +212,7 @@ class ClusterClient(NamespacedClient):
         index: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns comprehensive information about the state of the cluster.
@@ -264,6 +272,7 @@ class ClusterClient(NamespacedClient):
             _make_path("_cluster", "state", metric, index),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -281,6 +290,7 @@ class ClusterClient(NamespacedClient):
         node_id: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
         metric: Any = None,
         index_metric: Any = None,
     ) -> Any:
@@ -328,6 +338,7 @@ class ClusterClient(NamespacedClient):
             ),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -350,6 +361,7 @@ class ClusterClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Allows to manually change the allocation of individual shards in the cluster.
@@ -392,7 +404,12 @@ class ClusterClient(NamespacedClient):
             unspecified value.
         """
         return await self.transport.perform_request(
-            "POST", "/_cluster/reroute", params=params, headers=headers, body=body
+            "POST",
+            "/_cluster/reroute",
+            params=params,
+            headers=headers,
+            body=body,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -412,6 +429,7 @@ class ClusterClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns cluster settings.
@@ -450,7 +468,11 @@ class ClusterClient(NamespacedClient):
             unspecified value.
         """
         return await self.transport.perform_request(
-            "GET", "/_cluster/settings", params=params, headers=headers
+            "GET",
+            "/_cluster/settings",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -470,6 +492,7 @@ class ClusterClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Updates the cluster settings.
@@ -510,7 +533,12 @@ class ClusterClient(NamespacedClient):
             raise ValueError("Empty value passed for a required argument 'body'.")
 
         return await self.transport.perform_request(
-            "PUT", "/_cluster/settings", params=params, headers=headers, body=body
+            "PUT",
+            "/_cluster/settings",
+            params=params,
+            headers=headers,
+            body=body,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -519,6 +547,7 @@ class ClusterClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns the information about configured remote clusters.
@@ -537,7 +566,11 @@ class ClusterClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return await self.transport.perform_request(
-            "GET", "/_remote/info", params=params, headers=headers
+            "GET",
+            "/_remote/info",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -555,6 +588,7 @@ class ClusterClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Explains how shards are allocated in the current cluster and provides an
@@ -587,6 +621,7 @@ class ClusterClient(NamespacedClient):
             "/_cluster/allocation/explain",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -606,6 +641,7 @@ class ClusterClient(NamespacedClient):
         name: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Deletes a component template.
@@ -647,6 +683,7 @@ class ClusterClient(NamespacedClient):
             _make_path("_component_template", name),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -666,6 +703,7 @@ class ClusterClient(NamespacedClient):
         name: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns one or more component templates.
@@ -707,6 +745,7 @@ class ClusterClient(NamespacedClient):
             _make_path("_component_template", name),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -727,6 +766,7 @@ class ClusterClient(NamespacedClient):
         body: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Creates or updates a component template.
@@ -781,6 +821,7 @@ class ClusterClient(NamespacedClient):
             _make_path("_component_template", name),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -800,6 +841,7 @@ class ClusterClient(NamespacedClient):
         name: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns information about whether a particular component template exist.
@@ -840,6 +882,7 @@ class ClusterClient(NamespacedClient):
             _make_path("_component_template", name),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -850,6 +893,7 @@ class ClusterClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Clears any cluster voting configuration exclusions.
@@ -878,6 +922,7 @@ class ClusterClient(NamespacedClient):
             "/_cluster/voting_config_exclusions",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -895,6 +940,7 @@ class ClusterClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Updates the cluster voting configuration by excluding certain node IDs or
@@ -927,7 +973,11 @@ class ClusterClient(NamespacedClient):
             error.
         """
         return await self.transport.perform_request(
-            "POST", "/_cluster/voting_config_exclusions", params=params, headers=headers
+            "POST",
+            "/_cluster/voting_config_exclusions",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -936,6 +986,7 @@ class ClusterClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Recommissions a decommissioned zone.
@@ -954,7 +1005,11 @@ class ClusterClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return await self.transport.perform_request(
-            "DELETE", "/_cluster/decommission/awareness", params=params, headers=headers
+            "DELETE",
+            "/_cluster/decommission/awareness",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -964,6 +1019,7 @@ class ClusterClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Delete weighted shard routing weights.
@@ -986,6 +1042,7 @@ class ClusterClient(NamespacedClient):
             "/_cluster/routing/awareness/weights",
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )
 
@@ -996,6 +1053,7 @@ class ClusterClient(NamespacedClient):
         awareness_attribute_name: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Retrieves the decommission status for all zones.
@@ -1031,6 +1089,7 @@ class ClusterClient(NamespacedClient):
             ),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -1040,6 +1099,7 @@ class ClusterClient(NamespacedClient):
         attribute: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Fetches weighted shard routing weights.
@@ -1066,6 +1126,7 @@ class ClusterClient(NamespacedClient):
             _make_path("_cluster", "routing", "awareness", attribute, "weights"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -1076,6 +1137,7 @@ class ClusterClient(NamespacedClient):
         awareness_attribute_value: Any,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Decommissions a cluster zone based on awareness. This can greatly benefit
@@ -1117,6 +1179,7 @@ class ClusterClient(NamespacedClient):
             ),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -1127,6 +1190,7 @@ class ClusterClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Updates weighted shard routing weights.
@@ -1153,5 +1217,6 @@ class ClusterClient(NamespacedClient):
             _make_path("_cluster", "routing", "awareness", attribute, "weights"),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
             body=body,
         )

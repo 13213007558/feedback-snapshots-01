@@ -40,7 +40,7 @@ from ..exceptions import (
     SerializationError,
     TransportError,
 )
-from ..serializer import JSONSerializer
+from ..serializer import JSONSerializer, reset_allowed_mimetypes, set_allowed_mimetypes
 from ..transport import Transport, get_host_info
 from .compat import get_running_loop
 from .http_aiohttp import AIOHttpConnection
@@ -355,6 +355,9 @@ class AsyncTransport(Transport):
         timeout: Optional[Union[int, float]] = None,
         ignore: Collection[int] = (),
         headers: Optional[Mapping[str, str]] = None,
+        allowed_mimetypes: Optional[
+            Union[Collection[str], Mapping[str, Optional[Serializer]]]
+        ] = None,
     ) -> Any:
         """
         Perform the actual request. Retrieve a connection from the connection
@@ -377,6 +380,13 @@ class AsyncTransport(Transport):
             passed to the connection
         :arg timeout: timeout of the request. If it is not presented as argument
             will be extracted from `params`
+        :arg allowed_mimetypes: response media types approved for this
+            operation, as a collection of media type strings or a mapping of
+            media type to a decoder for this request only. When given, a
+            response declaring any other type is rejected locally without
+            being decoded. When ``None`` the client-wide decoders remain
+            available, preserving the previous behavior. This is a local
+            setting and is never sent to the server.
         """
         await self._async_call()
 
@@ -384,6 +394,36 @@ class AsyncTransport(Transport):
             method, params, body, ignore, timeout
         )
 
+        policy_token = set_allowed_mimetypes(
+            allowed_mimetypes, self.deserializer.default_mimetype
+        )
+        try:
+            return await self._perform_request_with_retries(
+                method,
+                url,
+                params,
+                body,
+                timeout,
+                ignore,
+                headers,
+                allowed_mimetypes,
+            )
+        finally:
+            reset_allowed_mimetypes(policy_token)
+
+    async def _perform_request_with_retries(
+        self,
+        method: str,
+        url: str,
+        params: Optional[Mapping[str, Any]],
+        body: Any,
+        timeout: Optional[Union[int, float]],
+        ignore: Collection[int],
+        headers: Optional[Mapping[str, str]],
+        allowed_mimetypes: Optional[
+            Union[Collection[str], Mapping[str, Optional[Serializer]]]
+        ],
+    ) -> Any:
         for attempt in range(self.max_retries + 1):
             connection = self.get_connection()
 
@@ -437,7 +477,9 @@ class AsyncTransport(Transport):
 
                 if data:
                     data = self.deserializer.loads(
-                        data, headers_response.get("content-type")
+                        data,
+                        headers_response.get("content-type"),
+                        allowed_mimetypes=allowed_mimetypes,
                     )
                 return data
 

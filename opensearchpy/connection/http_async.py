@@ -278,11 +278,19 @@ class AsyncHttpConnection(AIOHttpConnection):
                 duration,
                 status_code=response.status,
                 response=raw_data,
+                content_type=response.headers.get("content-type"),
             )
             self._raise_error(response.status, raw_data)
 
         self.log_request_success(
-            method, str(url), url_path, orig_body, response.status, raw_data, duration
+            method,
+            str(url),
+            url_path,
+            orig_body,
+            response.status,
+            raw_data,
+            duration,
+            content_type=response.headers.get("content-type"),
         )
 
         return response.status, response.headers, raw_data

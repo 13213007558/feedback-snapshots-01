@@ -2,5 +2,5 @@
 {% block request %}
         path = _make_path(index, "_explain", id)
 
-        return await self.transport.perform_request("{{ api.method }}", path, params=params, headers=headers, body=body)
+        return await self.transport.perform_request("{{ api.method }}", path, params=params, headers=headers, allowed_mimetypes=allowed_mimetypes, body=body)
 {% endblock %}

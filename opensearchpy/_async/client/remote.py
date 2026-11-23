@@ -32,7 +32,16 @@ from .utils import NamespacedClient, query_params
 
 class RemoteClient(NamespacedClient):
     @query_params()
-    async def info(self, params: Any = None, headers: Any = None) -> Any:
+    async def info(
+        self,
+        params: Any = None,
+        headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
+    ) -> Any:
         return await self.transport.perform_request(
-            "GET", "/_remote/info", params=params, headers=headers
+            "GET",
+            "/_remote/info",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )

@@ -40,6 +40,11 @@ except ImportError:
 
 from .._version import __versionstr__
 from ..exceptions import HTTP_EXCEPTIONS, OpenSearchWarning, TransportError
+from ..serializer import (
+    current_allowed_mimetypes,
+    current_default_mimetype,
+    normalize_mimetype,
+)
 
 logger = logging.getLogger("opensearch")
 
@@ -198,6 +203,19 @@ class Connection:
             if response is not None:
                 logger.debug("< %s", response)
 
+    @staticmethod
+    def _preview_allowed(
+        content_type: Optional[str],
+    ) -> bool:
+        """Whether the current request may let the trace inspect a body."""
+        allowed_mimetypes = current_allowed_mimetypes()
+        if allowed_mimetypes is None:
+            return True
+        declared = normalize_mimetype(content_type) or current_default_mimetype()
+        if declared is None:
+            return True
+        return declared in allowed_mimetypes
+
     def _log_trace(
         self,
         method: str,
@@ -206,6 +224,7 @@ class Connection:
         status_code: Optional[int],
         response: Optional[str],
         duration: Optional[float],
+        preview_response: bool = True,
     ) -> None:
         if not tracer.isEnabledFor(logging.INFO) or not tracer.handlers:
             return
@@ -223,11 +242,14 @@ class Connection:
         )
 
         if tracer.isEnabledFor(logging.DEBUG):
+            pretty_response = ""
+            if response and preview_response:
+                pretty_response = self._pretty_json(response).replace("\n", "\n#")
             tracer.debug(
                 "#[%s] (%.3fs)\n#%s",
                 status_code,
                 duration,
-                self._pretty_json(response).replace("\n", "\n#") if response else "",
+                pretty_response,
             )
 
     def perform_request(
@@ -251,6 +273,7 @@ class Connection:
         status_code: int,
         response: str,
         duration: float,
+        content_type: Optional[str] = None,
     ) -> None:
         """Log a successful API call."""
         #  TODO: optionally pass in params instead of full_url and do urlencode only when needed
@@ -260,7 +283,15 @@ class Connection:
         )
 
         self._log_request_response(body, response)
-        self._log_trace(method, path, body, status_code, response, duration)
+        self._log_trace(
+            method,
+            path,
+            body,
+            status_code,
+            response,
+            duration,
+            preview_response=self._preview_allowed(content_type),
+        )
 
     def log_request_fail(
         self,
@@ -272,6 +303,7 @@ class Connection:
         status_code: Optional[int] = None,
         response: Optional[str] = None,
         exception: Optional[Exception] = None,
+        content_type: Optional[str] = None,
     ) -> None:
         """Log an unsuccessful API call."""
         # do not log 404s on HEAD requests
@@ -287,7 +319,15 @@ class Connection:
         )
 
         self._log_request_response(body, response)
-        self._log_trace(method, path, body, status_code, response, duration)
+        self._log_trace(
+            method,
+            path,
+            body,
+            status_code,
+            response,
+            duration,
+            preview_response=self._preview_allowed(content_type),
+        )
 
     def _raise_error(
         self,

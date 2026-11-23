@@ -37,15 +37,34 @@ try:
 except ImportError:
     np = pd = None
 
-from opensearchpy.exceptions import ImproperlyConfigured, SerializationError
+from opensearchpy.exceptions import (
+    ImproperlyConfigured,
+    SerializationError,
+    UnsupportedResponseFormatError,
+)
 from opensearchpy.serializer import (
     DEFAULT_SERIALIZERS,
     Deserializer,
     JSONSerializer,
+    Serializer,
     TextSerializer,
 )
 
 from .test_cases import SkipTest, TestCase
+
+
+class PluginFormatSerializer(Serializer):
+    mimetype = "application/vnd.opensearch.plugin+json"
+
+    def __init__(self) -> None:
+        self.load_calls = 0
+
+    def loads(self, s: str) -> Any:
+        self.load_calls += 1
+        return {"plugin_only": True, "raw": s}
+
+    def dumps(self, data: Any) -> Any:
+        return str(data)
 
 
 def requires_numpy_and_pandas() -> None:
@@ -226,6 +245,97 @@ class TestDeserializer(TestCase):
 
     def test_raises_serialization_error_on_unknown_mimetype(self) -> None:
         self.assertRaises(SerializationError, self.de.loads, "{}", "text/html")
+
+    def test_allowed_mimetypes_gate_registered_decoders(self) -> None:
+        plugin = PluginFormatSerializer()
+        de = Deserializer(
+            {
+                "application/json": JSONSerializer(),
+                plugin.mimetype: plugin,
+            }
+        )
+
+        self.assertEqual(
+            {"plugin_only": True, "raw": '{"a":1}'},
+            de.loads(
+                '{"a":1}',
+                plugin.mimetype,
+                allowed_mimetypes=("application/json", plugin.mimetype),
+            ),
+        )
+        self.assertEqual(1, plugin.load_calls)
+
+        with self.assertRaises(SerializationError):
+            de.loads(
+                '{"a":1}', plugin.mimetype, allowed_mimetypes=("application/json",)
+            )
+        self.assertEqual(1, plugin.load_calls)
+
+    def test_allowed_mimetypes_mapping_supplies_request_decoder(self) -> None:
+        registered = PluginFormatSerializer()
+        request_only = PluginFormatSerializer()
+        de = Deserializer(
+            {
+                "application/json": JSONSerializer(),
+                registered.mimetype: registered,
+            }
+        )
+
+        result = de.loads(
+            "payload",
+            registered.mimetype,
+            allowed_mimetypes={registered.mimetype: request_only},
+        )
+
+        self.assertEqual({"plugin_only": True, "raw": "payload"}, result)
+        self.assertEqual(1, request_only.load_calls)
+        self.assertEqual(0, registered.load_calls)
+
+    def test_missing_mimetype_uses_default_under_allowlist(self) -> None:
+        plugin = PluginFormatSerializer()
+        de = Deserializer(
+            {
+                "application/json": JSONSerializer(),
+                plugin.mimetype: plugin,
+            },
+            default_mimetype=plugin.mimetype,
+        )
+
+        with self.assertRaises(SerializationError):
+            de.loads("payload", allowed_mimetypes=("application/json",))
+        self.assertEqual(0, plugin.load_calls)
+
+        self.assertEqual(
+            {"plugin_only": True, "raw": "payload"},
+            de.loads("payload", allowed_mimetypes=(plugin.mimetype,)),
+        )
+        self.assertEqual(1, plugin.load_calls)
+
+    def test_media_type_parameters_and_compatible_json_are_normalized(self) -> None:
+        de = Deserializer(DEFAULT_SERIALIZERS)
+        allowed = ("application/json",)
+
+        for mimetype in (
+            "application/json; charset=utf-8",
+            "Application/JSON",
+            "application/vnd.elasticsearch+json",
+            "application/vnd.elasticsearch+json;compatible-with=7",
+        ):
+            self.assertEqual(
+                {"a": 1}, de.loads('{"a":1}', mimetype, allowed_mimetypes=allowed)
+            )
+
+    def test_unsupported_response_has_distinct_local_error(self) -> None:
+        de = Deserializer(DEFAULT_SERIALIZERS)
+
+        with self.assertRaises(UnsupportedResponseFormatError) as caught:
+            de.loads(
+                "{}", "application/x-plugin", allowed_mimetypes=("application/json",)
+            )
+
+        self.assertIsInstance(caught.exception, SerializationError)
+        self.assertEqual("application/x-plugin", caught.exception.mimetype)
+        self.assertEqual(("application/json",), caught.exception.allowed_mimetypes)
 
     def test_raises_improperly_configured_when_default_mimetype_cannot_be_deserialized(
         self,

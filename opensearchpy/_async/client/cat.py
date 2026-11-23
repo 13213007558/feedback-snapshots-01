@@ -60,6 +60,7 @@ class CatClient(NamespacedClient):
         name: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json", "text/plain"),
     ) -> Any:
         """
         Shows information about aliases currently configured to indexes, including
@@ -95,7 +96,11 @@ class CatClient(NamespacedClient):
             Default is false.
         """
         return await self.transport.perform_request(
-            "GET", _make_path("_cat", "aliases", name), params=params, headers=headers
+            "GET",
+            _make_path("_cat", "aliases", name),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -116,6 +121,7 @@ class CatClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json", "text/plain"),
     ) -> Any:
         """
         Lists all active CAT point-in-time segments.
@@ -144,7 +150,11 @@ class CatClient(NamespacedClient):
             Default is false.
         """
         return await self.transport.perform_request(
-            "GET", "/_cat/pit_segments/_all", params=params, headers=headers
+            "GET",
+            "/_cat/pit_segments/_all",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -169,6 +179,7 @@ class CatClient(NamespacedClient):
         node_id: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json", "text/plain"),
     ) -> Any:
         """
         Provides a snapshot of how many shards are allocated to each data node and how
@@ -211,6 +222,7 @@ class CatClient(NamespacedClient):
             _make_path("_cat", "allocation", node_id),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -233,6 +245,7 @@ class CatClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json", "text/plain"),
     ) -> Any:
         """
         Returns information about the cluster-manager node.
@@ -266,7 +279,11 @@ class CatClient(NamespacedClient):
             Default is false.
         """
         return await self.transport.perform_request(
-            "GET", "/_cat/cluster_manager", params=params, headers=headers
+            "GET",
+            "/_cat/cluster_manager",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -287,6 +304,7 @@ class CatClient(NamespacedClient):
         index: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json", "text/plain"),
     ) -> Any:
         """
         Provides quick access to the document count of the entire cluster or of an
@@ -317,7 +335,11 @@ class CatClient(NamespacedClient):
             Default is false.
         """
         return await self.transport.perform_request(
-            "GET", _make_path("_cat", "count", index), params=params, headers=headers
+            "GET",
+            _make_path("_cat", "count", index),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -339,6 +361,7 @@ class CatClient(NamespacedClient):
         fields: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json", "text/plain"),
     ) -> Any:
         """
         Shows how much heap memory is currently being used by field data on every data
@@ -374,6 +397,7 @@ class CatClient(NamespacedClient):
             _make_path("_cat", "fielddata", fields),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -395,6 +419,7 @@ class CatClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json", "text/plain"),
     ) -> Any:
         """
         Returns a concise representation of the cluster health.
@@ -425,7 +450,11 @@ class CatClient(NamespacedClient):
             Default is false.
         """
         return await self.transport.perform_request(
-            "GET", "/_cat/health", params=params, headers=headers
+            "GET",
+            "/_cat/health",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params("error_trace", "filter_path", "human", "pretty", "source")
@@ -434,6 +463,7 @@ class CatClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json", "text/plain"),
     ) -> Any:
         """
         Returns help for the Cat APIs.
@@ -452,7 +482,11 @@ class CatClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return await self.transport.perform_request(
-            "GET", "/_cat", params=params, headers=headers
+            "GET",
+            "/_cat",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -482,6 +516,7 @@ class CatClient(NamespacedClient):
         index: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json", "text/plain"),
     ) -> Any:
         """
         Lists information related to indexes, that is, how much disk space they are
@@ -533,7 +568,11 @@ class CatClient(NamespacedClient):
             Default is false.
         """
         return await self.transport.perform_request(
-            "GET", _make_path("_cat", "indices", index), params=params, headers=headers
+            "GET",
+            _make_path("_cat", "indices", index),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -556,6 +595,7 @@ class CatClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json", "text/plain"),
     ) -> Any:
         """
         Returns information about the cluster-manager node.
@@ -594,7 +634,11 @@ class CatClient(NamespacedClient):
             "Deprecated: To promote inclusive language, use '/_cat/cluster_manager' instead."
         )
         return await self.transport.perform_request(
-            "GET", "/_cat/master", params=params, headers=headers
+            "GET",
+            "/_cat/master",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -617,6 +661,7 @@ class CatClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json", "text/plain"),
     ) -> Any:
         """
         Returns information about custom node attributes.
@@ -650,7 +695,11 @@ class CatClient(NamespacedClient):
             Default is false.
         """
         return await self.transport.perform_request(
-            "GET", "/_cat/nodeattrs", params=params, headers=headers
+            "GET",
+            "/_cat/nodeattrs",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -676,6 +725,7 @@ class CatClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json", "text/plain"),
     ) -> Any:
         """
         Returns basic statistics about the performance of cluster nodes.
@@ -718,7 +768,11 @@ class CatClient(NamespacedClient):
             Default is false.
         """
         return await self.transport.perform_request(
-            "GET", "/_cat/nodes", params=params, headers=headers
+            "GET",
+            "/_cat/nodes",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -742,6 +796,7 @@ class CatClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json", "text/plain"),
     ) -> Any:
         """
         Returns a concise representation of the cluster's pending tasks.
@@ -779,7 +834,11 @@ class CatClient(NamespacedClient):
             Default is false.
         """
         return await self.transport.perform_request(
-            "GET", "/_cat/pending_tasks", params=params, headers=headers
+            "GET",
+            "/_cat/pending_tasks",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -801,6 +860,7 @@ class CatClient(NamespacedClient):
         body: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json", "text/plain"),
     ) -> Any:
         """
         Lists one or several CAT point-in-time segments.
@@ -829,7 +889,12 @@ class CatClient(NamespacedClient):
             Default is false.
         """
         return await self.transport.perform_request(
-            "GET", "/_cat/pit_segments", params=params, headers=headers, body=body
+            "GET",
+            "/_cat/pit_segments",
+            params=params,
+            headers=headers,
+            body=body,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -852,6 +917,7 @@ class CatClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json", "text/plain"),
     ) -> Any:
         """
         Returns information about the names, components, and versions of the installed
@@ -886,7 +952,11 @@ class CatClient(NamespacedClient):
             Default is false.
         """
         return await self.transport.perform_request(
-            "GET", "/_cat/plugins", params=params, headers=headers
+            "GET",
+            "/_cat/plugins",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -911,6 +981,7 @@ class CatClient(NamespacedClient):
         index: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json", "text/plain"),
     ) -> Any:
         """
         Returns all completed and ongoing index and shard recoveries.
@@ -950,7 +1021,11 @@ class CatClient(NamespacedClient):
             Default is false.
         """
         return await self.transport.perform_request(
-            "GET", _make_path("_cat", "recovery", index), params=params, headers=headers
+            "GET",
+            _make_path("_cat", "recovery", index),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -973,6 +1048,7 @@ class CatClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json", "text/plain"),
     ) -> Any:
         """
         Returns information about all snapshot repositories for a cluster.
@@ -1006,7 +1082,11 @@ class CatClient(NamespacedClient):
             Default is false.
         """
         return await self.transport.perform_request(
-            "GET", "/_cat/repositories", params=params, headers=headers
+            "GET",
+            "/_cat/repositories",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -1038,6 +1118,7 @@ class CatClient(NamespacedClient):
         index: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json", "text/plain"),
     ) -> Any:
         """
         Returns information about active and last-completed segment replication events
@@ -1098,6 +1179,7 @@ class CatClient(NamespacedClient):
             _make_path("_cat", "segment_replication", index),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -1121,6 +1203,7 @@ class CatClient(NamespacedClient):
         index: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json", "text/plain"),
     ) -> Any:
         """
         Provides low-level information about the segments in the shards of an index.
@@ -1157,7 +1240,11 @@ class CatClient(NamespacedClient):
             Default is false.
         """
         return await self.transport.perform_request(
-            "GET", _make_path("_cat", "segments", index), params=params, headers=headers
+            "GET",
+            _make_path("_cat", "segments", index),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -1183,6 +1270,7 @@ class CatClient(NamespacedClient):
         index: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json", "text/plain"),
     ) -> Any:
         """
         Lists the states of all primary and replica shards and how they are
@@ -1226,7 +1314,11 @@ class CatClient(NamespacedClient):
             Default is false.
         """
         return await self.transport.perform_request(
-            "GET", _make_path("_cat", "shards", index), params=params, headers=headers
+            "GET",
+            _make_path("_cat", "shards", index),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -1251,6 +1343,7 @@ class CatClient(NamespacedClient):
         thread_pool_patterns: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json", "text/plain"),
     ) -> Any:
         """
         Returns cluster-wide thread pool statistics per node. By default the active,
@@ -1292,6 +1385,7 @@ class CatClient(NamespacedClient):
             _make_path("_cat", "thread_pool", thread_pool_patterns),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -1316,6 +1410,7 @@ class CatClient(NamespacedClient):
         repository: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json", "text/plain"),
     ) -> Any:
         """
         Lists all of the snapshots stored in a specific repository.
@@ -1361,6 +1456,7 @@ class CatClient(NamespacedClient):
             _make_path("_cat", "snapshots", repository),
             params=params,
             headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -1385,6 +1481,7 @@ class CatClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json", "text/plain"),
     ) -> Any:
         """
         Lists the progress of all tasks currently running on the cluster.
@@ -1425,7 +1522,11 @@ class CatClient(NamespacedClient):
             Default is false.
         """
         return await self.transport.perform_request(
-            "GET", "/_cat/tasks", params=params, headers=headers
+            "GET",
+            "/_cat/tasks",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -1449,6 +1550,7 @@ class CatClient(NamespacedClient):
         name: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json", "text/plain"),
     ) -> Any:
         """
         Lists the names, patterns, order numbers, and version numbers of index
@@ -1485,5 +1587,9 @@ class CatClient(NamespacedClient):
             Default is false.
         """
         return await self.transport.perform_request(
-            "GET", _make_path("_cat", "templates", name), params=params, headers=headers
+            "GET",
+            _make_path("_cat", "templates", name),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )

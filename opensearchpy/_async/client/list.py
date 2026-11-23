@@ -28,6 +28,7 @@ class ListClient(NamespacedClient):
         *,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns help for the List APIs.
@@ -46,7 +47,11 @@ class ListClient(NamespacedClient):
             libraries that do not accept a request body for non-POST requests.
         """
         return await self.transport.perform_request(
-            "GET", "/_list", params=params, headers=headers
+            "GET",
+            "/_list",
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -79,6 +84,7 @@ class ListClient(NamespacedClient):
         index: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns paginated information about indexes including number of primaries and
@@ -134,7 +140,11 @@ class ListClient(NamespacedClient):
         :arg v: Verbose mode. Display column headers. Default is false.
         """
         return await self.transport.perform_request(
-            "GET", _make_path("_list", "indices", index), params=params, headers=headers
+            "GET",
+            _make_path("_list", "indices", index),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
 
     @query_params(
@@ -163,6 +173,7 @@ class ListClient(NamespacedClient):
         index: Any = None,
         params: Any = None,
         headers: Any = None,
+        allowed_mimetypes: Any = ("application/json",),
     ) -> Any:
         """
         Returns paginated details of shard allocation on nodes.
@@ -207,5 +218,9 @@ class ListClient(NamespacedClient):
         :arg v: Verbose mode. Display column headers. Default is false.
         """
         return await self.transport.perform_request(
-            "GET", _make_path("_list", "shards", index), params=params, headers=headers
+            "GET",
+            _make_path("_list", "shards", index),
+            params=params,
+            headers=headers,
+            allowed_mimetypes=allowed_mimetypes,
         )
