@@ -1,0 +1,33 @@
+PATH
+  remote: ..
+  specs:
+    hanami-router (3.0.0)
+      csv (~> 3.3)
+      mustermann (~> 3.1)
+      rack (>= 2.2.16)
+
+GEM
+  remote: https://rubygems.org/
+  specs:
+    csv (3.3.7)
+    mustermann (3.1.1)
+    rack (3.2.9)
+
+PLATFORMS
+  arm64-darwin-25
+  ruby
+
+DEPENDENCIES
+  hanami-router!
+
+CHECKSUMS
+  csv (3.3.7) sha256=15a3f16f6628da8664d455eb634e7f22031bcf53044923caf56975109e71b9f8
+  hanami-router (3.0.0)
+  mustermann (3.1.1) sha256=4c6170c7234d5499c345562ba7c7dfe73e1754286dcc1abb053064d66a127198
+  rack (3.2.9) sha256=8235c1d08f0c461bedcff4413bbeba888173e5b09e1332ae951c98f0ee460dcc
+
+RUBY VERSION
+  ruby 3.3.12
+
+BUNDLED WITH
+  4.0.16
