@@ -22,7 +22,12 @@ from django.utils.translation import gettext_lazy as _
 from django.views import View
 from django.views.decorators.csrf import csrf_exempt
 
-from .models import SESSION_KEY_MAXLENGTH, ProxyGrantingTicket, SessionTicket
+from .models import (
+    SESSION_KEY_MAXLENGTH,
+    ProxyGrantingTicket,
+    SessionServiceGrant,
+    SessionTicket,
+)
 from .signals import cas_user_logout
 from .utils import (
     RedirectException,
@@ -229,6 +234,7 @@ class LogoutView(View):
 
         # clean current session ProxyGrantingTicket and SessionTicket
         ProxyGrantingTicket.objects.filter(session_key=session_key).delete()
+        SessionServiceGrant.objects.filter(session_key=session_key).delete()
         SessionTicket.objects.filter(session_key=session_key).delete()
         auth_logout(request)
 
@@ -320,4 +326,5 @@ def clean_sessions(client, request):
 
         session.delete(session_key)
         ProxyGrantingTicket.objects.filter(session_key=session_key).delete()
+        SessionServiceGrant.objects.filter(session_key=session_key).delete()
         SessionTicket.objects.filter(session_key=session_key).delete()

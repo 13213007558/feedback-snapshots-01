@@ -1,3 +1,14 @@
+UNRELEASED
+==========
+* Authorize proxy tickets per browser session via
+  ``ProxyGrantingTicket.allow_service`` and the new ``SessionServiceGrant``
+  model; ``retrieve_pt`` only delegates to services granted to the current
+  session.
+* Never deliver a proxy ticket to a session that a single logout terminated,
+  including when the CAS answer arrives after the logout.
+* Split proxy failures into retryable ``ProxyError`` (transport) and
+  non-retryable ``ProxyDenied`` (ineligibility) exceptions.
+
 5.1.2 (2026-10-28)
 ==================
 * Updated homepage and doc links

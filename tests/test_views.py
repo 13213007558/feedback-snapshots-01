@@ -7,7 +7,11 @@ from django.contrib.auth.middleware import AuthenticationMiddleware
 from django.contrib.sessions.middleware import SessionMiddleware
 from django.core.exceptions import PermissionDenied
 from django.test import RequestFactory
-from django_cas_ng.models import ProxyGrantingTicket, SessionTicket
+from django_cas_ng.models import (
+    ProxyGrantingTicket,
+    SessionServiceGrant,
+    SessionTicket,
+)
 from django_cas_ng.utils import RedirectException
 from django_cas_ng.views import CallbackView, LoginView, LogoutView, is_local_url, clean_next_page
 
@@ -158,6 +162,9 @@ def test_login_post_logout(django_user_model, settings):
     assert ProxyGrantingTicket.objects.filter(session_key=session.session_key,
                                               user=user, pgtiou='fake-ticket-iou',
                                               pgt='fake-ticket').exists() is True
+    grant = SessionServiceGrant.objects.create(
+        session_key=session.session_key, service='https://service.example/')
+    assert grant is not None
 
     LoginView().post(request)
     assert SessionTicket.objects.filter(session_key=session.session_key,
@@ -167,6 +174,8 @@ def test_login_post_logout(django_user_model, settings):
                                               pgt='fake-ticket').exists() is False
     assert SessionTicket.objects.filter(session_key=session.session_key,
                                         ticket='fake-ticket').exists() is False
+    assert SessionServiceGrant.objects.filter(
+        session_key=session.session_key).exists() is False
 
 
 @pytest.mark.django_db
@@ -442,6 +451,35 @@ def test_post_logout(django_user_model, settings):
 
 
 @pytest.mark.django_db
+def test_logout_removes_session_service_grants(django_user_model):
+    """Manual logout purges the grants of the current session only."""
+    factory = RequestFactory()
+    request = factory.get('/logout/')
+    process_request_for_middleware(request, SessionMiddleware)
+
+    user = django_user_model.objects.create_user('proxy@example.com', '')
+    request.user = user
+
+    other_session = SessionStore()
+    other_session.save()
+
+    SessionServiceGrant.objects.create(
+        session_key=request.session.session_key,
+        service='https://service-a.example/')
+    SessionServiceGrant.objects.create(
+        session_key=other_session.session_key,
+        service='https://service-b.example/')
+
+    LogoutView().get(request)
+
+    assert SessionServiceGrant.objects.filter(
+        session_key=request.session.session_key).exists() is False
+    assert SessionServiceGrant.objects.filter(
+        session_key=other_session.session_key,
+        service='https://service-b.example/').exists() is True
+
+
+@pytest.mark.django_db
 def test_callback_create_pgt():
     """
     Test the case where a pgt callback is used.
@@ -499,6 +537,9 @@ def test_callback_post_logout(django_user_model, settings):
     assert ProxyGrantingTicket.objects.filter(session_key=session.session_key,
                                               user=user, pgtiou='fake-ticket-iou',
                                               pgt='fake-ticket').exists() is True
+    grant = SessionServiceGrant.objects.create(
+        session_key=session.session_key, service='https://service.example/')
+    assert grant is not None
 
     CallbackView().post(request)
     assert SessionTicket.objects.filter(session_key=session.session_key,
@@ -508,3 +549,5 @@ def test_callback_post_logout(django_user_model, settings):
                                               pgt='fake-ticket').exists() is False
     assert SessionTicket.objects.filter(session_key=session.session_key,
                                         ticket='fake-ticket').exists() is False
+    assert SessionServiceGrant.objects.filter(
+        session_key=session.session_key).exists() is False

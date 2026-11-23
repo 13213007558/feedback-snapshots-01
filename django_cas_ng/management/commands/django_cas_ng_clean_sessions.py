@@ -9,4 +9,5 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         models.ProxyGrantingTicket.clean_deleted_sessions()
+        models.SessionServiceGrant.clean_deleted_sessions()
         models.SessionTicket.clean_deleted_sessions()

@@ -5,7 +5,11 @@ from importlib import import_module
 import pytest
 from django.conf import settings
 from django.core import management
-from django_cas_ng.models import ProxyGrantingTicket, SessionTicket
+from django_cas_ng.models import (
+    ProxyGrantingTicket,
+    SessionServiceGrant,
+    SessionTicket,
+)
 
 SessionStore = import_module(settings.SESSION_ENGINE).SessionStore
 
@@ -41,6 +45,17 @@ def test_command_clean_session(django_user_model):
                                               user=user, pgtiou='fake-ticket-iou',
                                               pgt='fake-ticket').exists() is True
 
+    # A grant tied to the dead session must be cleaned, while a grant on a
+    # still-live session is preserved.
+    SessionServiceGrant.objects.create(
+        session_key=session.session_key, service='https://dead.example/')
+    live_session = SessionStore()
+    live_session['_auth_user_id'] = str(user.pk)
+    live_session['_auth_user_backend'] = 'django.contrib.auth.backends.ModelBackend'
+    live_session.save()
+    SessionServiceGrant.objects.create(
+        session_key=live_session.session_key, service='https://live.example/')
+
     # Call the clean sessions command and make sure things are cleaned up
     management.call_command('django_cas_ng_clean_sessions')
     assert SessionTicket.objects.filter(session_key=session.session_key,
@@ -48,3 +63,8 @@ def test_command_clean_session(django_user_model):
     assert ProxyGrantingTicket.objects.filter(session_key=session.session_key,
                                               user=user, pgtiou='fake-ticket-iou',
                                               pgt='fake-ticket').exists() is False
+    assert SessionServiceGrant.objects.filter(
+        session_key=session.session_key).exists() is False
+    assert SessionServiceGrant.objects.filter(
+        session_key=live_session.session_key,
+        service='https://live.example/').exists() is True
