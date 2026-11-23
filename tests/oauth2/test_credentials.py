@@ -973,9 +973,12 @@ class TestCredentials(object):
         assert list(creds.__dict__).sort() == list(unpickled.__dict__).sort()
 
         for attr in list(creds.__dict__):
-            # Worker should always be None
+            # Worker is always reset to None; refresh coordination primitives
+            # are re-initialized on the unpickled credentials.
             if attr == "_refresh_worker":
                 assert getattr(unpickled, attr) is None
+            elif attr in ("_identity_lock", "_refresh_completed"):
+                assert getattr(unpickled, attr) is not None
             else:
                 assert getattr(creds, attr) == getattr(unpickled, attr)
 
@@ -1010,9 +1013,11 @@ class TestCredentials(object):
 
         for attr in list(creds.__dict__):
             # For the _refresh_handler property, the unpickled creds should be
-            # set to None.
+            # set to None. Refresh coordination primitives are re-initialized.
             if attr == "_refresh_handler" or attr == "_refresh_worker":
                 assert getattr(unpickled, attr) is None
+            elif attr in ("_identity_lock", "_refresh_completed"):
+                assert getattr(unpickled, attr) is not None
             else:
                 assert getattr(creds, attr) == getattr(unpickled, attr)
 

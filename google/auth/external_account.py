@@ -419,18 +419,22 @@ class Credentials(
         For impersonated credentials, this method will refresh the underlying
         source credentials and the impersonated credentials. For non-impersonated
         credentials, it will refresh the access token and the trust boundary.
+
+        The token and trust boundary are staged and published as a single
+        identity pair, so business requests never observe a token and
+        boundary produced by different refresh approvals.
         """
-        self._perform_refresh_token(request)
-        self._handle_trust_boundary(request)
+        self._refresh_identity_pair(
+            request, self._perform_refresh_token, self._handle_trust_boundary
+        )
 
     def _handle_trust_boundary(self, request):
         # If we are impersonating, the trust boundary is handled by the
         # impersonated credentials object. We need to get it from there.
         if self._service_account_impersonation_url:
-            self._trust_boundary = self._impersonated_credentials._trust_boundary
-        else:
-            # Otherwise, refresh the trust boundary for the external account.
-            self._refresh_trust_boundary(request)
+            return self._impersonated_credentials._trust_boundary
+        # Otherwise, refresh the trust boundary for the external account.
+        return self._refresh_trust_boundary(request)
 
     def _perform_refresh_token(self, request, cert_fingerprint=None):
         scopes = self._scopes if self._scopes is not None else self._default_scopes

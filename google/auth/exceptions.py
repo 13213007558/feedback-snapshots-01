@@ -37,6 +37,17 @@ class RefreshError(GoogleAuthError):
     failed."""
 
 
+class TrustBoundaryError(GoogleAuthError):
+    """Used to indicate that a request cannot be authorized with the
+    credentials' current trust boundary.
+
+    This is raised before any business request is sent when the trust
+    boundary has been revoked or the approval window for the cached
+    token/boundary pair has ended and a synchronized replacement pair is
+    not available yet.
+    """
+
+
 class UserAccessTokenError(GoogleAuthError):
     """Used to indicate ``gcloud auth print-access-token`` command failed."""
 

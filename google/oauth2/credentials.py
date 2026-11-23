@@ -35,6 +35,7 @@ from datetime import datetime
 import io
 import json
 import logging
+import threading
 import warnings
 
 from google.auth import _cloud_sdk
@@ -174,13 +175,24 @@ class Credentials(credentials.ReadOnlyScoped, credentials.CredentialsWithQuotaPr
 
         if "_refresh_worker" in state_dict:
             del state_dict["_refresh_worker"]
+
+        # Threading primitives coordinating in-flight refreshes are not
+        # picklable; they are re-initialized on the unpickled credentials.
+        for unpicklable in ("_identity_lock", "_refresh_completed"):
+            state_dict.pop(unpicklable, None)
+        # A token staged mid-refresh must never be serialized as a published
+        # identity.
+        state_dict.pop("_staged_token", None)
         return state_dict
 
     def __setstate__(self, d):
         """Credentials pickled with older versions of the class do not have
         all the attributes."""
-        self.token = d.get("token")
-        self.expiry = d.get("expiry")
+        # Backwards compatibility: older pickles stored the values under
+        # "token"/"expiry", while newer versions back the property-backed
+        # attributes with "_token"/"_expiry".
+        self._token = d.get("_token", d.get("token"))
+        self._expiry = d.get("_expiry", d.get("expiry"))
         self._refresh_token = d.get("_refresh_token")
         self._id_token = d.get("_id_token")
         self._scopes = d.get("_scopes")
@@ -202,6 +214,13 @@ class Credentials(credentials.ReadOnlyScoped, credentials.CredentialsWithQuotaPr
         self._refresh_worker = None
         self._use_non_blocking_refresh = d.get("_use_non_blocking_refresh", False)
         self._account = d.get("_account", "")
+
+        # Re-initialize the refresh coordination primitives that are not
+        # serialized.
+        self._identity_lock = threading.RLock()
+        self._refresh_completed = threading.Event()
+        self._refresh_in_progress = False
+        self._staged_token = None
 
     @property
     def refresh_token(self):

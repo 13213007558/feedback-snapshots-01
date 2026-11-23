@@ -14,6 +14,7 @@
 
 import datetime
 import os
+import threading
 from unittest import mock
 
 
@@ -476,3 +477,352 @@ class TestCredentialsWithTrustBoundary(object):
         mock_logger.debug.assert_called_once_with(
             "Using cached trust boundary due to refresh error: %s", refresh_error
         )
+
+
+class BlockingBoundaryTransport:
+    """Test transport that pauses the first trust boundary lookup.
+
+    The lookup blocks on an event until :meth:`release` is called, letting a
+    test simulate concurrent business requests while a synchronized refresh
+    is still in flight. Every outbound call is recorded so tests can assert
+    on what the transport layer actually observed.
+    """
+
+    def __init__(self, boundary):
+        self._boundary = boundary
+        self._lookup_started = threading.Event()
+        self._release = threading.Event()
+        self.calls = []
+        self.business_requests = []
+
+    def lookup(self, request, url, headers=None):
+        self.calls.append(("lookup", url, dict(headers or {})))
+        self._lookup_started.set()
+        # Pause here until the test releases the boundary query.
+        if not self._release.wait(timeout=5):
+            raise exceptions.RefreshError("Timed out waiting for test release.")
+        return self._boundary
+
+    def business(self, method, url, headers=None, **kwargs):
+        record = (method, url, dict(headers or {}))
+        self.calls.append(("business", url, dict(headers or {})))
+        self.business_requests.append(record)
+        response = mock.Mock()
+        response.status = 200
+        response.data = b"{}"
+        return response
+
+    def wait_until_lookup_started(self):
+        assert self._lookup_started.wait(timeout=5)
+
+    def release(self):
+        self._release.set()
+
+
+class SynchronizedTrustBoundaryCredentials(
+    credentials.CredentialsWithTrustBoundary
+):
+    """Credentials whose refresh publishes distinct token/boundary pairs."""
+
+    def __init__(self):
+        super(SynchronizedTrustBoundaryCredentials, self).__init__()
+        self.publication = 0
+
+    def _perform_refresh_token(self, request):
+        self.publication += 1
+        self.token = "token-{}".format(self.publication)
+        self.expiry = _helpers.utcnow() + datetime.timedelta(hours=1)
+
+    def with_quota_project(self, quota_project_id):
+        raise NotImplementedError()
+
+    def _build_trust_boundary_lookup_url(self):
+        return "http://mock.url/lookup"
+
+
+class TestSynchronizedIdentityPublication(object):
+    ENABLED = {environment_vars.GOOGLE_AUTH_TRUST_BOUNDARY_ENABLED: "true"}
+
+    def _make_credentials(self):
+        creds = SynchronizedTrustBoundaryCredentials()
+        return creds
+
+    def test_refresh_publishes_token_and_boundary_together(self):
+        creds = self._make_credentials()
+        boundary = {"locations": ["us-central1"], "encodedLocations": "0xA30"}
+        request = mock.Mock()
+
+        with mock.patch.dict(os.environ, self.ENABLED), mock.patch.object(
+            _client, "_lookup_trust_boundary", return_value=boundary
+        ) as mock_lookup:
+            creds.refresh(request)
+
+        assert creds.token == "token-1"
+        assert creds._trust_boundary == boundary
+        mock_lookup.assert_called_once()
+
+    def test_failed_boundary_lookup_rolls_back_staged_token(self):
+        creds = self._make_credentials()
+        request = mock.Mock()
+
+        # No cached boundary: a lookup failure must surface and the staged
+        # token must not remain visible.
+        with mock.patch.dict(os.environ, self.ENABLED), mock.patch.object(
+            _client,
+            "_lookup_trust_boundary",
+            side_effect=exceptions.RefreshError("boundary revoked"),
+        ):
+            with pytest.raises(exceptions.RefreshError):
+                creds.refresh(request)
+
+        # The staged token is discarded; no token/boundary pair is published.
+        assert creds.token is None
+        assert creds._trust_boundary is None
+        assert creds.publication == 1
+
+    def test_failed_lookup_keeps_cached_pair_within_window(self):
+        creds = self._make_credentials()
+        original_boundary = {"encodedLocations": "0xABC"}
+        creds.token = "previous-token"
+        creds.expiry = _helpers.utcnow() + datetime.timedelta(hours=1)
+        creds._trust_boundary = original_boundary
+        request = mock.Mock()
+
+        # A cached boundary exists: a lookup failure is tolerated. The
+        # refreshed token is published together with the still-valid cached
+        # boundary as a single paired identity.
+        with mock.patch.dict(os.environ, self.ENABLED), mock.patch.object(
+            _client,
+            "_lookup_trust_boundary",
+            side_effect=exceptions.RefreshError("temporary lookup failure"),
+        ):
+            creds.refresh(request)
+
+        assert creds.token == "token-1"
+        assert creds._trust_boundary == original_boundary
+
+    def test_apply_uses_matching_token_and_boundary(self):
+        creds = self._make_credentials()
+        boundary = {"encodedLocations": "0xA30"}
+        with mock.patch.dict(os.environ, self.ENABLED), mock.patch.object(
+            _client, "_lookup_trust_boundary", return_value=boundary
+        ):
+            creds.refresh(mock.Mock())
+
+        headers = {}
+        creds.apply(headers)
+        assert headers["authorization"] == "Bearer token-1"
+        assert headers["x-allowed-locations"] == "0xA30"
+
+    def test_request_blocked_when_window_ends_before_refresh_completes(self):
+        creds = self._make_credentials()
+        boundary = {"encodedLocations": "0xA30"}
+        transport = BlockingBoundaryTransport(boundary)
+
+        # Start from an already approved but soon-to-expire identity pair.
+        creds.token = "old-token"
+        creds.expiry = _helpers.utcnow() + datetime.timedelta(seconds=30)
+        creds._trust_boundary = {"encodedLocations": "0xOLD"}
+
+        with mock.patch.dict(os.environ, self.ENABLED), mock.patch.object(
+            _client, "_lookup_trust_boundary", side_effect=transport.lookup
+        ):
+            # A synchronized refresh starts in the background. The token is
+            # refreshed but the boundary query is paused by the transport.
+            refresh_thread = threading.Thread(
+                target=creds._refresh_synchronized, args=(mock.Mock(), True),
+            )
+            refresh_thread.start()
+            transport.wait_until_lookup_started()
+
+            # Simulate the old approval window ending while the lookup is
+            # still paused. The second business call must not reach the
+            # transport until the synchronized refresh publishes.
+            creds.expiry = _helpers.utcnow() - datetime.timedelta(seconds=1)
+            business_result = {}
+
+            def make_business_call():
+                try:
+                    headers = {}
+                    creds.before_request(
+                        mock.Mock(), "GET", "http://business/api", headers
+                    )
+                    transport.business("GET", "http://business/api", headers)
+                    business_result["status"] = "sent"
+                    business_result["headers"] = headers
+                except exceptions.GoogleAuthError as error:
+                    business_result["status"] = "blocked"
+                    business_result["error"] = error
+
+            caller = threading.Thread(target=make_business_call)
+            caller.start()
+            # Give the caller time to reach the in-flight refresh and wait.
+            caller.join(timeout=1)
+
+            # The transport must not observe a new business request while the
+            # boundary query is paused.
+            assert transport.business_requests == []
+            assert caller.is_alive()
+
+            # Resume the boundary query; the token and boundary are then
+            # published as one identity pair and the waiting call proceeds.
+            transport.release()
+            refresh_thread.join(timeout=5)
+            caller.join(timeout=5)
+
+        assert business_result["status"] == "sent"
+        assert len(transport.business_requests) == 1
+
+        # Both identity pieces must come from the same new publication.
+        assert creds.token == "token-1"
+        assert creds._trust_boundary == boundary
+        sent_headers = business_result["headers"]
+        assert sent_headers["authorization"] == "Bearer token-1"
+        assert sent_headers["x-allowed-locations"] == "0xA30"
+
+    def test_old_pair_usable_within_window_while_refresh_in_flight(self):
+        creds = self._make_credentials()
+        old_boundary = {"encodedLocations": "0x111"}
+        creds.token = "old-token"
+        creds.expiry = _helpers.utcnow() + datetime.timedelta(hours=1)
+        creds._trust_boundary = old_boundary
+
+        transport = BlockingBoundaryTransport({"encodedLocations": "0x222"})
+
+        with mock.patch.dict(os.environ, self.ENABLED), mock.patch.object(
+            _client, "_lookup_trust_boundary", side_effect=transport.lookup
+        ):
+            refresh_thread = threading.Thread(
+                target=creds._refresh_synchronized, args=(mock.Mock(), True),
+            )
+            refresh_thread.start()
+            transport.wait_until_lookup_started()
+
+            # The old pair is still inside its window, so a business call may
+            # proceed using exactly that approved combination.
+            headers = {}
+            creds._validate_request_identity()
+            creds.apply(headers)
+            transport.business("GET", "http://business/api", headers)
+
+            transport.release()
+            refresh_thread.join(timeout=5)
+
+        assert len(transport.business_requests) == 1
+        sent_headers = transport.business_requests[0][2]
+        assert sent_headers["authorization"] == "Bearer old-token"
+        assert sent_headers["x-allowed-locations"] == "0x111"
+
+        # After publication both identities come from the same new approval.
+        assert creds.token == "token-1"
+        assert creds._trust_boundary == {"encodedLocations": "0x222"}
+
+    def test_concurrent_callers_coalesce_to_single_refresh(self):
+        creds = self._make_credentials()
+        boundary = {"encodedLocations": "0xA30"}
+        transport = BlockingBoundaryTransport(boundary)
+
+        with mock.patch.dict(os.environ, self.ENABLED), mock.patch.object(
+            _client, "_lookup_trust_boundary", side_effect=transport.lookup
+        ):
+            first = threading.Thread(target=creds._refresh_synchronized, args=(mock.Mock(), True),)
+            first.start()
+            transport.wait_until_lookup_started()
+
+            results = []
+
+            def waiting_caller():
+                try:
+                    creds._refresh_synchronized(mock.Mock())
+                    results.append("refreshed")
+                except Exception as error:  # pragma: NO COVER
+                    results.append(("error", error))
+
+            waiters = [threading.Thread(target=waiting_caller) for _ in range(3)]
+            for waiter in waiters:
+                waiter.start()
+            # Give waiters time to block on the in-flight refresh.
+            transport.release()
+            first.join(timeout=5)
+            for waiter in waiters:
+                waiter.join(timeout=5)
+
+        assert results == ["refreshed", "refreshed", "refreshed"]
+        # Only one token publication and one boundary lookup happened.
+        assert creds.token == "token-1"
+        assert creds.publication == 1
+        lookup_calls = [call for call in transport.calls if call[0] == "lookup"]
+        assert len(lookup_calls) == 1
+
+    def test_validate_identity_raises_when_no_token(self):
+        creds = self._make_credentials()
+        with mock.patch.dict(os.environ, self.ENABLED):
+            with pytest.raises(exceptions.TrustBoundaryError):
+                creds._validate_request_identity()
+
+    def test_validate_identity_raises_when_window_ended(self):
+        creds = self._make_credentials()
+        creds.token = "token-1"
+        creds.expiry = _helpers.utcnow() - datetime.timedelta(seconds=1)
+        creds._trust_boundary = {"encodedLocations": "0xA30"}
+        with mock.patch.dict(os.environ, self.ENABLED):
+            with pytest.raises(exceptions.TrustBoundaryError):
+                creds._validate_request_identity()
+
+    def test_dynamic_lookup_disabled_keeps_original_semantics(self):
+        creds = self._make_credentials()
+        # No env var enabling the feature: validation is a no-op even with no
+        # token and an ended window, preserving historical behavior.
+        creds.expiry = _helpers.utcnow() - datetime.timedelta(seconds=1)
+        with mock.patch.dict(os.environ, clear=True):
+            assert creds._validate_request_identity() is None
+
+    def test_boundary_revocation_blocks_before_business_request(self):
+        # Admin revocation: the boundary lookup denies access and there is no
+        # cached boundary to fall back to, so no usable pair can be published.
+        creds = self._make_credentials()
+        creds.expiry = _helpers.utcnow() - datetime.timedelta(seconds=1)
+
+        transport = BlockingBoundaryTransport({"encodedLocations": "0x222"})
+        transport.release()
+
+        with mock.patch.dict(os.environ, self.ENABLED), mock.patch.object(
+            _client,
+            "_lookup_trust_boundary",
+            side_effect=exceptions.RefreshError("boundary revoked"),
+        ):
+            with pytest.raises(exceptions.RefreshError):
+                creds.before_request(
+                    mock.Mock(), "GET", "http://business/api", {}
+                )
+
+        # Nothing was staged and no business request reached the transport.
+        assert creds.token is None
+        assert creds._trust_boundary is None
+        assert transport.business_requests == []
+
+    def test_ended_window_with_failing_refresh_blocks_request(self):
+        # When the approval window has ended and no replacement pair can be
+        # produced, the request must stop before reaching the transport.
+        creds = self._make_credentials()
+        creds.token = "old-token"
+        creds.expiry = _helpers.utcnow() - datetime.timedelta(seconds=1)
+        creds._trust_boundary = {"encodedLocations": "0x111"}
+
+        transport = BlockingBoundaryTransport({"encodedLocations": "0x222"})
+        transport.release()
+
+        with mock.patch.dict(os.environ, self.ENABLED), mock.patch.object(
+            creds,
+            "_perform_refresh_token",
+            side_effect=exceptions.RefreshError("token endpoint unavailable"),
+        ):
+            with pytest.raises(exceptions.RefreshError):
+                creds.before_request(
+                    mock.Mock(), "GET", "http://business/api", {}
+                )
+
+        # The expired pair is retained but no business request is sent.
+        assert creds.token == "old-token"
+        assert creds._trust_boundary == {"encodedLocations": "0x111"}
+        assert transport.business_requests == []

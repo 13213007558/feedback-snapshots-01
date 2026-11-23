@@ -571,5 +571,11 @@ class Credentials(external_account.Credentials):
                     _agent_identity_utils.calculate_certificate_fingerprint(cert)
                 )
 
-        self._perform_refresh_token(request, cert_fingerprint=cert_fingerprint)
-        self._handle_trust_boundary(request)
+        def refresh_token(request):
+            self._perform_refresh_token(
+                request, cert_fingerprint=cert_fingerprint
+            )
+
+        self._refresh_identity_pair(
+            request, refresh_token, self._handle_trust_boundary
+        )

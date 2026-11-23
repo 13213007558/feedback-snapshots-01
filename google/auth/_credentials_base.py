@@ -44,7 +44,16 @@ class _BaseCredentials(metaclass=abc.ABCMeta):
     """
 
     def __init__(self):
-        self.token = None
+        self._token = None
+
+    @property
+    def token(self):
+        """Optional[str]: The bearer token used to authenticate requests."""
+        return self._token
+
+    @token.setter
+    def token(self, value):
+        self._token = value
 
     @abc.abstractmethod
     def refresh(self, request):

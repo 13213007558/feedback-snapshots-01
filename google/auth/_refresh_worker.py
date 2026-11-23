@@ -103,7 +103,19 @@ class RefreshThread(threading.Thread):
         Perform the credential refresh.
         """
         try:
-            self._cred.refresh(self._request)
+            # Participate in the same refresh coordination as blocking
+            # refreshes when the credentials support it. This ensures a
+            # business call triggered while the background refresh is in
+            # flight waits for the synchronized token/boundary publication
+            # instead of racing it. Only real credentials that initialized
+            # the coordination lock take this path; lightweight test doubles
+            # (including generic mocks) fall back to a plain refresh.
+            lock = getattr(self._cred, "_identity_lock", None)
+            lock_types = (type(threading.RLock()), type(threading.Lock()))
+            if isinstance(lock, lock_types):
+                self._cred._begin_background_refresh(self._request)
+            else:
+                self._cred.refresh(self._request)
         except Exception as err:  # pragma: NO COVER
             _LOGGER.error(f"Background refresh failed due to: {err}")
             self._error_info = err

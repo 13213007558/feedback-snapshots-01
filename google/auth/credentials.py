@@ -19,6 +19,7 @@ import abc
 from enum import Enum
 import logging
 import os
+import threading
 from typing import List
 
 from google.auth import _helpers, environment_vars
@@ -56,9 +57,7 @@ class Credentials(_BaseCredentials):
     def __init__(self):
         super(Credentials, self).__init__()
 
-        self.expiry = None
-        """Optional[datetime]: When the token expires and is no longer valid.
-        If this is None, the token is assumed to never expire."""
+        self._expiry = None
         self._quota_project_id = None
         """Optional[str]: Project to use for quota and billing purposes."""
         self._trust_boundary = None
@@ -71,6 +70,30 @@ class Credentials(_BaseCredentials):
 
         self._use_non_blocking_refresh = False
         self._refresh_worker = RefreshThreadManager()
+
+        # Guards publication of the (token, expiry, trust boundary) identity
+        # pair so a business request never observes a partially refreshed
+        # combination, and coordinates threads waiting for an in-flight
+        # (background or blocking) refresh.
+        self._identity_lock = threading.RLock()
+        # Signaled whenever a refresh attempt finishes, successfully or not.
+        self._refresh_completed = threading.Event()
+        # Set while a refresh is actively updating the cached identity pair.
+        self._refresh_in_progress = False
+        # Holds a token whose matching trust boundary lookup is still in
+        # flight. The public ``token`` attribute keeps the previous pair
+        # until the staged token can be published together with its boundary.
+        self._staged_token = None
+
+    @property
+    def expiry(self):
+        """Optional[datetime]: When the token expires and is no longer valid.
+        If this is None, the token is assumed to never expire."""
+        return self._expiry
+
+    @expiry.setter
+    def expiry(self, value):
+        self._expiry = value
 
     @property
     def expired(self):
@@ -190,7 +213,72 @@ class Credentials(_BaseCredentials):
 
     def _blocking_refresh(self, request):
         if not self.valid:
+            self._refresh_synchronized(request)
+
+    def _refresh_synchronized(self, request, force=False):
+        """Refreshes the credentials, coalescing concurrent callers.
+
+        If another thread is already performing a refresh, the caller waits
+        for that attempt to finish instead of starting a competing one. This
+        keeps sensitive requests from racing a background refresh and reading
+        a token and trust boundary that do not belong to the same approval.
+        After waiting, the caller re-checks validity and only starts its own
+        refresh if the finished attempt did not publish a usable pair.
+
+        Args:
+            request (google.auth.transport.Request): The object used to make
+                HTTP requests.
+            force (bool): When True, perform a refresh even if a currently
+                valid pair is published (used by explicit refresh callers).
+        """
+        while True:
+            with self._identity_lock:
+                if not force and self.valid:
+                    # Another refresh already published a usable pair.
+                    return
+                if not self._refresh_in_progress:
+                    self._refresh_in_progress = True
+                    self._refresh_completed = threading.Event()
+                    should_refresh = True
+                    completed = None
+                else:
+                    should_refresh = False
+                    completed = self._refresh_completed
+
+            if should_refresh:
+                try:
+                    self.refresh(request)
+                    return
+                finally:
+                    with self._identity_lock:
+                        self._refresh_in_progress = False
+                        self._refresh_completed.set()
+
+            # Another thread owns the refresh; wait for it to publish, then
+            # loop to re-check validity under the lock. This avoids a lost
+            # wake-up when the in-flight refresh finishes before we wait.
+            completed.wait()
+
+    def _begin_background_refresh(self, request):
+        """Runs an explicit background refresh under the coordination lock.
+
+        This is invoked by the background refresh worker. It claims the
+        in-flight refresh slot directly (rather than going through the
+        wait-or-refresh loop) so a business request that needs the new pair
+        waits on the same completion event, and the refresh itself runs once.
+        """
+        with self._identity_lock:
+            if self._refresh_in_progress:
+                # A refresh is already running; nothing for this worker to do.
+                return
+            self._refresh_in_progress = True
+            self._refresh_completed = threading.Event()
+        try:
             self.refresh(request)
+        finally:
+            with self._identity_lock:
+                self._refresh_in_progress = False
+                self._refresh_completed.set()
 
     def _non_blocking_refresh(self, request):
         use_blocking_refresh_fallback = False
@@ -201,7 +289,7 @@ class Credentials(_BaseCredentials):
             )
 
         if self.token_state == TokenState.INVALID or use_blocking_refresh_fallback:
-            self.refresh(request)
+            self._refresh_synchronized(request)
             # If the blocking refresh succeeds then we can clear the error info
             # on the background refresh worker, and perform refreshes in a
             # background thread.
@@ -229,8 +317,41 @@ class Credentials(_BaseCredentials):
         else:
             self._blocking_refresh(request)
 
+        self._validate_request_identity()
+
         metrics.add_metric_header(headers, self._metric_header_for_usage())
         self.apply(headers)
+
+    def _validate_request_identity(self):
+        """Ensures the cached identity pair may back an outgoing request.
+
+        Credentials without dynamic trust boundaries keep their historical
+        behavior. When dynamic trust boundaries are enabled, an outgoing
+        request is only allowed while the cached token/boundary pair is
+        inside its approval window. If the window has ended (for example
+        because an admin revoked the boundary while a synchronized refresh
+        was in flight), the call stops here, before the business request is
+        sent.
+
+        Raises:
+            google.auth.exceptions.TrustBoundaryError: If no valid
+                token/boundary pair is available for the request.
+        """
+        if not isinstance(self, CredentialsWithTrustBoundary):
+            return
+        if not self._is_trust_boundary_lookup_required():
+            # Configured scenarios that do not query a dynamic boundary keep
+            # the original credential semantics.
+            return
+        if self.token is None:
+            raise exceptions.TrustBoundaryError(
+                "Request blocked: no access token is available."
+            )
+        if self.expiry is not None and _helpers.utcnow() >= self.expiry:
+            raise exceptions.TrustBoundaryError(
+                "Request blocked: the approval window for the cached access "
+                "token and trust boundary has ended."
+            )
 
     def with_non_blocking_refresh(self):
         self._use_non_blocking_refresh = True
@@ -359,39 +480,108 @@ class CredentialsWithTrustBoundary(Credentials):
         headers.update(self._get_trust_boundary_header())
 
     def refresh(self, request):
-        """Refreshes the access token and the trust boundary.
+        """Refreshes the access token and the trust boundary as one approval.
 
-        This method calls the subclass's token refresh logic and then
-        refreshes the trust boundary if applicable.
+        The token refresh and the trust boundary lookup are staged in local
+        state and only published together when both succeed. Business
+        requests therefore only ever observe a token and trust boundary
+        that came from the same refresh approval. The previously published
+        pair stays usable for the remainder of its approval window while the
+        refresh is in flight; if the window ends first, requests are blocked
+        rather than sending a mismatched pair.
         """
-        self._perform_refresh_token(request)
-        self._refresh_trust_boundary(request)
+        self._refresh_identity_pair(
+            request, self._perform_refresh_token, self._refresh_trust_boundary
+        )
+
+    def _refresh_identity_pair(self, request, refresh_token, refresh_boundary):
+        """Stages and atomically publishes a token/boundary identity pair.
+
+        ``refresh_token`` updates the access token/expiry and
+        ``refresh_boundary`` resolves the matching boundary. The refreshed
+        token is held in a staging slot while the boundary is resolved, so
+        the public token/boundary attributes keep pointing at the previous
+        fully paired identity until publication. If either step fails, the
+        previously published pair is left untouched.
+
+        Args:
+            request (google.auth.transport.Request): The object used to make
+                HTTP requests.
+            refresh_token (Callable): Performs the access token refresh.
+            refresh_boundary (Callable): Resolves the trust boundary and
+                returns the boundary to publish, or None to keep the cached
+                one.
+        """
+        with self._identity_lock:
+            previous_token = self._token
+            previous_expiry = self._expiry
+            previous_boundary = self._trust_boundary
+
+            refresh_token(request)
+            staged_token = self._token
+            staged_expiry = self._expiry
+
+            # Restore the published pair while the boundary is being fetched.
+            self._token = previous_token
+            self._expiry = previous_expiry
+            self._staged_token = staged_token
+
+            try:
+                staged_boundary = refresh_boundary(request)
+            except Exception:
+                # Leave the previously approved pair as the only published
+                # combination; the staged token is discarded.
+                self._token = previous_token
+                self._expiry = previous_expiry
+                self._trust_boundary = previous_boundary
+                self._staged_token = None
+                raise
+
+            # Publish the token and its boundary as a single identity pair.
+            self._publish_identity(staged_token, staged_expiry, staged_boundary)
+            self._staged_token = None
+
+    def _publish_identity(self, token, expiry, trust_boundary):
+        """Publishes a token/boundary pair as one atomic identity update."""
+        with self._identity_lock:
+            self._token = token
+            self._expiry = expiry
+            # A None boundary means no new lookup was needed; the cached
+            # boundary stays the matching boundary for this token.
+            if trust_boundary is not None:
+                self._trust_boundary = trust_boundary
 
     def _refresh_trust_boundary(self, request):
-        """Triggers a refresh of the trust boundary and updates the cache if necessary.
+        """Refreshes the trust boundary and returns the value to publish.
 
         Args:
             request (google.auth.transport.Request): The object used to make
                 HTTP requests.
 
+        Returns:
+            Optional[dict]: The refreshed trust boundary, or None when no
+            lookup is required (or a cached boundary is reused), in which
+            case the currently cached boundary is kept.
+
         Raises:
             google.auth.exceptions.RefreshError: If the trust boundary could
-                not be refreshed and no cached value is available.
+            not be refreshed and no cached value is available.
         """
         if not self._is_trust_boundary_lookup_required():
-            return
+            return None
         try:
-            self._trust_boundary = self._lookup_trust_boundary(request)
+            return self._lookup_trust_boundary(request)
         except exceptions.RefreshError as error:
             # If the call to the lookup API failed, check if there is a trust boundary
-            # already cached. If there is, do nothing. If not, then throw the error.
+            # already cached. If there is, keep using it for the current approval
+            # window. If not, then throw the error.
             if self._trust_boundary is None:
                 raise error
             if _helpers.is_logging_enabled(_LOGGER):
                 _LOGGER.debug(
                     "Using cached trust boundary due to refresh error: %s", error
                 )
-            return
+            return None
 
     def _lookup_trust_boundary(self, request):
         """Calls the trust boundary lookup API to refresh the trust boundary cache.
@@ -414,7 +604,9 @@ class CredentialsWithTrustBoundary(Credentials):
             raise exceptions.InvalidValue("Failed to build trust boundary lookup URL.")
 
         headers = {}
-        self._apply(headers)
+        # During a synchronized refresh, authorize the lookup with the staged
+        # (newly refreshed) token rather than the previously published one.
+        self._apply(headers, token=self._staged_token)
         headers.update(self._get_trust_boundary_header())
         return _client._lookup_trust_boundary(request, url, headers=headers)
 
