@@ -1,0 +1,17 @@
+certifi==2026.11.20
+charset-normalizer==3.5.2
+idna==3.20
+iniconfig==2.3.1
+packaging==26.3
+pluggy==1.7.0
+pygments==2.21.0
+pyjwt==2.15.1
+pytest==8.4.2
+python-dateutil==3.0.0
+pyyaml==6.0.4
+requests==2.34.2
+requests-mock==1.12.1
+responses==0.26.3
+six==1.17.0
+tzdata==2026.6
+urllib3==2.8.0
