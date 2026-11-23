@@ -9,6 +9,7 @@ v4.27.0
 * Errors produced by a ``false`` subschema now have the correct ``path`` and ``schema_path``, rather than empty ones.
 * Accessing an index with no errors on an ``ErrorTree`` no longer causes that index to appear in the tree (#1328).
   Subtrees also properly propagate lookup errors which were previously missing when accessing indices not in the subtree.
+* Add ``jsonschema.exceptions.public_errors`` and ``jsonschema.exceptions.PublicError``, read-only externally shareable error views which expose only the approved ``path``, ``schema_path``, ``validator`` and nested ``context`` fields, never the failing instance or error message.
 
 v4.26.0
 =======

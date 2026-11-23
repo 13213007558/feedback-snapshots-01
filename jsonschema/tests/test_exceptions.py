@@ -1113,3 +1113,236 @@ class TestJsonPathRendering(TestCase):
 
     def test_open_bracket(self):
         self.validate_json_path_rendering("[", "$['[']")
+
+
+class TestPublicErrors(TestCase):
+    secret = "SUPER-SECRET-MARKER-4242"
+
+    schema = {
+        "$defs": {
+            "phone": {
+                "anyOf": [
+                    {
+                        "type": "object",
+                        "properties": {"number": {"type": "string"}},
+                        "required": ["number"],
+                    },
+                    {"type": "string", "pattern": r"^\+?[0-9-]+$"},
+                ],
+            },
+        },
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "minLength": 1},
+                "contact": {"$ref": "#/$defs/phone"},
+                "tags": {"type": "array", "uniqueItems": True},
+            },
+            "required": ["name", "contact"],
+        },
+    }
+
+    # The secret only appears inside the failing anyOf branch's instance
+    # (and therefore its error messages), never in the rest of the instance.
+    @property
+    def instance(self):
+        return [
+            {
+                "name": "alice",
+                "contact": {"label": self.secret},
+                "tags": ["a", "a"],
+            },
+        ]
+
+    def setUp(self):
+        self.errors = list(
+            _LATEST_VERSION(self.schema).iter_errors(self.instance),
+        )
+        self.assertTrue(self.errors)
+
+    def assert_no_secret(self, text):
+        self.assertNotIn(self.secret, text)
+
+    def test_direct_iteration_only_exposes_approved_fields(self):
+        public = exceptions.public_errors(self.errors)
+
+        self.assertEqual(len(public), len(self.errors))
+        for error in public:
+            self.assertIsInstance(error, exceptions.PublicError)
+            self.assertEqual(
+                list(error),
+                ["path", "schema_path", "validator", "context"],
+            )
+            self.assertEqual(
+                set(error.keys()),
+                {"path", "schema_path", "validator", "context"},
+            )
+            for attribute in (
+                "message",
+                "instance",
+                "schema",
+                "validator_value",
+                "cause",
+                "parent",
+            ):
+                self.assertFalse(hasattr(error, attribute))
+
+    def test_best_match_selection_is_unchanged(self):
+        best = exceptions.best_match(iter(self.errors))
+        reversed_best = exceptions.best_match(reversed(self.errors))
+        self.assertEqual(best._contents(), reversed_best._contents())
+
+        public = exceptions.public_errors([best])[0]
+        self.assertEqual(public.validator, best.validator)
+        self.assertEqual(public.path, tuple(best.absolute_path))
+        self.assertEqual(
+            public.schema_path,
+            tuple(best.absolute_schema_path),
+        )
+
+    def test_serialization_contains_only_approved_fields(self):
+        import json
+
+        public = exceptions.public_errors(self.errors)
+        for serialized in (
+            json.dumps(public),
+            json.dumps(public[0]),
+            json.dumps(public[0].to_dict()),
+        ):
+            reloaded = json.loads(serialized)
+            entries = reloaded if isinstance(reloaded, list) else [reloaded]
+            for entry in entries:
+                self.assertEqual(
+                    set(entry),
+                    {"path", "schema_path", "validator", "context"},
+                )
+
+    def test_marker_still_present_on_inner_raw_branch(self):
+        anyof = next(
+            error for error in self.errors if error.validator == "anyOf"
+        )
+        self.assertTrue(
+            any(
+                self.secret in str(branch.instance)
+                for branch in anyof.context
+            ),
+            "the marker should be present on the internal raw error",
+        )
+
+    def test_public_view_preserves_anyof_branches_without_values(self):
+        anyof = next(
+            error
+            for error in exceptions.public_errors(self.errors)
+            if error.validator == "anyOf"
+        )
+        self.assertEqual(anyof.path, (0, "contact"))
+        self.assertEqual(
+            sorted(branch.validator for branch in anyof.context),
+            ["required", "type"],
+        )
+        for branch in anyof.context:
+            self.assertEqual(branch.path, (0, "contact"))
+            self.assertEqual(
+                set(branch),
+                {"path", "schema_path", "validator", "context"},
+            )
+            self.assertEqual(branch.context, ())
+
+    def test_public_view_locates_array_level_error(self):
+        unique_items = next(
+            error
+            for error in exceptions.public_errors(self.errors)
+            if error.validator == "uniqueItems"
+        )
+        self.assertEqual(unique_items.path, (0, "tags"))
+        self.assertEqual(unique_items.schema_path[-1], "uniqueItems")
+
+    def test_no_marker_in_serialized_output(self):
+        import json
+
+        public = exceptions.public_errors(self.errors)
+        best = exceptions.public_errors(
+            [exceptions.best_match(self.errors)],
+        )
+        self.assert_no_secret(json.dumps(public))
+        self.assert_no_secret(json.dumps(best))
+        self.assert_no_secret(json.dumps(public[0].to_dict()))
+
+    def test_no_marker_in_repr_str_or_logged_context(self):
+        import io
+        import logging
+
+        public = exceptions.public_errors(self.errors)
+        self.assert_no_secret(repr(public))
+        self.assert_no_secret(str(public))
+        self.assert_no_secret(repr(public[0].context))
+
+        stream = io.StringIO()
+        logger = logging.getLogger("jsonschema.public-errors-test")
+        handler = logging.StreamHandler(stream)
+        logger.addHandler(handler)
+        try:
+            logger.warning("public errors: %r", public)
+        finally:
+            logger.removeHandler(handler)
+        self.assert_no_secret(stream.getvalue())
+
+    def test_public_errors_are_read_only(self):
+        public = exceptions.public_errors(self.errors)[0]
+        with self.assertRaises(TypeError):
+            public["message"] = "leaked"
+        with self.assertRaises(TypeError):
+            del public["validator"]
+        with self.assertRaises(AttributeError):
+            public.message = "leaked"
+        with self.assertRaises(AttributeError):
+            del public.validator
+        for mutation in (
+            lambda: public.update({"message": "leaked"}),
+            lambda: public.setdefault("message", "leaked"),
+            lambda: public.pop("validator"),
+            lambda: public.popitem(),
+            lambda: public.clear(),
+        ):
+            with self.assertRaises(TypeError):
+                mutation()
+        self.assertEqual(
+            set(public),
+            {"path", "schema_path", "validator", "context"},
+        )
+
+    def test_copy_and_pickle_preserve_the_public_view(self):
+        import copy
+        import pickle
+
+        public = exceptions.public_errors(self.errors)
+        for copied in (
+            copy.copy(public),
+            copy.deepcopy(public),
+            pickle.loads(pickle.dumps(public)),
+        ):
+            self.assertEqual(copied, public)
+            self.assertIsInstance(copied[0], exceptions.PublicError)
+
+    def test_mapping_access_matches_attribute_access(self):
+        public = exceptions.public_errors(self.errors)[0]
+        self.assertIs(public["path"], public.path)
+        self.assertIs(public["context"], public.context)
+        self.assertEqual(public.get("instance", "missing"), "missing")
+        self.assertEqual(len(public), 4)
+        self.assertIn("validator", public)
+
+    def test_empty_input(self):
+        self.assertEqual(exceptions.public_errors(()), [])
+
+    def test_hand_constructed_error_without_validator(self):
+        error = exceptions.ValidationError(
+            "some message containing " + self.secret,
+            path=["foo"],
+        )
+        public = exceptions.PublicError.from_error(error)
+        self.assertIsNone(public.validator)
+        self.assertEqual(public.path, ("foo",))
+        self.assertEqual(public.context, ())
+        self.assert_no_secret(repr(public))

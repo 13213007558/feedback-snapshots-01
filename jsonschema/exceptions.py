@@ -5,6 +5,7 @@ Validation errors, and some surrounding helpers.
 from __future__ import annotations
 
 from collections import defaultdict, deque
+from copy import deepcopy
 from pprint import pformat
 from textwrap import dedent, indent
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -574,3 +575,171 @@ def _most_relevant[E: _Error](
         ):
             best_key, best = error_key, error
     return best_key, best
+
+
+class PublicError(dict):
+    """
+    A publicly shareable view of a `ValidationError`.
+
+    Validation errors often embed the invalid instance directly, both via
+    their `ValidationError.instance` attribute and within their human
+    readable `ValidationError.message`. Such values may contain data which
+    must not be sent back to the party whose data is being validated.
+
+    A ``PublicError`` deliberately exposes only a fixed set of approved
+    fields, so it (along with any nested branch errors) can safely be
+    serialized or returned to external callers:
+
+        * ``path`` and ``schema_path`` locate the error within the instance
+          and schema, including the full absolute path through any parents
+
+        * ``validator`` is the machine-readable validation keyword that
+          failed, i.e. the error's category
+
+        * ``context`` holds the `PublicError` views of any nested errors
+          (such as the branches of an :kw:`anyOf` or :kw:`oneOf` failure),
+          preserving the branching relationship without any branch data
+
+    Neither the failing instance, schema, validator value, error message nor
+    underlying cause are exposed, as they may contain sensitive values.
+
+    ``PublicError`` objects are read-only mappings backed by a plain
+    ``dict``: iterating one yields only the approved fields, attribute
+    access mirrors the mapping keys, and `json.dumps` serializes exactly
+    those fields. Construct them via `public_errors` (or `from_error`).
+    """
+
+    __slots__ = ()
+
+    _fields: ClassVar[tuple[str, ...]] = (
+        "path",
+        "schema_path",
+        "validator",
+        "context",
+    )
+
+    def __init__(
+        self,
+        path: Iterable[str | int],
+        schema_path: Iterable[str | int],
+        validator: str | None,
+        context: Iterable[PublicError] = (),
+    ) -> None:
+        super().__init__(
+            path=tuple(path),
+            schema_path=tuple(schema_path),
+            validator=validator,
+            context=tuple(context),
+        )
+
+    @classmethod
+    def from_error(cls, error: _Error) -> PublicError:
+        """
+        Return a public view of the given (possibly nested) error.
+        """
+        validator = None if error.validator is _unset else error.validator
+        return cls(
+            path=error.absolute_path,
+            schema_path=error.absolute_schema_path,
+            validator=validator,
+            context=(
+                cls.from_error(sub_error) for sub_error in error.context
+            ),
+        )
+
+    def __getattr__(self, name: str) -> Any:
+        try:
+            return self[name]
+        except KeyError:
+            raise AttributeError(
+                f"{self.__class__.__name__!r} object has no attribute "
+                f"{name!r}",
+            ) from None
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name not in PublicError._fields:
+            raise AttributeError(
+                f"{self.__class__.__name__!r} is read-only and exposes no "
+                f"{name!r} field",
+            )
+        dict.__setitem__(self, name, value)
+
+    def __delattr__(self, name: str) -> None:
+        raise AttributeError(f"{self.__class__.__name__!r} is read-only")
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        raise TypeError(f"{self.__class__.__name__!r} is read-only")
+
+    def __delitem__(self, key: str) -> None:
+        raise TypeError(f"{self.__class__.__name__!r} is read-only")
+
+    def _readonly(self, *_args: Any, **_kwargs: Any) -> None:
+        raise TypeError(f"{self.__class__.__name__!r} is read-only")
+
+    update = _readonly
+    setdefault = _readonly
+    pop = _readonly
+    popitem = _readonly
+    clear = _readonly
+
+    def __reduce__(self) -> tuple[type, tuple]:
+        return (
+            self.__class__,
+            (self.path, self.schema_path, self.validator, self.context),
+        )
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> PublicError:
+        return self.__class__(
+            path=deepcopy(self.path, memo),
+            schema_path=deepcopy(self.schema_path, memo),
+            validator=deepcopy(self.validator, memo),
+            context=deepcopy(self.context, memo),
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"<PublicError validator={self.validator!r} "
+            f"path={list(self.path)!r}>"
+        )
+
+    def __hash__(self) -> int:
+        return hash(
+            (
+                self.path,
+                self.schema_path,
+                self.validator,
+                self.context,
+            ),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """
+        Return a plain ``dict`` containing only the approved fields.
+        """
+        return {
+            "path": list(self.path),
+            "schema_path": list(self.schema_path),
+            "validator": self.validator,
+            "context": [
+                sub_error.to_dict() for sub_error in self.context
+            ],
+        }
+
+
+def public_errors(errors: Iterable[_Error]) -> list[PublicError]:
+    """
+    Return safe, externally shareable `PublicError` views for each error.
+
+    The given errors are returned in the same order they are produced in
+    (e.g. by `jsonschema.protocols.Validator.iter_errors`); each view only
+    carries the approved ``path``, ``schema_path``, ``validator`` and nested
+    ``context`` fields, never the failing instance or message.
+
+    To expose a single best matching error, pass the result of `best_match`
+    directly:
+
+    .. code:: python
+
+        public = public_errors([best_match(validator.iter_errors(instance))])
+    """
+    return [PublicError.from_error(error) for error in errors]

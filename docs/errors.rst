@@ -405,3 +405,64 @@ to guess the most relevant error in a given bunch.
 
 .. autofunction:: by_relevance
     :noindex:
+
+
+Publicly shareable errors
+--------------------------
+
+`ValidationError` objects carry the invalid instance both on their
+`ValidationError.instance` attribute and often inside their human-readable
+`ValidationError.message`, which makes them unsafe to return directly to
+the party whose data failed validation.
+
+`jsonschema.exceptions.public_errors` produces
+`jsonschema.exceptions.PublicError` views which deliberately contain only
+approved fields:
+
+    * ``path`` and ``schema_path``, the full absolute location of the error
+      within the instance and schema
+
+    * ``validator``, the machine-readable validation keyword that failed
+
+    * ``context``, public views of any nested branch errors (for example the
+      subschemas of an :kw:`anyOf` failure), preserving the branching
+      relationship without any of the values involved
+
+The original error objects are left untouched, so internal logic like
+`best_match` continues to behave exactly as before.
+
+.. doctest::
+
+    >>> import json
+    >>> from jsonschema.exceptions import public_errors
+    >>> schema = {
+    ...     "type": "array",
+    ...     "items": {
+    ...         "anyOf": [
+    ...             {"type": "string"},
+    ...             {"type": "object", "required": ["name"]},
+    ...         ],
+    ...     },
+    ... }
+    >>> instance = [{"token": "do-not-expose"}]
+    >>> errors = list(Draft202012Validator(schema).iter_errors(instance))
+    >>> public = public_errors(errors)
+    >>> json.dumps(public)
+    '[{"path": [0], "schema_path": ["items", "anyOf"], "validator": "anyOf", "context": [{"path": [0], "schema_path": ["items", "anyOf", 0, "type"], "validator": "type", "context": []}, {"path": [0], "schema_path": ["items", "anyOf", 1, "required"], "validator": "required", "context": []}]}]'
+
+``PublicError`` objects are read-only mappings, so iterating or serializing
+one can never surface additional attributes, and a single best match is
+wrapped the same way:
+
+.. doctest::
+
+    >>> from jsonschema.exceptions import best_match
+    >>> json.dumps(public_errors([best_match(errors)]))
+    '[{"path": [0], "schema_path": ["items", "anyOf", 1, "required"], "validator": "required", "context": []}]'
+
+.. autofunction:: public_errors
+    :noindex:
+
+.. autoclass:: PublicError
+    :members:
+    :noindex:
