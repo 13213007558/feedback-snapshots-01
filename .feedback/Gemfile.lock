@@ -1,0 +1,24 @@
+PATH
+  remote: ..
+  specs:
+    database_cleaner-core (2.1.0)
+
+GEM
+  remote: https://rubygems.org/
+  specs:
+
+PLATFORMS
+  arm64-darwin-25
+  ruby
+
+DEPENDENCIES
+  database_cleaner-core!
+
+CHECKSUMS
+  database_cleaner-core (2.1.0)
+
+RUBY VERSION
+  ruby 3.3.12
+
+BUNDLED WITH
+  4.0.16
