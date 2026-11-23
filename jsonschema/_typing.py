@@ -27,3 +27,5 @@ ApplicableValidators = Callable[
     [referencing.jsonschema.Schema],
     Iterable[tuple[str, Any]],
 ]
+
+RegistrationScopeSetup = Callable[[Any], Any]

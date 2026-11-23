@@ -333,6 +333,31 @@ class FormatError(Exception):
         return self.message
 
 
+class UnapprovedDialect(Exception):
+    """
+    A schema switched to a dialect which is not approved by its scope.
+
+    This is raised rather than silently falling back to another validator
+    class, so that an unapproved extension cannot relax security-relevant
+    checks.
+    """
+
+    def __init__(self, dialect, approved=()):
+        super().__init__(dialect)
+        self.dialect = dialect
+        self.approved = tuple(approved)
+
+    def __str__(self):
+        message = (
+            f"The dialect {self.dialect!r} is not approved by this "
+            "validator's registration scope"
+        )
+        if self.approved:
+            approved = ", ".join(repr(each) for each in self.approved)
+            message += f" (approved dialects: {approved})"
+        return message + "."
+
+
 class ErrorTree:
     """
     ErrorTrees make it easier to check which validations failed.

@@ -41,6 +41,153 @@ _VALIDATORS: dict[str, Validator] = {}
 _META_SCHEMAS = _utils.URIDict()
 
 
+def _dialect_of(schema) -> str | None:
+    """
+    The (normalized) ``$schema`` dialect identifier of a schema, if any.
+    """
+    if not isinstance(schema, Mapping):
+        return None
+    uri = schema.get("$schema")
+    if not isinstance(uri, str):
+        return None
+    return uri.rstrip("#")
+
+
+def _dialect_of_class(validator) -> str | None:
+    """
+    The (normalized) dialect identifier a validator class is registered for.
+
+    This is its meta schema's ID, which is what ``$schema`` values refer to.
+    """
+    uri = validator.ID_OF(validator.META_SCHEMA)
+    if not isinstance(uri, str):
+        return None
+    return uri.rstrip("#")
+
+
+@define(frozen=True)
+class RegistrationScope:
+    """
+    The closed set of dialects and validator classes a validator accepts.
+
+    Scopes cover switching dialects within a subschema or across a reference.
+    They are created for a specific owner validator class and are never
+    consulted by any other validator class.  A scope is expected to be built
+    by approving explicit ``dialect -> validator class`` pairs; anything not
+    approved fails loudly with
+    `jsonschema.exceptions.UnapprovedDialect` instead of silently falling
+    back to a process-wide default validator.
+
+    The owner's own dialect is approved automatically, so a validator always
+    remains able to evaluate schemas written for itself.
+    """
+
+    owner: type
+    dialects: dict[str, type] = field(factory=dict)
+
+    @classmethod
+    def isolating(cls, owner):
+        """
+        Create a scope for ``owner`` which only approves ``owner``'s dialect.
+        """
+        scope = cls(owner=owner)
+        dialect = _dialect_of_class(owner)
+        if dialect is not None:
+            scope = scope.approve(dialect, owner)
+        return scope
+
+    @classmethod
+    def from_approvals(cls, owner, approvals=()):
+        """
+        Create a scope approving ``(dialect, validator)`` pairs.
+
+        ``approvals`` may be a mapping or an iterable of pairs.  A pair whose
+        validator is omitted (e.g. when only dialect names are given) is
+        approved for ``owner``.
+        """
+        if isinstance(approvals, Mapping):
+            approvals = approvals.items()
+        scope = cls.isolating(owner)
+        for approval in approvals:
+            if isinstance(approval, str):
+                dialect, validator = approval, owner
+            else:
+                dialect, validator = approval
+                if validator is None:
+                    validator = owner
+            scope = scope.approve(dialect, validator)
+        return scope
+
+    @property
+    def approved(self) -> tuple[str, ...]:
+        """
+        The dialects this scope approves, sorted for stable error messages.
+        """
+        return tuple(sorted(self.dialects))
+
+    def approve(self, dialect, validator=None):
+        """
+        Return a new scope which also approves ``dialect`` for ``validator``.
+
+        ``validator`` defaults to the scope's owner, so a project may approve
+        additional dialect identifiers for its own validator.
+        """
+        if validator is None:
+            validator = self.owner
+        dialects = dict(self.dialects)
+        dialects[dialect.rstrip("#")] = validator
+        return self.__class__(owner=self.owner, dialects=dialects)
+
+    def rebase(self, owner):
+        """
+        Return a new scope for ``owner``, carrying over the approvals.
+
+        Approvals of the previous owner are moved to ``owner``, so extending
+        a scoped validator keeps its isolation rather than escaping it.
+        """
+        dialects = {
+            dialect: owner if validator is self.owner else validator
+            for dialect, validator in self.dialects.items()
+        }
+        scope = self.__class__(owner=owner, dialects=dialects)
+        dialect = _dialect_of_class(owner)
+        if dialect is not None:
+            scope = scope.approve(dialect, owner)
+        return scope
+
+    def class_for(self, schema, current=None):
+        """
+        The class to use for ``schema`` under this scope.
+
+        Raises `jsonschema.exceptions.UnapprovedDialect` if ``schema``
+        declares a dialect which has not been approved.
+        """
+        uri = _dialect_of(schema)
+        if uri is None:
+            return self.owner if current is None else current
+
+        validator = self.dialects.get(uri)
+        if validator is not None:
+            return validator
+
+        if current is not None and uri == _dialect_of_class(current):
+            return current
+
+        raise exceptions.UnapprovedDialect(uri, self.approved)
+
+    def evolve_class(self, schema, current):
+        """
+        The class `Validator.evolve` should produce for ``schema``.
+        """
+        return self.class_for(schema, current=current)
+
+    def admit(self, schema):
+        """
+        Ensure ``schema``'s dialect is approved, raising otherwise.
+        """
+        self.class_for(schema, current=self.owner)
+
+
 def __getattr__(name):
     if name == "ErrorTree":
         warnings.warn(
@@ -150,6 +297,7 @@ def create(
     applicable_validators: _typing.ApplicableValidators = methodcaller(
         "items",
     ),
+    registration_scope_setup: _typing.RegistrationScopeSetup | None = None,
 ) -> type[Validator]:
     """
     Create a new validator class.
@@ -210,6 +358,31 @@ def create(
             implement similar behavior, you can typically ignore this argument
             and leave it at its default.
 
+        registration_scope_setup:
+
+            A callable which receives a fresh, empty
+            `jsonschema.validators.RegistrationScope` rooted at the newly
+            created validator class and returns the scope which should be
+            used -- typically after approving a few known dialects via
+            `jsonschema.validators.RegistrationScope.approve`.
+
+            If unprovided, the new validator class has no scope of its own,
+            and behaves exactly as before (i.e. it keeps consulting the
+            default, process-wide ``$schema`` mappings).
+
+            When provided, every dialect the resulting validator switches to
+            -- whether because a subschema declares a new :kw:`$schema`, or
+            because a :kw:`$ref` resolves to a resource which does, including
+            while annotations such as ``unevaluatedProperties`` are being
+            evaluated -- must have been approved by the returned scope.
+            Switching to any other dialect raises
+            `jsonschema.exceptions.UnapprovedDialect` rather than silently
+            falling back to another validator class.
+
+            Approved classes never leak into other validator classes: two
+            validators may each approve a (same-named) extension class of
+            their own without observing one another's registration.
+
     Returns:
 
         a new `jsonschema.protocols.Validator` class
@@ -222,6 +395,10 @@ def create(
         dialect_id=id_of(meta_schema) or "urn:unknown-dialect",
         default=referencing.Specification.OPAQUE,
     )
+
+    #: The class-wide default registration scope.  Instances whose scope is
+    #: left unprovided fall back to this.
+    _CLASS_REGISTRATION_SCOPE = None
 
     @define
     class Validator:
@@ -249,6 +426,13 @@ def create(
             kw_only=True,
             repr=False,
         )
+        _registration_scope = field(
+            alias="registration_scope",
+            default=None,
+            kw_only=True,
+            repr=False,
+            eq=False,
+        )
 
         def __init_subclass__(cls):
             warnings.warn(
@@ -268,7 +452,11 @@ def create(
             def evolve(self, **changes):
                 cls = self.__class__
                 schema = changes.setdefault("schema", self.schema)
-                NewValidator = validator_for(schema, default=cls)
+                scope = self._registration_scope
+                if scope is None:
+                    NewValidator = validator_for(schema, default=cls)
+                else:
+                    NewValidator = scope.evolve_class(schema, current=cls)
 
                 for field in fields(cls):  # noqa: F402
                     if not field.init:
@@ -283,6 +471,10 @@ def create(
             cls.evolve = evolve
 
         def __attrs_post_init__(self):
+            self._registration_scope = self.__class__._scope_for(self)
+            if self._registration_scope is not None:
+                self._registration_scope.admit(self.schema)
+
             if self._resolver is None:
                 registry = self._registry
                 if registry is not _REMOTE_WARNING_REGISTRY:
@@ -307,14 +499,37 @@ def create(
                     push_scope(id)
 
         @classmethod
+        def _scope_for(cls, validator):
+            if validator._registration_scope is not None:
+                return validator._registration_scope
+            return cls._CLASS_REGISTRATION_SCOPE
+
+        @classmethod
         def check_schema(cls, schema, format_checker=_UNSET):
-            Validator = validator_for(cls.META_SCHEMA, default=cls)
+            scope = cls._CLASS_REGISTRATION_SCOPE
+            if scope is None:
+                Validator = validator_for(cls.META_SCHEMA, default=cls)
+            else:
+                # Validate under the validator the meta schema itself names,
+                # when the scope approves it -- matching the default behavior
+                # of using a meta schema's own dialect.
+                try:
+                    Validator = scope.class_for(cls.META_SCHEMA)
+                except exceptions.UnapprovedDialect:
+                    Validator = cls
             if format_checker is _UNSET:
                 format_checker = Validator.FORMAT_CHECKER
-            validator = Validator(
-                schema=cls.META_SCHEMA,
-                format_checker=format_checker,
-            )
+            if scope is None:
+                validator = Validator(
+                    schema=cls.META_SCHEMA,
+                    format_checker=format_checker,
+                )
+            else:
+                validator = Validator(
+                    schema=cls.META_SCHEMA,
+                    format_checker=format_checker,
+                    registration_scope=scope.rebase(Validator),
+                )
             for error in validator.iter_errors(schema):
                 raise exceptions.SchemaError.create_from(error)
 
@@ -341,7 +556,14 @@ def create(
 
         def evolve(self, **changes):
             schema = changes.setdefault("schema", self.schema)
-            NewValidator = validator_for(schema, default=self.__class__)
+            scope = self._registration_scope
+            if scope is None:
+                NewValidator = validator_for(schema, default=self.__class__)
+            else:
+                NewValidator = scope.evolve_class(
+                    schema,
+                    current=self.__class__,
+                )
 
             for attr_name, init_name in evolve_fields:
                 if init_name not in changes:
@@ -508,6 +730,16 @@ def create(
         (field.name, field.alias) for field in fields(Validator) if field.init
     ]
 
+    if registration_scope_setup is not None:
+        scope = registration_scope_setup(
+            RegistrationScope.isolating(Validator),
+        )
+        if scope.owner is not Validator:
+            scope = scope.rebase(Validator)
+        Validator._CLASS_REGISTRATION_SCOPE = scope
+    else:
+        Validator._CLASS_REGISTRATION_SCOPE = None
+
     if version is not None:
         safe = version.title().replace(" ", "").replace("-", "")
         Validator.__name__ = Validator.__qualname__ = f"{safe}Validator"
@@ -522,6 +754,7 @@ def extend(
     version=None,
     type_checker=None,
     format_checker=None,
+    registration_scope_setup=None,
 ):
     """
     Create a new validator class by extending an existing one.
@@ -567,6 +800,13 @@ def extend(
             If unprovided, the format checker of the extended
             `jsonschema.protocols.Validator` will be carried along.
 
+        registration_scope_setup:
+
+            as in `create`.  The scope starts from the extended validator's
+            own dialect, and when unprovided the extended validator inherits
+            its parent's registration scope (so extending a scoped validator
+            keeps it isolated).
+
     Returns:
 
         a new `jsonschema.protocols.Validator` class extending the one
@@ -590,7 +830,8 @@ def extend(
         type_checker = validator.TYPE_CHECKER
     if format_checker is None:
         format_checker = validator.FORMAT_CHECKER
-    return create(
+
+    Extended = create(
         meta_schema=validator.META_SCHEMA,
         validators=all_validators,
         version=version,
@@ -598,7 +839,13 @@ def extend(
         format_checker=format_checker,
         id_of=validator.ID_OF,
         applicable_validators=validator._APPLICABLE_VALIDATORS,
+        registration_scope_setup=registration_scope_setup,
     )
+
+    inherited = validator._CLASS_REGISTRATION_SCOPE
+    if registration_scope_setup is None and inherited is not None:
+        Extended._CLASS_REGISTRATION_SCOPE = inherited.rebase(Extended)
+    return Extended
 
 
 Draft3Validator = create(

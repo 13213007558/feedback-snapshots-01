@@ -2341,6 +2341,274 @@ class TestThreading(TestCase):
         self.assertEqual((thread.is_alive(), failed), (False, []))
 
 
+class TestRegistrationScope(TestCase):
+    """
+    Tests for per-validator registration scopes.
+    """
+
+    def setUp(self):
+        self.calls = []
+        self.instances = []
+
+        def make(name):
+            def call(validator, value, instance, schema):
+                self.calls.append((name, value))
+                self.instances.append((name, instance))
+
+            return call
+
+        self.make = make
+        self.marker = "x-flag"
+
+    def scoped(self, name, scope_setup=lambda scope: scope, **kwargs):
+        return validators.extend(
+            validators.Draft202012Validator,
+            validators={self.marker: self.make(name)},
+            registration_scope_setup=scope_setup,
+            **kwargs,
+        )
+
+    def test_same_named_extensions_stay_isolated(self):
+        A = self.scoped("A")
+        B = self.scoped("B")
+        schema = {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            self.marker: True,
+        }
+        self.assertTrue(A(schema).is_valid({}))
+        self.assertTrue(B(schema).is_valid({}))
+        self.assertEqual(self.calls, [("A", True), ("B", True)])
+
+    def test_instances_sharing_a_process_do_not_cross_dispatch(self):
+        A = self.scoped("A")
+        B = self.scoped("B")
+        schema = {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "properties": {"p": {self.marker: True}},
+        }
+        va, vb = A(schema), B(schema)
+        va.is_valid({"p": 1})
+        vb.is_valid({"p": 2})
+        self.assertEqual(self.calls, [("A", True), ("B", True)])
+
+    def test_unscoped_classes_keep_default_cross_dialect_behavior(self):
+        """
+        Old applications using the default registry are unaffected.
+        """
+        schema = {"type": "integer"}
+        validator = validators.Draft202012Validator(schema)
+        evolved = validator.evolve(
+            schema={
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "integer",
+            },
+        )
+        self.assertIsInstance(evolved, validators.Draft7Validator)
+        self.assertTrue(evolved.is_valid(1))
+
+    def test_unapproved_dialect_fails_at_instantiation(self):
+        A = self.scoped("A")
+        schema = {
+            "$schema": "https://example.com/unapproved",
+            self.marker: True,
+        }
+        with self.assertRaises(exceptions.UnapprovedDialect) as e:
+            A(schema)
+        self.assertEqual(e.exception.dialect, "https://example.com/unapproved")
+        self.assertIn("unapproved", str(e.exception))
+
+    def test_unapproved_dialect_fails_when_evolving(self):
+        A = self.scoped("A")
+        validator = A(
+            {"$schema": "https://json-schema.org/draft/2020-12/schema"},
+        )
+        with self.assertRaises(exceptions.UnapprovedDialect):
+            validator.evolve(
+                schema={"$schema": "http://json-schema.org/draft-07/schema#"},
+            )
+
+    def test_approved_cross_dialect_switch_is_kept(self):
+        A = self.scoped(
+            "A",
+            scope_setup=lambda scope: scope.approve(
+                "http://json-schema.org/draft-07/schema#",
+                validators.Draft7Validator,
+            ),
+        )
+        validator = A(
+            {"$schema": "https://json-schema.org/draft/2020-12/schema"},
+        )
+        evolved = validator.evolve(
+            schema={
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "integer",
+            },
+        )
+        self.assertIsInstance(evolved, validators.Draft7Validator)
+        self.assertEqual(
+            (evolved.is_valid(1), evolved.is_valid("no")),
+            (True, False),
+        )
+
+    def test_extension_is_used_through_a_reference(self):
+        A = self.scoped("A")
+        B = self.scoped("B")
+        child = {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            self.marker: "child",
+        }
+        registry = referencing.Registry().with_resource(
+            "https://example.com/child",
+            DRAFT202012.create_resource(child),
+        )
+        schema = {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$ref": "https://example.com/child",
+            "unevaluatedProperties": False,
+        }
+        self.assertTrue(A(schema, registry=registry).is_valid({}))
+        self.assertTrue(B(schema, registry=registry).is_valid({}))
+        self.assertEqual(self.calls, [("A", "child"), ("B", "child")])
+
+    def test_annotations_use_the_scoped_extension(self):
+        A = self.scoped("A")
+        child = {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "properties": {"allowed": {"type": "integer"}},
+            self.marker: "child",
+        }
+        registry = referencing.Registry().with_resource(
+            "https://example.com/child",
+            DRAFT202012.create_resource(child),
+        )
+        schema = {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$ref": "https://example.com/child",
+            "unevaluatedProperties": False,
+        }
+        validator = A(schema, registry=registry)
+        self.assertTrue(validator.is_valid({"allowed": 1}))
+        self.assertFalse(validator.is_valid({"allowed": 1, "extra": 2}))
+        self.assertIn(("A", "child"), self.calls)
+
+    def test_unapproved_dialect_reached_through_a_reference(self):
+        A = self.scoped("A")
+        rogue = {
+            "$schema": "https://example.com/unapproved",
+            self.marker: True,
+            "properties": {"a": {"type": "integer"}},
+        }
+        registry = referencing.Registry().with_resource(
+            "https://example.com/rogue",
+            DRAFT202012.create_resource(rogue),
+        )
+        schema = {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$ref": "https://example.com/rogue",
+            "unevaluatedProperties": False,
+        }
+        with self.assertRaises(exceptions.UnapprovedDialect):
+            A(schema, registry=registry).is_valid({"a": 1, "b": 2})
+
+    def test_approved_dialect_reached_through_a_reference(self):
+        A = self.scoped(
+            "A",
+            scope_setup=lambda scope: scope.approve(
+                "http://json-schema.org/draft-07/schema#",
+                validators.Draft7Validator,
+            ),
+        )
+        child = {
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "type": "object",
+            "properties": {"a": {"type": "integer"}},
+        }
+        registry = referencing.Registry().with_resource(
+            "https://example.com/child",
+            referencing.jsonschema.DRAFT7.create_resource(child),
+        )
+        schema = {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$ref": "https://example.com/child",
+            "unevaluatedProperties": False,
+        }
+        validator = A(schema, registry=registry)
+        self.assertTrue(validator.is_valid({"a": 1}))
+        self.assertFalse(validator.is_valid({"a": 1, "b": 2}))
+
+    def test_extending_a_scoped_validator_inherits_its_scope(self):
+        A = self.scoped("A")
+        Extended = validators.extend(A)
+        with self.assertRaises(exceptions.UnapprovedDialect):
+            Extended({"$schema": "http://json-schema.org/draft-07/schema#"})
+
+    def test_extending_a_scoped_validator_can_opt_in_a_dialect(self):
+        A = self.scoped("A")
+        Extended = validators.extend(
+            A,
+            registration_scope_setup=lambda scope: scope.approve(
+                "http://json-schema.org/draft-07/schema#",
+                validators.Draft7Validator,
+            ),
+        )
+        evolved = Extended(
+            {"$schema": "https://json-schema.org/draft/2020-12/schema"},
+        ).evolve(
+            schema={
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "integer",
+            },
+        )
+        self.assertIsInstance(evolved, validators.Draft7Validator)
+
+    def test_check_schema_honors_the_scope(self):
+        A = self.scoped("A")
+        A.check_schema(
+            {"$schema": "https://json-schema.org/draft/2020-12/schema"},
+        )
+
+    def test_scope_is_available_per_instance(self):
+        A = self.scoped("A")
+        scope = validators.RegistrationScope.isolating(A)
+        validator = A(
+            {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                self.marker: True,
+            },
+            registration_scope=scope,
+        )
+        self.assertIs(validator._registration_scope, scope)
+
+    def test_parallel_validators_do_not_cross_dispatch(self):
+        A = self.scoped("A")
+        B = self.scoped("B")
+        schema = {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "properties": {"p": {self.marker: True}},
+        }
+
+        def run(Validator, instance):
+            for _ in range(50):
+                Validator(schema).is_valid({"p": {"marker": instance}})
+
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(2) as pool:
+            list(pool.map(lambda args: run(*args), [(A, 1), (B, 2)]))
+
+        a_instances = {
+            instance["marker"]
+            for name, instance in self.instances
+            if name == "A"
+        }
+        b_instances = {
+            instance["marker"]
+            for name, instance in self.instances
+            if name == "B"
+        }
+        self.assertEqual((a_instances, b_instances), ({1}, {2}))
+
+
 class TestReferencing(TestCase):
     def test_registry_with_retrieve(self):
         def retrieve(uri):
