@@ -1,0 +1,30 @@
+PATH
+  remote: ..
+  specs:
+    psych (5.5.0)
+      date
+      stringio
+
+GEM
+  remote: https://rubygems.org/
+  specs:
+    date (3.3.4)
+    stringio (3.1.1)
+
+PLATFORMS
+  arm64-darwin-25
+  ruby
+
+DEPENDENCIES
+  psych!
+
+CHECKSUMS
+  date (3.3.4)
+  psych (5.5.0)
+  stringio (3.1.1)
+
+RUBY VERSION
+  ruby 3.3.12
+
+BUNDLED WITH
+  4.0.16
