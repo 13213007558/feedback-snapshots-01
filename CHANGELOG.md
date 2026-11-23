@@ -1,6 +1,17 @@
 # Changelog
 
 
+## Unreleased
+
+- Add the `audience_migration` SP option for a time bounded, issuer scoped
+  migration from a single audience identifier to multiple brand entries. IdP
+  initiated logins may use configured legacy audiences inside the migration
+  window and are automatically tightened to the entry's own audience when it
+  closes; SP initiated logins remain bound to the original authentication
+  request. The stable audience decision is exposed on the response and in the
+  session information.
+
+
 ## v7.5.5 (2026-09-17)
 
 - Resolve CVE-2026-26007 by migrating to the from pyOpenSSL to the cryptography APIs

@@ -22,6 +22,7 @@ from saml2 import SAMLError
 from saml2 import saml
 from saml2 import samlp
 from saml2 import soap
+from saml2.audience_migration import AudienceMigrationPolicy
 from saml2.entity import Entity
 from saml2.extension import sp_type
 from saml2.extension.requested_attributes import RequestedAttribute
@@ -193,6 +194,12 @@ class Base(Entity):
             _warn(warn_msg)
 
         self.artifact2response = {}
+
+        migration_conf = self.config.getattr("audience_migration", "sp")
+        if migration_conf:
+            self.audience_migration_policy = AudienceMigrationPolicy(migration_conf)
+        else:
+            self.audience_migration_policy = None
 
     #
     # Private methods
@@ -787,6 +794,7 @@ class Base(Entity):
             "attribute_converters": self.config.attribute_converters,
             "allow_unknown_attributes": self.config.allow_unknown_attributes,
             "conv_info": conv_info,
+            "audience_migration_policy": getattr(self, "audience_migration_policy", None),
         }
 
         try:

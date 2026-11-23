@@ -103,6 +103,7 @@ SP_ARGS = [
     "sp_type_in_metadata",
     "requested_attributes",
     "requested_authn_context",
+    "audience_migration",
 ]
 
 AA_IDP_ARGS = [
@@ -214,6 +215,7 @@ class Config:
         self.scope = ""
         self.allow_unknown_attributes = False
         self.extension_schema = {}
+        self.audience_migration = None
         self.cert_handler_extra_class = None
         self.verify_encrypt_cert_advice = None
         self.verify_encrypt_cert_assertion = None

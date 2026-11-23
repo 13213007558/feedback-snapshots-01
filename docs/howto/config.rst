@@ -1004,6 +1004,63 @@ Example::
         }
     }
 
+audience_migration
+""""""""""""""""""
+
+Controls a time bounded migration of the audience restriction for IdP
+initiated (unsolicited) logins. This is useful when a portal moves from a
+single audience identifier to several brand entries while some Identity
+Providers can only initiate logins themselves and therefore have to be
+reconfigured one by one.
+
+The option only affects IdP initiated responses. SP initiated logins keep
+being bound to the original authentication request and are never loosened by
+this configuration.
+
+``window`` defines the half-open interval ``[start, end)`` (UTC, SAML dateTime
+format) during which the legacy audiences are accepted. When the window ends
+the policy automatically tightens back to only the receiving entry's own
+audience. Either bound may be omitted.
+
+``entries`` maps every brand entry entityID to the audiences that are
+temporarily accepted for that entry (``legacy_audiences``) and the set of
+issuers that are allowed to use them (``issuers``). An empty ``issuers`` list
+means any issuer may use the legacy audiences while the window is open. The
+entry's own entityID is always an accepted audience, regardless of the window.
+
+Example::
+
+    "service": {
+        "sp": {
+            "allow_unsolicited": True,
+            "audience_migration": {
+                "window": {
+                    "start": "2026-06-01T00:00:00Z",
+                    "end": "2026-07-01T00:00:00Z",
+                },
+                "entries": {
+                    "https://portal.example.com/brand/a": {
+                        "legacy_audiences": ["urn:mace:example.com:portal"],
+                        "issuers": ["https://idp-a.example.com"],
+                    },
+                    "https://portal.example.com/brand/b": {
+                        "legacy_audiences": ["urn:mace:example.com:portal"],
+                        "issuers": [
+                            "https://idp-a.example.com",
+                            "https://idp-b.example.com",
+                        ],
+                    },
+                },
+            },
+        }
+    }
+
+The stable result of each audience evaluation (accepted audiences, whether the
+window was open, whether a legacy audience was used) is attached to the
+response and, for accepted assertions, included under the
+``audience_migration`` key of the session information returned by
+``session_info()``.
+
 hide_assertion_consumer_service
 """""""""""""""""""""""""""""""
 

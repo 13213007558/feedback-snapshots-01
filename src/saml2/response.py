@@ -12,6 +12,7 @@ from saml2 import time_util
 from saml2 import xmldsig as ds
 from saml2 import xmlenc as xenc
 from saml2.attribute_converter import to_local
+from saml2.audience_migration import AudienceMigrationPolicy
 from saml2.s_utils import RequestVersionTooHigh
 from saml2.s_utils import RequestVersionTooLow
 from saml2.saml import SCM_BEARER
@@ -204,8 +205,20 @@ def _dummy(_):
     return None
 
 
-def for_me(conditions, myself):
-    """Am I among the intended audiences"""
+def for_me(conditions, myself, migration_policy=None, response=None):
+    """Am I among the intended audiences.
+
+    When ``migration_policy`` is supplied (an IdP initiated assertion covered
+    by a configured brand entry migration) the time bounded, issuer scoped
+    policy makes the decision and the stable result is stored on the response.
+    Otherwise the historical single-audience check is used.
+    """
+
+    if migration_policy is not None:
+        decision = migration_policy.evaluate(conditions, myself, response.issuer() if response else "")
+        if response is not None:
+            response.migration_decision = decision
+        return decision.accepted
 
     if not conditions.audience_restriction:  # No audience restriction
         return True
@@ -231,6 +244,7 @@ def authn_response(
     allow_unsolicited=False,
     want_assertions_signed=False,
     conv_info=None,
+    audience_migration_policy=None,
 ):
     sec = security_context(conf)
     if not timeslack:
@@ -250,6 +264,7 @@ def authn_response(
         allow_unsolicited=allow_unsolicited,
         want_assertions_signed=want_assertions_signed,
         conv_info=conv_info,
+        audience_migration_policy=audience_migration_policy,
     )
 
 
@@ -489,6 +504,7 @@ class AuthnResponse(StatusResponse):
         want_assertions_signed=False,
         want_assertions_or_response_signed=False,
         want_response_signed=False,
+        audience_migration_policy=None,
         conv_info=None,
         **kwargs,
     ):
@@ -510,6 +526,10 @@ class AuthnResponse(StatusResponse):
         self.require_signature = want_assertions_signed
         self.require_signature_or_response_signature = want_assertions_or_response_signed
         self.require_response_signature = want_response_signed
+        # Optional, time bounded brand entry / issuer audience migration.
+        self.audience_migration_policy = audience_migration_policy
+        # Stable record of the audience evaluation, reused for the session.
+        self.migration_decision = None
         self.test = test
         self.allow_unknown_attributes = allow_unknown_attributes
         #
@@ -607,7 +627,7 @@ class AuthnResponse(StatusResponse):
             else:
                 self.not_on_or_after = 0
 
-        if not for_me(conditions, self.entity_id):
+        if not for_me(conditions, self.entity_id, self._audience_policy(), response=self):
             if not lax:
                 raise Exception(f"AudienceRestrictions conditions not satisfied! (Local entity_id={self.entity_id})")
 
@@ -622,6 +642,24 @@ class AuthnResponse(StatusResponse):
                     raise Exception("Missing xsi:type specification")
 
         return True
+
+    def is_idp_initiated(self):
+        """True when the assertion was not tied to an outstanding request."""
+        return self.came_from is None and self.allow_unsolicited
+
+    def _audience_policy(self):
+        """Return the migration policy only for IdP initiated assertions.
+
+        SP initiated logins keep the historical single-audience behaviour and
+        remain bound to the original authentication request via
+        ``outstanding_queries``.
+        """
+        policy = self.audience_migration_policy
+        if policy is None or not getattr(policy, "enabled", False):
+            return None
+        if not self.is_idp_initiated():
+            return None
+        return policy
 
     def decrypt_attributes(self, attribute_statement, keys=None):
         """
@@ -1087,7 +1125,7 @@ class AuthnResponse(StatusResponse):
             }
         elif getattr(self.assertion, "authn_statement", None):
             authn_statement = self.assertion.authn_statement[0]
-            return {
+            info = {
                 "ava": self.ava,
                 "name_id": self.name_id,
                 "came_from": self.came_from,
@@ -1096,6 +1134,11 @@ class AuthnResponse(StatusResponse):
                 "authn_info": self.authn_info(),
                 "session_index": authn_statement.session_index,
             }
+            if self.migration_decision is not None:
+                # Stable snapshot captured during audience validation; the
+                # window may have closed by the time the session is built.
+                info["audience_migration"] = self.migration_decision.as_dict()
+            return info
         else:
             raise StatusInvalidAuthnResponseStatement("The Authn Response Statement is not valid")
 
@@ -1301,6 +1344,7 @@ def response_factory(
     allow_unsolicited=False,
     want_assertions_signed=False,
     conv_info=None,
+    audience_migration_policy=None,
 ):
     sec_context = security_context(conf)
     if not timeslack:
@@ -1329,6 +1373,7 @@ def response_factory(
                 extension_schema=extension_schema,
                 want_assertions_signed=want_assertions_signed,
                 conv_info=conv_info,
+                audience_migration_policy=audience_migration_policy,
             )
             authnresp.update(response)
             return authnresp
