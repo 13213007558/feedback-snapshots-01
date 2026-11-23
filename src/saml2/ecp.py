@@ -139,6 +139,7 @@ def handle_ecp_authn_response(cls, soap_message, outstanding=None):
 
     response.loads(f"{rdict['body']}", False, soap_message)
     response.verify()
+    response.get_authorization_identity()
     cls.users.add_information_about_person(response.session_info())
 
     return response, _relay_state

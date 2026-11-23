@@ -786,6 +786,10 @@ class Base(Entity):
             "entity_id": self.config.entityid,
             "attribute_converters": self.config.attribute_converters,
             "allow_unknown_attributes": self.config.allow_unknown_attributes,
+            "attribute_source_policy": (
+                self.config.getattr("attribute_source_policy", "sp")
+                or self.config.attribute_source_policy
+            ),
             "conv_info": conv_info,
         }
 
@@ -804,7 +808,10 @@ class Base(Entity):
             logger.error("Response type not supported: %s", saml2.class_name(resp))
             return None
 
-        if resp.assertion and len(resp.response.encrypted_assertion) == 0 and resp.name_id:
+        if resp.assertion and resp.name_id and len(resp.response.encrypted_assertion) == 0:
+            # Make sure the configured source policy is satisfied before any
+            # identity information is cached for a new session.
+            resp.get_authorization_identity()
             self.users.add_information_about_person(resp.session_info())
             logger.info("--- ADDED person info ----")
 

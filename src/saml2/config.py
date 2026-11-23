@@ -103,6 +103,7 @@ SP_ARGS = [
     "sp_type_in_metadata",
     "requested_attributes",
     "requested_authn_context",
+    "attribute_source_policy",
 ]
 
 AA_IDP_ARGS = [
@@ -230,6 +231,7 @@ class Config:
         self.signing_algorithm = None
         self.digest_algorithm = None
         self.http_client_timeout = None
+        self.attribute_source_policy = None
 
     def setattr(self, context, attr, val):
         if context == "":
@@ -263,6 +265,12 @@ class Config:
         self.context = self.def_context
 
     def load_complex(self, cnf):
+        source_policy = cnf.get("attribute_source_policy")
+        if source_policy is not None:
+            self.setattr("", "attribute_source_policy", source_policy)
+            if self.getattr("attribute_source_policy", "sp") is None:
+                self.setattr("sp", "attribute_source_policy", source_policy)
+
         acs = ac_factory(cnf.get("attribute_map_dir"))
         if not acs:
             raise ConfigurationError("No attribute converters, something is wrong!!")

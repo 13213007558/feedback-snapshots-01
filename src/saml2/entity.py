@@ -1471,7 +1471,7 @@ class Entity(HTTPBase):
         finally:
             response.require_response_signature = require_response_signature
 
-        logger.debug("XMLSTR: %s", xmlstr)
+        logger.debug("XML document length: %d", len(xmlstr))
 
         if not response:
             return response

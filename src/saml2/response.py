@@ -12,6 +12,11 @@ from saml2 import time_util
 from saml2 import xmldsig as ds
 from saml2 import xmlenc as xenc
 from saml2.attribute_converter import to_local
+from saml2.attribute_source import AttributeMapper
+from saml2.attribute_source import AttributeMapping
+from saml2.attribute_source import AttributeSourceError
+from saml2.attribute_source import AttributeSourcePolicy
+from saml2.attribute_source import AuthorizationIdentity
 from saml2.s_utils import RequestVersionTooHigh
 from saml2.s_utils import RequestVersionTooLow
 from saml2.saml import SCM_BEARER
@@ -222,6 +227,17 @@ def for_me(conditions, myself):
     return False
 
 
+def _configured_source_policy(conf):
+    policy = None
+    try:
+        policy = conf.getattr("attribute_source_policy", "sp")
+    except (AttributeError, TypeError):
+        pass
+    if policy is None:
+        policy = getattr(conf, "attribute_source_policy", None)
+    return policy
+
+
 def authn_response(
     conf,
     return_addrs,
@@ -231,6 +247,7 @@ def authn_response(
     allow_unsolicited=False,
     want_assertions_signed=False,
     conv_info=None,
+    attribute_source_policy=None,
 ):
     sec = security_context(conf)
     if not timeslack:
@@ -238,6 +255,9 @@ def authn_response(
             timeslack = int(conf.accepted_time_diff)
         except TypeError:
             timeslack = 0
+
+    if attribute_source_policy is None:
+        attribute_source_policy = _configured_source_policy(conf)
 
     return AuthnResponse(
         sec,
@@ -250,6 +270,7 @@ def authn_response(
         allow_unsolicited=allow_unsolicited,
         want_assertions_signed=want_assertions_signed,
         conv_info=conv_info,
+        attribute_source_policy=attribute_source_policy,
     )
 
 
@@ -309,10 +330,15 @@ class StatusResponse:
         if not self.response:
             logger.warning("Response was not correctly signed")
             if self.xmlstr:
-                logger.debug("Response: %s", self.xmlstr)
+                logger.debug("Response document length: %d", len(self.xmlstr))
             raise IncorrectlySigned()
 
-        logger.debug("response: %s", self.response)
+        logger.debug(
+            "response type=%s id=%s issuer=%s",
+            class_name(self.response) if self.response is not None else None,
+            getattr(self.response, "id", None),
+            self.issuer() if self.response is not None else None,
+        )
 
         try:
             valid_instance(self.response)
@@ -345,7 +371,7 @@ class StatusResponse:
             self.xmlstr = xmldata[:].decode("utf-8")
         else:
             self.xmlstr = xmldata[:]
-        logger.debug("xmlstr: %s", self.xmlstr)
+        logger.debug("xml document length: %d", len(self.xmlstr))
         if origxml:
             self.origxml = origxml
         else:
@@ -490,6 +516,7 @@ class AuthnResponse(StatusResponse):
         want_assertions_or_response_signed=False,
         want_response_signed=False,
         conv_info=None,
+        attribute_source_policy=None,
         **kwargs,
     ):
 
@@ -512,6 +539,12 @@ class AuthnResponse(StatusResponse):
         self.require_response_signature = want_response_signed
         self.test = test
         self.allow_unknown_attributes = allow_unknown_attributes
+        self.attribute_source_policy = AttributeSourcePolicy.from_config(attribute_source_policy)
+        self.attribute_mapping = None
+        self.authorization_identity = None
+        self.attribute_source_errors = []
+        self._encrypted_assertion_ids = {}
+        self._decrypted_attribute_ids = set()
         #
         try:
             self.extension_schema = kwargs["extension_schema"]
@@ -551,6 +584,11 @@ class AuthnResponse(StatusResponse):
         self.came_from = None
         self.ava = None
         self.assertion = None
+        self.attribute_mapping = None
+        self.authorization_identity = None
+        self.attribute_source_errors = []
+        self._encrypted_assertion_ids = {}
+        self._decrypted_attribute_ids = set()
 
     def authn_statement_ok(self, optional=False):
         n_authn_statements = len(self.assertion.authn_statement)
@@ -630,33 +668,118 @@ class AuthnResponse(StatusResponse):
 
         :param attribute_statement: A SAML.AttributeStatement which might
             contain both encrypted attributes and attributes.
+        :return: The identities of the attributes that were decrypted.
         """
         #        _node_name = [
         #            "urn:oasis:names:tc:SAML:2.0:assertion:EncryptedData",
         #            "urn:oasis:names:tc:SAML:2.0:assertion:EncryptedAttribute"]
 
+        decrypted_ids = []
         for encattr in attribute_statement.encrypted_attribute:
             if not encattr.encrypted_key:
-                _decr = self.sec.decrypt_keys(encattr.encrypted_data, keys=keys)
+                _decr = self.sec.decrypt_keys(str(encattr.encrypted_data), keys=keys)
                 _attr = attribute_from_string(_decr)
                 attribute_statement.attribute.append(_attr)
+                decrypted_ids.append(id(_attr))
             else:
-                _decr = self.sec.decrypt_keys(encattr, keys=keys)
+                _decr = self.sec.decrypt_keys(str(encattr), keys=keys)
                 enc_attr = encrypted_attribute_from_string(_decr)
                 attrlist = enc_attr.extensions_as_elements("Attribute", saml)
                 attribute_statement.attribute.extend(attrlist)
+                decrypted_ids.extend(id(attr) for attr in attrlist)
+        return decrypted_ids
 
-    def read_attribute_statement(self, attr_statem):
-        logger.debug("Attribute Statement: %s", attr_statem)
+    def read_attribute_statement(self, attr_statem, assertion=None):
+        # Do not log attribute values (they are personal data). The statement
+        # itself is only described by its field names.
+        logger.debug(
+            "Attribute Statement with %d attribute(s), %d encrypted attribute(s); fields: %s",
+            len(attr_statem.attribute),
+            len(attr_statem.encrypted_attribute),
+            sorted(attr.name for attr in attr_statem.attribute),
+        )
         # for aconv in self.attribute_converters:
         #    logger.debug("Converts name format: %s", aconv.name_format)
 
-        self.decrypt_attributes(attr_statem)
+        decrypted_ids = self.decrypt_attributes(attr_statem)
+        self._decrypted_attribute_ids.update(decrypted_ids)
+        if self.context in ("AuthnReq", "AttrQuery") and assertion is not None:
+            self._record_attribute_claims(attr_statem, decrypted_ids, assertion)
         return to_local(self.attribute_converters, attr_statem, self.allow_unknown_attributes)
+
+    def _record_attribute_claims(self, attr_statem, decrypted_ids, assertion):
+        assertion_encrypted = bool(getattr(self, "_encrypted_assertion_ids", {}).get(id(assertion)))
+        assertion_signed = bool(getattr(assertion, "signature", None))
+        assertion_issuer = getattr(getattr(assertion, "issuer", None), "text", None)
+        issuer = assertion_issuer or self.issuer()
+        mapper = AttributeMapper(self.attribute_converters, self.allow_unknown_attributes)
+        claims = mapper.map_statement(
+            attr_statem,
+            issuer=issuer,
+            assertion_id=getattr(assertion, "id", "") or "",
+            assertion_encrypted=assertion_encrypted,
+            assertion_signed=assertion_signed,
+            response_signed=bool(getattr(self.response, "signature", None)),
+            decrypted_attribute_ids=decrypted_ids,
+        )
+        if self.attribute_mapping is None:
+            self.attribute_mapping = AttributeMapping(claims)
+        else:
+            self.attribute_mapping.claims.extend(claims)
+
+    def _finalize_attribute_mapping(self):
+        if self.attribute_mapping is None:
+            self.attribute_mapping = AttributeMapping([])
+        if not self.attribute_mapping.ava:
+            self.attribute_mapping.ava = dict(self.ava or {})
+        self.authorization_identity = None
+        self.attribute_source_errors = []
+        policy = self.attribute_source_policy
+        if policy is None or not policy.business_attributes:
+            return
+        try:
+            self.authorization_identity = self.attribute_mapping.authorization_identity(policy)
+        except AttributeSourceError as err:
+            self.attribute_source_errors = [err]
+            # The error lists field identifiers only; values are never logged.
+            logger.warning("Attribute source policy failed: %s", err)
+
+    def get_authorization_identity(self):
+        """Return only business attributes whose source satisfies policy.
+
+        Raises :class:`saml2.attribute_source.AttributeSourceRejected` or
+        :class:`saml2.attribute_source.AttributeSourceConflict` when a
+        business attribute has no qualified source or when sources disagree.
+        """
+        if self.authorization_identity is None and not self.attribute_source_errors:
+            self._finalize_attribute_mapping()
+        if self.attribute_source_errors:
+            raise self.attribute_source_errors[0]
+        if self.authorization_identity is None:
+            self.authorization_identity = AuthorizationIdentity({}, [], self.attribute_source_policy)
+        return self.authorization_identity
+
+    def get_attribute_mapping(self):
+        """Return the mapper view with provenance information."""
+        if self.attribute_mapping is None:
+            # Allow callers to inspect an already verified response even when
+            # the caller did not drive the statement walk itself.
+            if self.assertion is not None and self.ava:
+                for statement in getattr(self.assertion, "attribute_statement", []):
+                    self._record_attribute_claims(
+                        statement,
+                        self._decrypted_attribute_ids,
+                        self.assertion,
+                    )
+            if self.attribute_mapping is None:
+                self.attribute_mapping = AttributeMapping([])
+        return self.attribute_mapping
 
     def get_identity(self):
         """The assertion can contain zero or more attributeStatements"""
         ava = {}
+        self.attribute_mapping = AttributeMapping([])
+        self.authorization_identity = None
         for _assertion in self.assertions:
             if _assertion.advice:
                 if _assertion.advice.assertion:
@@ -668,12 +791,18 @@ class AuthnResponse(StatusResponse):
                                     n=n_attr_statements
                                 )
                                 raise ValueError(msg)
-                            ava.update(self.read_attribute_statement(tmp_assertion.attribute_statement[0]))
+                            ava.update(
+                                self.read_attribute_statement(
+                                    tmp_assertion.attribute_statement[0], assertion=tmp_assertion
+                                )
+                            )
             if _assertion.attribute_statement:
-                logger.debug("Assertion contains %s attribute statement(s)", (len(self.assertion.attribute_statement)))
+                logger.debug(
+                    "Assertion contains %s attribute statement(s)",
+                    len(_assertion.attribute_statement),
+                )
                 for _attr_statem in _assertion.attribute_statement:
-                    logger.debug(f"Attribute Statement: {_attr_statem}")
-                    ava.update(self.read_attribute_statement(_attr_statem))
+                    ava.update(self.read_attribute_statement(_attr_statem, assertion=_assertion))
             if not ava:
                 logger.debug("Assertion contains no attribute statements")
         return ava
@@ -771,7 +900,7 @@ class AuthnResponse(StatusResponse):
             _name_id = saml.name_id_from_string(_name_id_str)
             self.name_id = _name_id
 
-        logger.info("Subject NameID: %s", self.name_id)
+        logger.info("Subject NameID present: %s", bool(self.name_id))
         return self.name_id
 
     def _assertion(self, assertion, verified=False):
@@ -797,7 +926,7 @@ class AuthnResponse(StatusResponse):
 
         self.assertion = assertion
         logger.debug("assertion context: %s", self.context)
-        logger.debug("assertion keys: %s", assertion.keyswv())
+        logger.debug("assertion fields: %s", assertion.keyswv())
         logger.debug("outstanding_queries: %s", self.outstanding_queries)
 
         # if self.context == "AuthnReq" or self.context == "AttrQuery":
@@ -850,6 +979,10 @@ class AuthnResponse(StatusResponse):
                         ):
                             logger.error("Failed to verify signature on '%s'", assertion)
                             raise SignatureError()
+                    if getattr(encrypted_assertion, "encrypted_data", None) is not None or (
+                        getattr(encrypted_assertion, "cipher_data", None) is not None
+                    ) or encrypted_assertion.extension_elements:
+                        self._encrypted_assertion_ids[id(assertion)] = True
                     res.append(assertion)
         return res
 
@@ -1001,7 +1134,9 @@ class AuthnResponse(StatusResponse):
 
         if self.context == "AuthnReq" or self.context == "AttrQuery":
             self.ava = self.get_identity()
-            logger.debug(f"--- AVA: {self.ava}")
+            # Values are personal data; only report field names at debug level.
+            logger.debug("--- AVA fields: %s", sorted(self.ava))
+            self._finalize_attribute_mapping()
 
         return True
 
@@ -1087,7 +1222,7 @@ class AuthnResponse(StatusResponse):
             }
         elif getattr(self.assertion, "authn_statement", None):
             authn_statement = self.assertion.authn_statement[0]
-            return {
+            info = {
                 "ava": self.ava,
                 "name_id": self.name_id,
                 "came_from": self.came_from,
@@ -1096,6 +1231,9 @@ class AuthnResponse(StatusResponse):
                 "authn_info": self.authn_info(),
                 "session_index": authn_statement.session_index,
             }
+            if self.attribute_mapping is not None:
+                info["attribute_provenance"] = self.attribute_mapping.provenance()
+            return info
         else:
             raise StatusInvalidAuthnResponseStatement("The Authn Response Statement is not valid")
 
@@ -1301,6 +1439,7 @@ def response_factory(
     allow_unsolicited=False,
     want_assertions_signed=False,
     conv_info=None,
+    attribute_source_policy=None,
 ):
     sec_context = security_context(conf)
     if not timeslack:
@@ -1312,6 +1451,9 @@ def response_factory(
     attribute_converters = conf.attribute_converters
     entity_id = conf.entityid
     extension_schema = conf.extension_schema
+
+    if attribute_source_policy is None:
+        attribute_source_policy = _configured_source_policy(conf)
 
     response = StatusResponse(sec_context, return_addrs, timeslack, request_id, asynchop, conv_info=conv_info)
     try:
@@ -1329,6 +1471,7 @@ def response_factory(
                 extension_schema=extension_schema,
                 want_assertions_signed=want_assertions_signed,
                 conv_info=conv_info,
+                attribute_source_policy=attribute_source_policy,
             )
             authnresp.update(response)
             return authnresp
@@ -1374,7 +1517,7 @@ class AssertionIDResponse:
     def loads(self, xmldata, decode=True, origxml=None):
         # own copy
         self.xmlstr = xmldata[:]
-        logger.debug("xmlstr: %s", self.xmlstr)
+        logger.debug("xml document length: %d", len(self.xmlstr))
         self.origxml = origxml
 
         try:
@@ -1404,9 +1547,13 @@ class AssertionIDResponse:
         if not self.response:
             logger.warning("Response was not correctly signed")
             if self.xmlstr:
-                logger.debug("Response: %s", self.xmlstr)
+                logger.debug("Response document length: %d", len(self.xmlstr))
             raise IncorrectlySigned()
 
-        logger.debug("response: %s", self.response)
+        logger.debug(
+            "response type=%s id=%s",
+            class_name(self.response) if self.response is not None else None,
+            getattr(self.response, "id", None),
+        )
 
         return self

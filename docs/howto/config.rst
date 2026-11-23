@@ -545,6 +545,66 @@ Indicates that attributes that are not recognized (they are not configured in
 attribute-mapping), will not be discarded.
 Default to False.
 
+attribute_source_policy
+^^^^^^^^^^^^^^^^^^^^^^^
+
+Defines which attribute sources may decide business identity. Display
+attributes are always mapped by ``attribute_converters`` as before; this
+option adds a second, policy-qualified view that authorization consumers must
+use for business attributes.
+
+The value is a mapping with a ``business_attributes`` key. Each entry is
+either a list of local attribute names (requiring a signed, encrypted source)
+or a mapping with the following keys:
+
+* ``require_encrypted`` – the assertion or the attribute itself must have been
+  encrypted (default ``True``).
+* ``require_attribute_encrypted`` – the individual ``EncryptedAttribute`` must
+  have been decrypted, not just the enclosing assertion (default ``False``).
+* ``require_signed`` – the assertion or response signature must have been
+  verified (default ``True``).
+* ``trusted_issuers`` – optional list of entity IDs whose claims are trusted.
+* ``required`` – whether a missing field fails the login (default ``True``).
+
+``display_attributes`` may list local names that intentionally remain on the
+legacy display path (for example ``displayName``). These names are never
+consulted for authorization, even if the IdP also sends them.
+
+Two claims for the same local name from different sources are compared by
+value. If they disagree, authorization fails with
+``AttributeSourceConflict``; if no source satisfies the requirement, it fails
+with ``AttributeSourceRejected``. Both errors list field identifiers
+(attribute name, local name, issuer, assertion ID, signature/encryption state)
+but never attribute values.
+
+After a successful verification the response exposes:
+
+* ``get_attribute_mapping()`` – all claims with provenance (mapper view).
+* ``get_authorization_identity()`` – only policy-qualified values; raises on
+  rejection or conflict.
+* ``session_info()["attribute_provenance"]`` – provenance for the mapper view.
+
+The SP does not write identity information to the session cache when policy
+evaluation fails. Display attributes remain available through
+``get_attribute_mapping()`` for legacy rendering, but callers that grant
+permissions must use ``get_authorization_identity()``.
+
+Example::
+
+    "attribute_source_policy": {
+        "business_attributes": {
+            "o": {
+                "require_encrypted": True,
+                "require_signed": True,
+                "trusted_issuers": ["https://hr.example.org/idp"],
+            },
+            "employeeType": {
+                "require_encrypted": True,
+                "require_attribute_encrypted": True,
+            },
+        },
+    }
+
 xmlsec_binary
 ^^^^^^^^^^^^^
 
