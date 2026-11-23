@@ -30,7 +30,7 @@ class ProxyGrantingTicket(models.Model):
         blank=True,
         on_delete=models.CASCADE
     )
-    pgtiou = models.CharField(max_length=255, null=True, blank=True)
+    pgtiou = models.CharField(max_length=255, null=True, blank=True, unique=True)
     pgt = models.CharField(max_length=255, null=True, blank=True)
     date = models.DateTimeField(auto_now_add=True)
 

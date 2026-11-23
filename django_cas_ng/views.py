@@ -10,6 +10,7 @@ from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth import authenticate, login as auth_login, logout as auth_logout
 from django.core.exceptions import PermissionDenied
+from django.db.models import Q
 from django.http import (
     HttpRequest,
     HttpResponse,
@@ -168,14 +169,24 @@ class LoginView(View):
                     user=user,
                     session_key=session_key
                 ).delete()
-                # Set new PGT ticket
-                try:
-                    pgt = ProxyGrantingTicket.objects.get(pgtiou=pgtiou)
+                # The pgtiou is a one-time correlation token for this
+                # login; consume it so a later login in this session
+                # cannot reuse it.
+                request.session.pop('pgtiou', None)
+                # The CAS proxy callback may arrive before or after this
+                # login. Bind the PGT if the callback already delivered it,
+                # otherwise record a pending binding that the callback will
+                # complete. A row already bound to a session is never
+                # re-bound, so the PGT only reaches the session that
+                # actually performed the matching login.
+                pgt, created = ProxyGrantingTicket.objects.get_or_create(
+                    pgtiou=pgtiou,
+                    defaults={'user': user, 'session_key': session_key},
+                )
+                if not created and pgt.user_id is None:
                     pgt.user = user
                     pgt.session_key = session_key
                     pgt.save()
-                except ProxyGrantingTicket.DoesNotExist:
-                    pass
 
             if settings.CAS_LOGIN_MSG is not None:
                 name = user.get_username()
@@ -277,11 +288,24 @@ class CallbackView(View):
         pgtid = request.GET.get('pgtId')
         pgtiou = request.GET.get('pgtIou')
 
-        pgt = ProxyGrantingTicket.objects.create(pgtiou=pgtiou, pgt=pgtid)
-        pgt.save()
+        if pgtid and pgtiou:
+            # The matching login may not have happened yet (the row is then
+            # kept unbound until the login claims it), or it may already
+            # have recorded a pending binding that this PGT completes.
+            # Notifications are idempotent: a repeated callback never
+            # overwrites an existing PGT or its session binding.
+            pgt, created = ProxyGrantingTicket.objects.get_or_create(
+                pgtiou=pgtiou,
+                defaults={'pgt': pgtid},
+            )
+            if not created and not pgt.pgt:
+                pgt.pgt = pgtid
+                pgt.save()
 
+        # Drop pending entries that waited too long for the other side:
+        # unbound callbacks (no session) and unconsumed logins (no PGT).
         ProxyGrantingTicket.objects.filter(
-            session_key=None,
+            Q(session_key=None) | Q(pgt=None),
             date__lt=(timezone.now() - timedelta(seconds=60))
         ).delete()
 

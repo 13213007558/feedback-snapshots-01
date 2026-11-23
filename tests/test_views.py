@@ -1,4 +1,5 @@
 from importlib import import_module
+from datetime import timedelta
 from unittest.mock import Mock
 
 import pytest
@@ -7,7 +8,13 @@ from django.contrib.auth.middleware import AuthenticationMiddleware
 from django.contrib.sessions.middleware import SessionMiddleware
 from django.core.exceptions import PermissionDenied
 from django.test import RequestFactory
-from django_cas_ng.models import ProxyGrantingTicket, SessionTicket
+from django.utils import timezone
+from django_cas_ng.models import (
+    SESSION_KEY_MAXLENGTH,
+    ProxyError,
+    ProxyGrantingTicket,
+    SessionTicket,
+)
 from django_cas_ng.utils import RedirectException
 from django_cas_ng.views import CallbackView, LoginView, LogoutView, is_local_url, clean_next_page
 
@@ -508,3 +515,116 @@ def test_callback_post_logout(django_user_model, settings):
                                               pgt='fake-ticket').exists() is False
     assert SessionTicket.objects.filter(session_key=session.session_key,
                                         ticket='fake-ticket').exists() is False
+
+
+@pytest.mark.django_db
+def test_proxy_callback_interleaved_delivery(monkeypatch, django_user_model, settings):
+    """
+    PGT callbacks and browser logins may interleave in any order. Each PGT
+    must end up bound only to the session that performed the matching login,
+    and a replayed notification must not disturb existing or later bindings.
+    """
+    settings.CAS_PROXY_CALLBACK = True
+    settings.CAS_LOGIN_MSG = None
+    settings.AUTHENTICATION_BACKENDS = ['django_cas_ng.backends.CASBackend']
+
+    usernames = {'ST-user-a': 'user-a@example.com', 'ST-user-b': 'user-b@example.com'}
+    pgtious = {'ST-user-a': 'IOU-user-a', 'ST-user-b': 'IOU-user-b'}
+
+    def mock_verify(ticket, service=None):
+        return usernames[ticket], {'ticket': ticket}, pgtious[ticket]
+
+    mock_client = Mock()
+    mock_client.verify_ticket.side_effect = mock_verify
+    monkeypatch.setattr('django_cas_ng.backends.get_cas_client',
+                        lambda *args, **kwargs: mock_client)
+
+    factory = RequestFactory()
+
+    def deliver_callback(pgtid, pgtiou):
+        request = factory.get('/callback/', {'pgtId': pgtid, 'pgtIou': pgtiou})
+        response = CallbackView().get(request)
+        assert response.status_code == 200
+
+    def browser_login(ticket):
+        request = factory.get('/login/', {'ticket': ticket, 'service': 'fake-service'})
+        process_request_for_middleware(request, SessionMiddleware)
+        process_request_for_middleware(request, AuthenticationMiddleware)
+        response = LoginView().get(request)
+        assert response.status_code == 302
+        return request
+
+    user_a = django_user_model.objects.create_user('user-a@example.com', '')
+    user_b = django_user_model.objects.create_user('user-b@example.com', '')
+
+    # 1. CAS delivers user A's PGT before A's browser login shows up.
+    deliver_callback('PGT-user-a', 'IOU-user-a')
+    # 2. User B logs in while B's callback is still in flight: a pending
+    #    binding is recorded for the callback to complete.
+    request_b = browser_login('ST-user-b')
+    # 3. B's callback arrives late and fills in the pending binding.
+    deliver_callback('PGT-user-b', 'IOU-user-b')
+    # 4. B's old notification is replayed after B already logged in.
+    deliver_callback('PGT-user-b', 'IOU-user-b')
+    # 5. User A logs in afterwards; the waiting PGT is bound to A's session
+    #    and the replayed notification must not alter this later login.
+    request_a = browser_login('ST-user-a')
+
+    session_key_a = request_a.session.session_key[:SESSION_KEY_MAXLENGTH]
+    session_key_b = request_b.session.session_key[:SESSION_KEY_MAXLENGTH]
+    assert session_key_a != session_key_b
+
+    # Each PGT is stored exactly once, bound to its own login session.
+    assert ProxyGrantingTicket.objects.count() == 2
+    pgt_a = ProxyGrantingTicket.objects.get(pgtiou='IOU-user-a')
+    pgt_b = ProxyGrantingTicket.objects.get(pgtiou='IOU-user-b')
+    assert (pgt_a.user_id, pgt_a.session_key, pgt_a.pgt) == \
+        (user_a.pk, session_key_a, 'PGT-user-a')
+    assert (pgt_b.user_id, pgt_b.session_key, pgt_b.pgt) == \
+        (user_b.pk, session_key_b, 'PGT-user-b')
+
+    # Proxy ticket retrieval still goes through the Django user and the
+    # active session: each session obtains its own proxy ticket.
+    proxy_client = Mock()
+    proxy_client.get_proxy_ticket.side_effect = lambda pgt: 'PT-for-' + pgt
+    monkeypatch.setattr('django_cas_ng.models.get_cas_client',
+                        lambda *args, **kwargs: proxy_client)
+
+    request_a.user = user_a
+    request_b.user = user_b
+    assert ProxyGrantingTicket.retrieve_pt(request_a, 'fake-service') == 'PT-for-PGT-user-a'
+    assert ProxyGrantingTicket.retrieve_pt(request_b, 'fake-service') == 'PT-for-PGT-user-b'
+
+    # A session cannot retrieve the proxy ticket bound to the other session.
+    request_a.user = user_b
+    with pytest.raises(ProxyError):
+        ProxyGrantingTicket.retrieve_pt(request_a, 'fake-service')
+
+
+@pytest.mark.django_db
+def test_callback_expires_stale_pending_entries(django_user_model):
+    """
+    Pending entries whose other side never arrived are invalidated after the
+    timeout, both for unbound callbacks and for unconsumed login bindings.
+    """
+    user = django_user_model.objects.create_user('test@example.com', '')
+    stale_date = timezone.now() - timedelta(seconds=120)
+
+    # A callback whose login never happened.
+    orphan_callback = ProxyGrantingTicket.objects.create(
+        pgtiou='stale-callback-iou', pgt='stale-callback-pgt')
+    # A login binding whose callback never arrived.
+    orphan_login = ProxyGrantingTicket.objects.create(
+        pgtiou='stale-login-iou', user=user, session_key='stale-session')
+    ProxyGrantingTicket.objects.filter(
+        pk__in=[orphan_callback.pk, orphan_login.pk]).update(date=stale_date)
+
+    factory = RequestFactory()
+    request = factory.get('/callback/', {'pgtId': 'fresh-pgtId',
+                                         'pgtIou': 'fresh-pgtIou'})
+    response = CallbackView().get(request)
+
+    assert response.status_code == 200
+    assert not ProxyGrantingTicket.objects.filter(pgtiou='stale-callback-iou').exists()
+    assert not ProxyGrantingTicket.objects.filter(pgtiou='stale-login-iou').exists()
+    assert ProxyGrantingTicket.objects.filter(pgtiou='fresh-pgtIou').exists()
