@@ -756,7 +756,9 @@ class Base(Entity):
 
     # ======== response handling ===========
 
-    def parse_authn_request_response(self, xmlstr, binding, outstanding=None, outstanding_certs=None, conv_info=None):
+    def parse_authn_request_response(
+        self, xmlstr, binding, outstanding=None, outstanding_certs=None, conv_info=None, diagnostics=None
+    ):
         """Deal with an AuthnResponse
 
         :param xmlstr: The reply as a xml string
@@ -766,6 +768,9 @@ class Base(Entity):
             as values.
         :param outstanding_certs:
         :param conv_info: Information about the conversation.
+        :param diagnostics: Optional ResponseDiagnostics instance to record the
+            trust material and processing stages for this response. A fresh
+            instance is exposed on the response as ``resp.diagnostics``.
         :return: An response.AuthnResponse or None
         """
 
@@ -787,6 +792,7 @@ class Base(Entity):
             "attribute_converters": self.config.attribute_converters,
             "allow_unknown_attributes": self.config.allow_unknown_attributes,
             "conv_info": conv_info,
+            "diagnostics": diagnostics,
         }
 
         try:

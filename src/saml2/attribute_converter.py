@@ -105,27 +105,37 @@ def _find_maps_in_module(module):
             yield item
 
 
-def to_local(acs, statement, allow_unknown_attributes=False):
+def to_local(acs, statement, allow_unknown_attributes=False, stats=None):
     """Replaces the attribute names in a attribute value assertion with the
     equivalent name from a local name format.
 
     :param acs: List of Attribute Converters
     :param statement: The Attribute Statement
     :param allow_unknown_attributes: If unknown attributes are allowed
+    :param stats: Optional dict updated with "asserted", "mapped" and
+        "unmapped" attribute counts. Intended for diagnostics.
     :return: A key,values dictionary
     """
-    return list_to_local(acs, statement.attribute, allow_unknown_attributes)
+    return list_to_local(acs, statement.attribute, allow_unknown_attributes, stats=stats)
 
 
-def list_to_local(acs, attrlist, allow_unknown_attributes=False):
+def list_to_local(acs, attrlist, allow_unknown_attributes=False, stats=None):
     """Replaces the attribute names in a attribute value assertion with the
     equivalent name from a local name format.
 
     :param acs: List of Attribute Converters
     :param attrlist: List of Attributes
     :param allow_unknown_attributes: If unknown attributes are allowed
+    :param stats: Optional dict updated with "asserted", "mapped" and
+        "unmapped" attribute counts. Intended for diagnostics.
     :return: A key,values dictionary
     """
+    if stats is None:
+        stats = {}
+    stats.setdefault("asserted", 0)
+    stats.setdefault("mapped", 0)
+    stats.setdefault("unmapped", 0)
+
     if not acs:
         acs = [AttributeConverter()]
         acsd = {"": acs}
@@ -134,6 +144,7 @@ def list_to_local(acs, attrlist, allow_unknown_attributes=False):
 
     ava = {}
     for attr in attrlist:
+        stats["asserted"] += 1
         try:
             _func = acsd[attr.name_format].ava_from
         except KeyError:
@@ -141,6 +152,7 @@ def list_to_local(acs, attrlist, allow_unknown_attributes=False):
                 _func = acs[0].lcd_ava_from
             else:
                 logger.info("Unsupported attribute name format: %s", attr.name_format)
+                stats["unmapped"] += 1
                 continue
 
         try:
@@ -150,10 +162,13 @@ def list_to_local(acs, attrlist, allow_unknown_attributes=False):
                 key, val = acs[0].lcd_ava_from(attr)
             else:
                 logger.info("Unknown attribute name: %s", attr)
+                stats["unmapped"] += 1
                 continue
         except AttributeError:
+            stats["unmapped"] += 1
             continue
 
+        stats["mapped"] += 1
         try:
             ava[key].extend(val)
         except KeyError:

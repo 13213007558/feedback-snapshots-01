@@ -31,6 +31,7 @@ from saml2 import samlp
 from saml2.cert import CertificateError
 from saml2.cert import OpenSSLWrapper
 from saml2.cert import read_cert_from_file
+from saml2.diagnostics import certificate_fingerprint
 import saml2.cryptography.asymmetric
 import saml2.cryptography.pki
 import saml2.data.templates as _data_template
@@ -459,6 +460,14 @@ def import_rsa_key_from_file(filename):
         data = fd.read()
     key = saml2.cryptography.asymmetric.load_pem_private_key(data)
     return key
+
+
+def _certificate_fingerprint_from_file(filename):
+    try:
+        with open(filename, "rb") as fp:
+            return certificate_fingerprint(fp.read())
+    except Exception:
+        return None
 
 
 def parse_xmlsec_verify_output(output, version=None):
@@ -1240,6 +1249,9 @@ class SecurityContext:
 
         self.metadata = metadata
         self.only_use_keys_in_metadata = only_use_keys_in_metadata
+        # Updated by _check_signature with non-sensitive details about the
+        # certificate that actually verified the last signature.
+        self.last_signature_verification = None
 
         if not template:
             fp = str(_resource_files(_data_template).joinpath("template_enc.xml"))
@@ -1511,6 +1523,12 @@ class SecurityContext:
         if verified or only_valid_cert:
             if not self.cert_handler.verify_cert(last_pem_file):
                 raise CertificateError("Invalid certificate!")
+            if verified:
+                self.last_signature_verification = {
+                    "issuer": _issuer,
+                    "node_name": node_name,
+                    "certificate_sha256": _certificate_fingerprint_from_file(last_pem_file),
+                }
         else:
             raise SignatureError("Failed to verify signature")
 

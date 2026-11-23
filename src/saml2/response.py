@@ -12,6 +12,7 @@ from saml2 import time_util
 from saml2 import xmldsig as ds
 from saml2 import xmlenc as xenc
 from saml2.attribute_converter import to_local
+from saml2.diagnostics import ResponseDiagnostics
 from saml2.s_utils import RequestVersionTooHigh
 from saml2.s_utils import RequestVersionTooLow
 from saml2.saml import SCM_BEARER
@@ -231,6 +232,8 @@ def authn_response(
     allow_unsolicited=False,
     want_assertions_signed=False,
     conv_info=None,
+    diagnostics=None,
+    **kwargs,
 ):
     sec = security_context(conf)
     if not timeslack:
@@ -250,6 +253,8 @@ def authn_response(
         allow_unsolicited=allow_unsolicited,
         want_assertions_signed=want_assertions_signed,
         conv_info=conv_info,
+        diagnostics=diagnostics,
+        **kwargs,
     )
 
 
@@ -277,7 +282,16 @@ def attribute_response(conf, return_addrs, timeslack=0, asynchop=False, test=Fal
 class StatusResponse:
     msgtype = "status_response"
 
-    def __init__(self, sec_context, return_addrs=None, timeslack=0, request_id=0, asynchop=True, conv_info=None):
+    def __init__(
+        self,
+        sec_context,
+        return_addrs=None,
+        timeslack=0,
+        request_id=0,
+        asynchop=True,
+        conv_info=None,
+        diagnostics=None,
+    ):
         self.sec = sec_context
         self.return_addrs = return_addrs or []
 
@@ -298,6 +312,8 @@ class StatusResponse:
         self.asynchop = asynchop
         self.do_not_verify = False
         self.conv_info = conv_info or {}
+        self._diagnostics_explicit = diagnostics is not None
+        self.diagnostics = diagnostics if diagnostics is not None else ResponseDiagnostics()
 
     def _clear(self):
         self.xmlstr = ""
@@ -356,6 +372,8 @@ class StatusResponse:
         else:
             args = {}
 
+        self.sec.last_signature_verification = None
+
         try:
             self.response = self.signature_check(
                 xmldata,
@@ -368,12 +386,80 @@ class StatusResponse:
         except TypeError:
             raise
         except SignatureError:
+            self._record_signature_verification(False)
             raise
         except Exception as excp:
             logger.exception("EXCEPTION: %s", str(excp))
+            self._record_signature_verification(False)
             raise
 
-        return self._postamble()
+        loaded = self._postamble()
+        self._bind_diagnostics_binding()
+
+        signed_response = getattr(self.response, "signature", None)
+        if signed_response and not self.do_not_verify:
+            self._record_signature_verification(True)
+        else:
+            info = getattr(self.sec, "last_signature_verification", None) or {}
+            self.diagnostics.record_signature(
+                False,
+                signed_node=info.get("node_name"),
+                issuer_display=info.get("issuer") or self.diagnostics.issuer_display,
+                trust_material_version=None,
+                certificate_sha256=info.get("certificate_sha256"),
+                request_bound=self.diagnostics.request_bound,
+                outcome="skipped",
+            )
+        return loaded
+
+    def _bind_diagnostics_binding(self):
+        if not self.response:
+            return
+        self.diagnostics.bind_response(self.response)
+        actual = getattr(self.response, "in_response_to", None)
+        expected = self.diagnostics.request_id
+        if expected is None and self.request_id:
+            expected = str(self.request_id)
+            self.diagnostics.bind_request(request_id=expected)
+        if expected is None and actual:
+            outstanding = getattr(self, "outstanding_queries", None) or {}
+            if actual in outstanding:
+                # The response answers a request this SP actually issued.
+                expected = actual
+                self.diagnostics.bind_request(request_id=expected)
+        request_bound = bool(expected) and actual == expected
+        self.diagnostics.mark_request_bound(request_bound)
+        if not getattr(self, "_request_binding_recorded", False):
+            self.diagnostics.record_request_binding(request_bound)
+            self._request_binding_recorded = True
+
+    def _record_signature_verification(self, verified, outcome=None):
+        info = getattr(self.sec, "last_signature_verification", None) or {}
+        issuer_display = info.get("issuer") or self.diagnostics.issuer_display
+        certificate_sha256 = info.get("certificate_sha256")
+        signed_node = info.get("node_name")
+
+        if issuer_display:
+            self.diagnostics.record_trust_material(
+                getattr(self.sec, "metadata", None),
+                issuer_display,
+                used_certificate_sha256=certificate_sha256,
+            )
+
+        trust_material_version = None
+        used_material = self.diagnostics.used_trust_material(issuer_display, certificate_sha256)
+        if used_material:
+            trust_material_version = used_material.get("version")
+
+        self.diagnostics.record_signature(
+            verified,
+            signed_node=signed_node,
+            issuer_display=issuer_display,
+            trust_material_version=trust_material_version,
+            certificate_sha256=certificate_sha256,
+            request_bound=self.diagnostics.request_bound,
+            outcome=outcome,
+        )
 
     def status_ok(self):
         status = self.response.status
@@ -400,8 +486,42 @@ class StatusResponse:
         return lower < issued_at < upper
 
     def _verify(self):
-        if self.request_id and self.in_response_to and self.in_response_to != self.request_id:
+        expected = self.diagnostics.request_id
+        in_response_to_ok = True
+        if expected and self.in_response_to and self.in_response_to != expected:
             logger.error("Not the id I expected: %s != %s", self.in_response_to, self.request_id)
+            in_response_to_ok = False
+
+        destination_ok = True
+        if self.asynchop:
+            if self.response.destination and self.response.destination not in self.return_addrs:
+                logger.error(
+                    "destination '%s' not in return addresses '%s'", self.response.destination, self.return_addrs
+                )
+                destination_ok = False
+
+        status_ok = False
+        try:
+            status_ok = self.status_ok()
+        except StatusError:
+            self.diagnostics.record_response_validation(
+                passed=False,
+                in_response_to_ok=in_response_to_ok,
+                destination_ok=destination_ok,
+                status_ok=False,
+                request_bound=bool(expected) and self.in_response_to == expected,
+            )
+            raise
+
+        self.diagnostics.record_response_validation(
+            passed=bool(in_response_to_ok and destination_ok and status_ok),
+            in_response_to_ok=in_response_to_ok,
+            destination_ok=destination_ok,
+            status_ok=status_ok,
+            request_bound=bool(expected) and self.in_response_to == expected,
+        )
+
+        if not (in_response_to_ok and destination_ok):
             return None
 
         if self.response.version != "2.0":
@@ -411,14 +531,7 @@ class StatusResponse:
             else:
                 raise RequestVersionTooHigh()
 
-        if self.asynchop:
-            if self.response.destination and self.response.destination not in self.return_addrs:
-                logger.error(
-                    "destination '%s' not in return addresses '%s'", self.response.destination, self.return_addrs
-                )
-                return None
-
-        valid = self.issue_instant_ok() and self.status_ok()
+        valid = self.issue_instant_ok() and status_ok
         return valid
 
     def loads(self, xmldata, decode=True, origxml=None):
@@ -434,7 +547,10 @@ class StatusResponse:
     def update(self, mold):
         self.xmlstr = mold.xmlstr
         self.in_response_to = mold.in_response_to
+        self.came_from = getattr(mold, "came_from", self.came_from)
         self.response = mold.response
+        if getattr(mold, "diagnostics", None) is not None:
+            self.diagnostics = mold.diagnostics
 
     def issuer(self):
         issuer_value = (self.response.issuer.text if self.response.issuer is not None else "").strip()
@@ -490,10 +606,19 @@ class AuthnResponse(StatusResponse):
         want_assertions_or_response_signed=False,
         want_response_signed=False,
         conv_info=None,
+        diagnostics=None,
         **kwargs,
     ):
 
-        StatusResponse.__init__(self, sec_context, return_addrs, timeslack, asynchop=asynchop, conv_info=conv_info)
+        StatusResponse.__init__(
+            self,
+            sec_context,
+            return_addrs,
+            timeslack,
+            asynchop=asynchop,
+            conv_info=conv_info,
+            diagnostics=diagnostics,
+        )
         self.entity_id = entity_id
         self.attribute_converters = attribute_converters
         if outstanding_queries:
@@ -527,6 +652,10 @@ class AuthnResponse(StatusResponse):
         return True
 
     def loads(self, xmldata, decode=True, origxml=None):
+        if not self._diagnostics_explicit:
+            # A reused response object should not leak diagnostics from a
+            # previous response; explicit instances are owned by the caller.
+            self.diagnostics = ResponseDiagnostics()
         self._loads(xmldata, decode, origxml)
 
         if self.asynchop:
@@ -652,11 +781,22 @@ class AuthnResponse(StatusResponse):
         #    logger.debug("Converts name format: %s", aconv.name_format)
 
         self.decrypt_attributes(attr_statem)
-        return to_local(self.attribute_converters, attr_statem, self.allow_unknown_attributes)
+        stats = {}
+        ava = to_local(
+            self.attribute_converters,
+            attr_statem,
+            self.allow_unknown_attributes,
+            stats=stats,
+        )
+        if hasattr(self, "_mapping_stats"):
+            for key in ("asserted", "mapped", "unmapped"):
+                self._mapping_stats[key] += stats.get(key, 0)
+        return ava
 
     def get_identity(self):
         """The assertion can contain zero or more attributeStatements"""
         ava = {}
+        self._mapping_stats = {"asserted": 0, "mapped": 0, "unmapped": 0}
         for _assertion in self.assertions:
             if _assertion.advice:
                 if _assertion.advice.assertion:
@@ -676,7 +816,31 @@ class AuthnResponse(StatusResponse):
                     ava.update(self.read_attribute_statement(_attr_statem))
             if not ava:
                 logger.debug("Assertion contains no attribute statements")
+        self._asserted_attribute_count = self._mapping_stats["asserted"]
+        self._mapped_attribute_count = self._mapping_stats["mapped"]
+        self._unmapped_attribute_count = self._mapping_stats["unmapped"]
         return ava
+
+    def _record_attribute_mapping(self):
+        asserted = getattr(self, "_asserted_attribute_count", 0)
+        mapped = getattr(self, "_mapped_attribute_count", 0)
+        unmapped = getattr(self, "_unmapped_attribute_count", 0)
+        passed = unmapped == 0
+        self.diagnostics.record_attribute_mapping(
+            passed,
+            asserted_attribute_count=asserted,
+            mapped_attribute_count=mapped,
+            unmapped_attribute_count=unmapped,
+            request_bound=self.diagnostics.request_bound,
+        )
+        if not passed:
+            self.diagnostics.record_identity_issuance(False, request_bound=self.diagnostics.request_bound)
+        return passed
+
+    def _record_identity_issuance(self):
+        published = self.name_id is not None and not self.diagnostics.failure_stage
+        self.diagnostics.record_identity_issuance(published, request_bound=self.diagnostics.request_bound)
+        return published
 
     def _bearer_confirmed(self, data):
         if not data:
@@ -918,6 +1082,13 @@ class AuthnResponse(StatusResponse):
             logger.debug("***Unencrypted assertion***")
             for assertion in self.response.assertion:
                 if not self._assertion(assertion, False):
+                    self.diagnostics.record_assertion_selection(
+                        False,
+                        assertion_count=len(self.response.assertion),
+                        signed=bool(getattr(assertion, "signature", None)),
+                        validated=False,
+                        request_bound=self.diagnostics.request_bound,
+                    )
                     return False
 
         if self.find_encrypt_data(self.response):
@@ -984,6 +1155,13 @@ class AuthnResponse(StatusResponse):
             self.response.assertion = resp.assertion
             for assertion in _enc_assertions:
                 if not self._assertion(assertion, True):
+                    self.diagnostics.record_assertion_selection(
+                        False,
+                        assertion_count=len(_enc_assertions),
+                        signed=bool(getattr(assertion, "signature", None)),
+                        validated=False,
+                        request_bound=self.diagnostics.request_bound,
+                    )
                     return False
                 else:
                     self.assertions.append(assertion)
@@ -1002,6 +1180,15 @@ class AuthnResponse(StatusResponse):
         if self.context == "AuthnReq" or self.context == "AttrQuery":
             self.ava = self.get_identity()
             logger.debug(f"--- AVA: {self.ava}")
+            self.diagnostics.record_assertion_selection(
+                True,
+                assertion_count=len(self.assertions),
+                signed=bool(getattr(self.assertion, "signature", None)),
+                validated=True,
+                request_bound=self.diagnostics.request_bound,
+            )
+            if self._record_attribute_mapping():
+                self._record_identity_issuance()
 
         return True
 
@@ -1301,6 +1488,7 @@ def response_factory(
     allow_unsolicited=False,
     want_assertions_signed=False,
     conv_info=None,
+    diagnostics=None,
 ):
     sec_context = security_context(conf)
     if not timeslack:
@@ -1313,7 +1501,18 @@ def response_factory(
     entity_id = conf.entityid
     extension_schema = conf.extension_schema
 
-    response = StatusResponse(sec_context, return_addrs, timeslack, request_id, asynchop, conv_info=conv_info)
+    if diagnostics is None:
+        diagnostics = ResponseDiagnostics()
+
+    response = StatusResponse(
+        sec_context,
+        return_addrs,
+        timeslack,
+        request_id,
+        asynchop,
+        conv_info=conv_info,
+        diagnostics=diagnostics,
+    )
     try:
         response.loads(xmlstr, decode, origxml)
         if response.response.assertion or response.response.encrypted_assertion:
@@ -1329,13 +1528,16 @@ def response_factory(
                 extension_schema=extension_schema,
                 want_assertions_signed=want_assertions_signed,
                 conv_info=conv_info,
+                diagnostics=diagnostics,
             )
             authnresp.update(response)
             return authnresp
     except TypeError:
         response.signature_check = sec_context.correctly_signed_logout_response
         response.loads(xmlstr, decode, origxml)
-        logoutresp = LogoutResponse(sec_context, return_addrs, timeslack, asynchop=asynchop, conv_info=conv_info)
+        logoutresp = LogoutResponse(
+            sec_context, return_addrs, timeslack, asynchop=asynchop, conv_info=conv_info, diagnostics=diagnostics
+        )
         logoutresp.update(response)
         return logoutresp
 
