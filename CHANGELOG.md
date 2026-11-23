@@ -1,6 +1,15 @@
 # Changelog
 
 
+## Unreleased
+
+- Add `saml2.federation`: a trust resolver combining statically signed
+  metadata with on-demand MDQ, with durable key retirement, dual-key rotation
+  windows and explicit immutable trust views. MDQ query failures, explicit
+  deletions (404) and fresh signed records are kept as distinct states that
+  cannot overwrite one another, so a retirement survives a network outage.
+  See `docs/howto/federation.rst` and `tests/test_95_federation_trust.py`.
+
 ## v7.5.5 (2026-09-17)
 
 - Resolve CVE-2026-26007 by migrating to the from pyOpenSSL to the cryptography APIs
