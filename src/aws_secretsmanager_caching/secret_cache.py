@@ -18,6 +18,7 @@ import botocore.config
 import botocore.session
 
 from .cache import LRUCache, SecretCacheItem
+from .cache.secret_bundle import SecretBundleReader
 from .config import SecretCacheConfig
 
 
@@ -48,6 +49,9 @@ class SecretCache:
         })
         if self._client is None:
             self._client = botocore.session.get_session().create_client("secretsmanager", config=boto_config)
+        self._bundle_reader = SecretBundleReader(
+            config=self._config, client=self._client, max_cache_size=self._config.max_cache_size
+        )
 
     def _get_cached_secret(self, secret_id):
         """Get a cached secret for the given secret identifier.
@@ -110,3 +114,25 @@ class SecretCache:
         :return: True if the secret metadata was refreshed.
         """
         return self._get_cached_secret(secret_id).refresh_secret_now()
+
+    def get_secret_bundle(self, manifest):
+        """Get a complete bundle of secrets from one approved release.
+
+        The manifest pins every component (for example a username and a
+        password) to an explicit version id. The still-approved releases are
+        tried newest-first; the first release whose components all resolve to
+        non-null values is returned, guaranteeing the values originate from the
+        same approved publication. If no approved release is complete, an
+        explicit SecretBundleUnavailableError is raised rather than returning a
+        partial result.
+
+        This does not change the single-key get_secret_string/get_secret_binary
+        conventions, which continue to resolve by version stage.
+
+        :type manifest: aws_secretsmanager_caching.release_manifest.SecretReleaseManifest
+        :param manifest: The release manifest describing the coordinated set.
+
+        :rtype: aws_secretsmanager_caching.cache.secret_bundle.SecretBundle
+        :return: A complete bundle whose values share one approved release.
+        """
+        return self._bundle_reader.get_secret_bundle(manifest)

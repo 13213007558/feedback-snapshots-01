@@ -17,5 +17,20 @@
 """
 from aws_secretsmanager_caching.cache.items import SecretCacheItem, SecretCacheObject, SecretCacheVersion
 from aws_secretsmanager_caching.cache.lru import LRUCache
+from aws_secretsmanager_caching.cache.secret_bundle import (
+    ComponentStatus,
+    SecretBundle,
+    SecretBundleReader,
+    SecretBundleUnavailableError,
+)
 
-__all__ = ["SecretCacheObject", "SecretCacheItem", "SecretCacheVersion", "LRUCache"]
+__all__ = [
+    "SecretCacheObject",
+    "SecretCacheItem",
+    "SecretCacheVersion",
+    "LRUCache",
+    "SecretBundle",
+    "SecretBundleReader",
+    "SecretBundleUnavailableError",
+    "ComponentStatus",
+]

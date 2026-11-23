@@ -128,6 +128,43 @@ secret = cache.get_secret_string('mysecret')
 
 This call blocks for a few seconds before it retrieves the secret. If a recent refresh failed, the call also waits for the pending retry delay, up to a maximum of 10 seconds.
 
+#### Reading a Coordinated Set of Secrets
+
+Some credentials span more than one secret, for example a database username and a password stored as two Secrets Manager entries. When those entries are rotated as a set, the two versions can become visible at slightly different times. Reading them independently could return a username from the new publication together with a password from the old one.
+
+A `SecretReleaseManifest` groups the entries into releases. Each release pins every component to an explicit version id, so the values returned always come from the same approved publication.
+
+```python
+from aws_secretsmanager_caching import (
+    SecretCache, SecretReleaseManifest, SecretRelease, SecretComponent,
+)
+
+cache = SecretCache(client=client)
+
+manifest = SecretReleaseManifest(name='db-credentials')
+manifest.add_release(SecretRelease(release_id='release-1', components=[
+    SecretComponent(name='username', secret_id='db/username', version_id='<old username version id>'),
+    SecretComponent(name='password', secret_id='db/password', version_id='<old password version id>'),
+]))
+manifest.add_release(SecretRelease(release_id='release-2', components=[
+    SecretComponent(name='username', secret_id='db/username', version_id='<new username version id>'),
+    SecretComponent(name='password', secret_id='db/password', version_id='<new password version id>'),
+]))
+
+bundle = cache.get_secret_bundle(manifest)
+bundle.values        # {'username': '...', 'password': '...'}
+bundle.release_id    # the release the values were read from
+bundle.get('password')
+```
+
+`get_secret_bundle()` walks the still-approved releases newest-first and returns the first release whose components all resolve to non-null values. A component whose value is empty or cannot yet be retrieved makes its release incomplete, so the cache falls back to the previous still-approved release rather than mixing versions. If no approved release is complete, the call raises `SecretBundleUnavailableError` instead of returning a partial result, and an incomplete attempt is never cached as a success. Revoking a release removes it from consideration:
+
+```python
+manifest.revoke_release('release-1')  # release-1 is no longer served
+```
+
+The single-key `get_secret_string()` and `get_secret_binary()` calls are unchanged and continue to resolve by version stage (`AWSCURRENT` by default), independently of any manifest.
+
 #### Cache Configuration
 
 You can configure the cache config object with the following parameters:

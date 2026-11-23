@@ -13,6 +13,23 @@
 """High level AWS Secrets Manager caching client."""
 from aws_secretsmanager_caching.config import SecretCacheConfig
 from aws_secretsmanager_caching.decorators import InjectKeywordedSecretString, InjectSecretString
+from aws_secretsmanager_caching.release_manifest import SecretComponent, SecretRelease, SecretReleaseManifest
+from aws_secretsmanager_caching.cache.secret_bundle import (
+    ComponentStatus,
+    SecretBundle,
+    SecretBundleUnavailableError,
+)
 from aws_secretsmanager_caching.secret_cache import SecretCache
 
-__all__ = ["SecretCache", "SecretCacheConfig", "InjectSecretString", "InjectKeywordedSecretString"]
+__all__ = [
+    "SecretCache",
+    "SecretCacheConfig",
+    "InjectSecretString",
+    "InjectKeywordedSecretString",
+    "SecretComponent",
+    "SecretRelease",
+    "SecretReleaseManifest",
+    "SecretBundle",
+    "SecretBundleUnavailableError",
+    "ComponentStatus",
+]
