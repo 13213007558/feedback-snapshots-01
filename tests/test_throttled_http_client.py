@@ -1,4 +1,5 @@
 # Test cases for https://identitydivision.visualstudio.com/devex/_git/AuthLibrariesApiReview?version=GBdev&path=%2FService%20protection%2FIntial%20set%20of%20protection%20measures.md&_a=preview&anchor=common-test-cases
+import json
 import pickle
 from time import sleep
 from random import random
@@ -256,3 +257,212 @@ class ThrottledHttpClientTestCase(ThrottledHttpClientBaseTestCase):
         with self.assertRaises(CloseMethodCalled):
             http_client.close()
 
+
+
+class FakeClock(object):
+    def __init__(self, now=1_700_000_000):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
+class ScriptedHttpClient(object):
+    """A transport whose responses are scripted per (host, tenant).
+
+    It counts only real transport attempts, which is what the acceptance
+    evidence needs: a locally throttled request must not appear as a send.
+    """
+    def __init__(self, responses):
+        self.responses = responses
+        self.sent = []
+
+    def _respond(self, url, data):
+        host = url.split("://", 1)[-1].split("/", 1)[0]
+        segments = [s for s in url.split("://", 1)[-1].split("/", 1)[-1].split("/") if s]
+        tenant = segments[0] if segments else ""
+        self.sent.append((host, tenant))
+        status, headers, text = self.responses.get(
+            (host, tenant), (200, {}, '{"access_token": "AT-%s-%s"}' % (host, tenant)))
+        return MinimalResponse(status_code=status, headers=headers, text=text)
+
+    def post(self, url, params=None, data=None, headers=None, **kwargs):
+        return self._respond(url, data)
+
+    def get(self, url, params=None, headers=None, **kwargs):
+        return self._respond(url, None)
+
+    def close(self):
+        pass
+
+
+class ScopedThrottleClockTestCase(unittest.TestCase):
+    """Clock-driven evidence for tenant, service, and release behavior."""
+
+    TENANT_A = "tenant-a"
+    TENANT_B = "tenant-b"
+
+    def setUp(self):
+        self.clock = FakeClock()
+        self.cache = {}
+        self.transport = ScriptedHttpClient({
+            # Alias one for tenant A: a tenant-scoped 429 for 30 seconds.
+            ("login.windows.net", self.TENANT_A):
+                (429, {"Retry-After": "30", "x-ms-throttle-scope": "tenant"}, ""),
+        })
+        self.client = ThrottledHttpClient(
+            self.transport, http_cache=self.cache, clock=self.clock)
+
+    def _post(self, host, tenant):
+        return self.client.post(
+            "https://{}/{}/oauth2/v2.0/token".format(host, tenant),
+            data={"client_id": "c", "scope": "s", "grant_type": "client_credentials"})
+
+    def _hosts_sent(self):
+        return [(host, tenant) for host, tenant in self.transport.sent]
+
+    def test_tenant_throttle_blocks_both_aliases_of_that_tenant_only(self):
+        first = self._post("login.windows.net", self.TENANT_A)
+        self.assertEqual(429, first.status_code)
+
+        # Same tenant through a different, equivalent host: still local clock.
+        alias_two = self._post("login.microsoftonline.com", self.TENANT_A)
+        self.assertEqual(429, alias_two.status_code)
+
+        # Another tenant on the very same host keeps going.
+        other = self._post("login.windows.net", self.TENANT_B)
+        self.assertEqual(200, other.status_code)
+        self.assertEqual(
+            [("login.windows.net", self.TENANT_A),
+             ("login.windows.net", self.TENANT_B)],
+            self._hosts_sent(),
+            "Only the first tenant-A send and the tenant-B send reached transport")
+
+    def test_tenant_throttle_does_not_block_a_shared_global_tenant(self):
+        self._post("login.windows.net", self.TENANT_A)
+        common = self._post("login.microsoftonline.com", "common")
+        self.assertEqual(200, common.status_code)
+
+    def test_concrete_tenant_url_attributes_a_429_without_a_scope_header(self):
+        self.transport.responses[("login.windows.net", "tenant-c")] = (
+            429, {"Retry-After": "30"}, "")
+        self.assertEqual(429, self._post("login.windows.net", "tenant-c").status_code)
+        # A concrete tenant in the URL makes it attributable, so its aliases wait...
+        self.assertEqual(
+            429, self._post("login.microsoftonline.com", "tenant-c").status_code)
+        # ...but a different tenant on the same host continues.
+        self.assertEqual(
+            200, self._post("login.windows.net", "tenant-d").status_code)
+        self.assertEqual(2, len(self._hosts_sent()))
+
+    def test_service_throttle_blocks_every_tenant_and_alias(self):
+        self.transport.responses[("login.windows.net", self.TENANT_A)] = (
+            503, {"Retry-After": "20"}, "")
+        self.assertEqual(503, self._post("login.windows.net", self.TENANT_A).status_code)
+
+        # The identical request may be served from the per-request cache, but
+        # in any case it must not reach the transport again.
+        self.assertIn(
+            self._post("login.windows.net", self.TENANT_A).status_code, (429, 503))
+        for host, tenant in [
+                ("login.microsoftonline.com", self.TENANT_A),
+                ("login.microsoftonline.com", self.TENANT_B),
+                ("login.microsoft.com", self.TENANT_B),
+                ]:
+            self.assertEqual(429, self._post(host, tenant).status_code)
+
+        self.assertEqual(
+            [("login.windows.net", self.TENANT_A)], self._hosts_sent(),
+            "A platform failure must stop every qualified request for this service")
+
+    def test_global_scope_429_blocks_every_tenant_and_alias(self):
+        self.transport.responses[("login.windows.net", self.TENANT_A)] = (
+            429, {"Retry-After": "20", "x-ms-throttle-scope": "global"}, "")
+        self._post("login.windows.net", self.TENANT_A)
+        self.assertEqual(
+            429, self._post("login.microsoftonline.com", self.TENANT_B).status_code)
+        self.assertEqual(
+            [("login.windows.net", self.TENANT_A)], self._hosts_sent())
+
+    def test_release_times_are_honored_per_scope(self):
+        self.transport.responses[("login.windows.net", self.TENANT_A)] = (
+            429, {"Retry-After": "30", "x-ms-throttle-scope": "tenant"}, "")
+        self._post("login.windows.net", self.TENANT_A)
+
+        self.clock.advance(10)
+        diagnostics = self.client.throttle_diagnostics()
+        self.assertEqual(20, diagnostics["tenant"]["release_in"])
+        self.assertEqual(0, diagnostics["service"]["release_in"])
+
+        self.clock.advance(20)  # Exactly at the deadline: next send is allowed
+        self.assertEqual(200, self._post("login.microsoftonline.com", self.TENANT_A).status_code)
+        self.assertEqual(2, len(self._hosts_sent()))
+
+    def test_stacked_tenant_then_service_deadlines_each_hold(self):
+        self.transport.responses[("login.windows.net", self.TENANT_A)] = (
+            429, {"Retry-After": "30", "x-ms-throttle-scope": "tenant"}, "")
+        self._post("login.windows.net", self.TENANT_A)
+
+        self.clock.advance(5)
+        self.transport.responses[("login.microsoftonline.com", self.TENANT_B)] = (
+            500, {"Retry-After": "60"}, "")
+        self.assertEqual(500, self._post("login.microsoftonline.com", self.TENANT_B).status_code)
+
+        self.clock.advance(25)  # Tenant A released, service still holds
+        self.assertEqual(429, self._post("login.microsoftonline.com", self.TENANT_A).status_code)
+        self.assertEqual(429, self._post("login.microsoft.com", self.TENANT_B).status_code)
+        self.assertEqual(35, self.client.throttle_diagnostics()["service"]["release_in"])
+
+        self.clock.advance(35)
+        self.assertEqual(200, self._post("login.microsoft.com", self.TENANT_B).status_code)
+        self.assertEqual(200, self._post("login.microsoftonline.com", self.TENANT_A).status_code)
+
+    def test_local_block_does_not_extend_its_own_deadline(self):
+        self.transport.responses[("login.windows.net", self.TENANT_A)] = (
+            429, {"Retry-After": "30", "x-ms-throttle-scope": "tenant"}, "")
+        self._post("login.windows.net", self.TENANT_A)
+        self.clock.advance(10)
+        self.assertEqual(429, self._post("login.windows.net", self.TENANT_A).status_code)
+        # If a synthetic block were cached, it would now extend past 30.
+        self.assertEqual(20, self.client.throttle_diagnostics()["tenant"]["release_in"])
+
+    def test_cached_error_replay_does_not_rearm_the_deadline(self):
+        self.transport.responses[("login.windows.net", self.TENANT_A)] = (
+            429, {"Retry-After": "30", "x-ms-throttle-scope": "tenant"}, "")
+        self._post("login.windows.net", self.TENANT_A)
+        self.clock.advance(10)
+        # This identical request is served from the per-request cache, not
+        # from transport, and must not move the upstream release time.
+        self.assertEqual(429, self._post("login.windows.net", self.TENANT_A).status_code)
+        self.assertEqual(20, self.client.throttle_diagnostics()["tenant"]["release_in"])
+        self.assertEqual(1, len(self._hosts_sent()))
+
+    def test_diagnostics_expose_only_allowed_categories(self):
+        self._post("login.windows.net", self.TENANT_A)
+        payload = json.dumps(self.client.throttle_diagnostics())
+        self.assertEqual({"tenant", "service"}, set(self.client.throttle_diagnostics()))
+        for forbidden in (self.TENANT_A, "login.windows.net", "client_id",
+                          "retry-after", "token"):
+            self.assertNotIn(forbidden, payload)
+
+    def test_alias_group_can_come_from_caller_supplied_metadata(self):
+        clock = FakeClock()
+        transport = ScriptedHttpClient({
+            ("private-alias-1.example", "tenant-a"):
+                (429, {"Retry-After": "30", "x-ms-throttle-scope": "tenant"}, ""),
+        })
+        client = ThrottledHttpClient(
+            transport, clock=clock,
+            authority_aliases={"private-alias-1.example": "private-auth.example",
+                               "private-alias-2.example": "private-auth.example"})
+        client.post("https://private-alias-1.example/tenant-a/token", data={})
+        self.assertEqual(
+            429,
+            client.post("https://private-alias-2.example/tenant-a/token", data={}).status_code)
+        self.assertEqual(
+            200,
+            client.post("https://private-alias-2.example/tenant-b/token", data={}).status_code)
+        self.assertEqual(2, len(transport.sent))

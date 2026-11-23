@@ -628,6 +628,16 @@ class ClientApplication(object):
             Content inside ``http_cache`` will contain no tokens nor
             Personally Identifiable Information (PII). Encryption is unnecessary.
 
+            Retry-After responses are also tracked per tenant and per
+            authorization service by this application's http client.
+            A tenant-attributed rate limit only pauses that tenant; when the
+            same tenant is reached through an equivalent host name, it still
+            observes the same deadline. A platform failure (HTTP 5xx) or a
+            response explicitly attributed to the service-wide scope pauses
+            every eligible request from this client to that authorization
+            service. Responses without a concrete tenant (such as ``common``)
+            never change tenant-level pacing.
+
             New in version 1.16.0.
 
         :param boolean instance_discovery:
@@ -725,6 +735,7 @@ class ClientApplication(object):
                 # The default value 60 was recommended mainly for PCA at the end of
                 # https://identitydivision.visualstudio.com/devex/_git/AuthLibrariesApiReview?version=GBdev&path=%2FService%20protection%2FIntial%20set%20of%20protection%20measures.md&_a=preview
                 if isinstance(self, PublicClientApplication) else 5,
+            authority_aliases=self._throttle_authority_aliases,
             )
 
         self.app_name = app_name
@@ -782,6 +793,7 @@ class ClientApplication(object):
                 DeprecationWarning, stacklevel=2)
 
         self.authority_groups = {}
+        self._throttle_alias_groups = None
         self._telemetry_buffer = {}
         self._telemetry_lock = Lock()
         _msal_extension_check()
@@ -1476,10 +1488,33 @@ The reserved list: {}""".format(list(scope_set), list(reserved_scope)))
         if instance not in self.authority_groups:
             self.authority_groups[instance] = [
                 set(group['aliases']) for group in self._get_instance_metadata(instance)]
+            self._throttle_alias_groups = None  # Alias knowledge has grown
         for group in self.authority_groups[instance]:
             if instance in group:
                 return [alias for alias in group if alias != instance]
         return []
+
+    def _throttle_authority_aliases(self, host):
+        """Return a shared identity for every known alias of *host*, no I/O.
+
+        This lets the throttle gates treat equivalent authorization hosts as
+        one service even before the application itself needed that alias group.
+        Any instance metadata already discovered by this application is reused;
+        a cache miss here never triggers a network call of its own.
+        """
+        host = (host or "").lower().rstrip(".")
+        if not host:
+            return None
+        if self._throttle_alias_groups is None:
+            groups = {}
+            for aliases in self.authority_groups.values():
+                for group in aliases:
+                    canonical = "|".join(sorted(
+                        alias.lower().rstrip(".") for alias in group))
+                    for alias in group:
+                        groups[alias.lower().rstrip(".")] = canonical
+            self._throttle_alias_groups = groups
+        return self._throttle_alias_groups.get(host)
 
     def remove_account(self, account):
         """Sign me out and forget me from token cache"""

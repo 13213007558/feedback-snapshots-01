@@ -12,7 +12,7 @@ class _ExpiringMapping(MutableMapping):
     _INDEX = "_index_"
 
     def __init__(self, mapping=None, capacity=None, expires_in=None, lock=None,
-        *args, **kwargs):
+        clock=None, *args, **kwargs):
         """Items in this mapping can have individual shelf life,
         just like food items in your refrigerator have their different shelf life
         determined by each food, not by the refrigerator.
@@ -52,12 +52,23 @@ class _ExpiringMapping(MutableMapping):
             If no lock is provided, a threading.Lock will be used.
             But you may want to supply a different lock,
             if your customized mapping is being shared differently.
+
+        :param clock:
+            A zero-argument callable returning the current time in seconds.
+            Defaults to :func:`time.time`. It exists so that callers (and tests)
+            can drive expiry from a local clock without sleeping.
         """
         super(_ExpiringMapping, self).__init__(*args, **kwargs)
         self._mapping = mapping if mapping is not None else {}
         self._capacity = capacity
         self._expires_in = expires_in
         self._lock = Lock() if lock is None else lock
+        self._clock = clock
+
+    def _now(self):
+        # Resolve time.time() on each call so that a test (or embedding app)
+        # can replace the module clock without reconstructing this mapping.
+        return time.time() if self._clock is None else self._clock()
 
     def _peek(self):
         # Returns (sequence, timestamps) without triggering maintenance
@@ -91,7 +102,7 @@ class _ExpiringMapping(MutableMapping):
         self._validate_key(key)
         sequence, timestamps = self._peek()
         self._maintenance(sequence, timestamps)  # O(logN)
-        now = int(time.time())
+        now = int(self._now())
         expires_at = now + expires_in
         entry = [expires_at, now, key]
         is_new_item = key not in timestamps
@@ -106,7 +117,7 @@ class _ExpiringMapping(MutableMapping):
 
     def _maintenance(self, sequence, timestamps):  # O(logN)
         """It will modify input sequence and timestamps in-place"""
-        now = int(time.time())
+        now = int(self._now())
         while sequence:  # Clean up expired items
             expires_at, created_at, key = sequence[0]
             if created_at <= now < expires_at:  # Then all remaining items are fresh
@@ -142,7 +153,7 @@ class _ExpiringMapping(MutableMapping):
             # Skip self._maintenance(), because it would need O(logN) time
             sequence, timestamps = self._peek()
             expires_at, created_at = timestamps[key]  # Would raise KeyError accordingly
-            now = int(time.time())
+            now = int(self._now())
             if not created_at <= now < expires_at:
                 self._mapping.pop(key, None)
                 timestamps.pop(key, None)
