@@ -39,6 +39,19 @@ class ManagedIdentityError(ValueError):
     pass
 
 
+class ManagedIdentityMismatchError(ManagedIdentityError):
+    """The platform returned an identity that does not match the approved one.
+
+    This is raised when an approved user-assigned identity was requested but the
+    managed identity endpoint did not confirm that exact identity (for example, a
+    legacy Azure Arc agent silently falling back to the machine's system-assigned
+    identity). It is a *fail-closed* rejection: it bypasses the normal cached-token
+    fallback so that a previously cached, broader-scope identity can never be handed
+    back in place of the requested one. Callers can catch this subclass specifically
+    to distinguish an identity mismatch from other :class:`ManagedIdentityError` cases.
+    """
+
+
 class ServiceFabricHttpOptions(TypedDict, total=False):
     """Optional settings for MSAL's owned, certificate-pinned Service Fabric client.
 
@@ -301,6 +314,8 @@ class ManagedIdentityClient(object):
         http_cache=None,
         client_capabilities: Optional[List[str]] = None,
         service_fabric_http_options: Optional[ServiceFabricHttpOptions] = None,
+        managed_identity_source=None,
+        transient_failure_retries: int = 0,
     ):
         """Create a managed identity client.
 
@@ -345,6 +360,27 @@ class ManagedIdentityClient(object):
             options raise :class:`ManagedIdentityError`, even when a proactive
             refresh could otherwise fall back to a cached token. See
             :ref:`service-fabric-http-options` for all settings and defaults.
+
+        :param managed_identity_source:
+            Optional. Pin this client to one approved managed identity entry point,
+            using one of the source sentinels returned by
+            :func:`get_managed_identity_source` (``APP_SERVICE``, ``AZURE_ARC``,
+            ``MACHINE_LEARNING``, ``SERVICE_FABRIC`` or ``DEFAULT_TO_VM``).
+            When set, MSAL only ever talks to that one source: it neither probes for
+            nor fails over to another entry point, so an outage of the approved
+            source can never silently route a request through a different, possibly
+            broader, machine identity. Omission or ``None`` keeps the historical
+            environment-based auto-detection. ``CLOUD_SHELL`` is rejected because its
+            tokens are not acquired through this client.
+
+        :param transient_failure_retries:
+            Optional, non-negative int, defaults to ``0`` (no MSAL-level retry).
+            Number of *extra* attempts after a transient transport failure (such as a
+            dropped connection or timeout). Retries always re-issue the same request to
+            the same approved source, so failure recovery cannot change the identity
+            being used. A fail-closed identity mismatch
+            (:class:`ManagedIdentityMismatchError`), a Service Fabric configuration
+            error, or any protocol-level error response is never retried.
 
         :param token_cache:
             Optional. It accepts a :class:`msal.TokenCache` instance to store tokens.
@@ -413,6 +449,21 @@ class ManagedIdentityClient(object):
         self._client_capabilities = client_capabilities
         self._service_fabric_http_options = _snapshot_service_fabric_options(
             service_fabric_http_options)
+        if managed_identity_source is not None and managed_identity_source not in (
+                APP_SERVICE, AZURE_ARC, MACHINE_LEARNING,
+                SERVICE_FABRIC, DEFAULT_TO_VM):
+            # CLOUD_SHELL is intentionally excluded: this client does not acquire
+            # Cloud Shell tokens (see the class docstring).
+            raise ManagedIdentityError(
+                "Unsupported managed_identity_source: {!r}".format(
+                    managed_identity_source))
+        self._managed_identity_source = managed_identity_source
+        if (isinstance(transient_failure_retries, bool)
+                or not isinstance(transient_failure_retries, int)
+                or transient_failure_retries < 0):
+            raise ManagedIdentityError(
+                "transient_failure_retries must be a non-negative int.")
+        self._transient_failure_retries = transient_failure_retries
 
     def acquire_token_for_client(
         self,
@@ -486,14 +537,29 @@ class ManagedIdentityClient(object):
                         break  # With a fallback in hand, we break here to go refresh
                 return access_token_from_cache  # It is still good as new
         try:
-            result = _obtain_token(
-                self._http_client, self._managed_identity, resource,
-                access_token_sha256_to_refresh=hashlib.sha256(
-                    access_token_to_refresh.encode("utf-8")).hexdigest()
-                    if access_token_to_refresh else None,
-                client_capabilities=self._client_capabilities,
-                service_fabric_http_options=self._service_fabric_http_options,
-            )
+            for attempt in range(self._transient_failure_retries + 1):
+                try:
+                    result = _obtain_token(
+                        self._http_client, self._managed_identity, resource,
+                        access_token_sha256_to_refresh=hashlib.sha256(
+                            access_token_to_refresh.encode("utf-8")).hexdigest()
+                            if access_token_to_refresh else None,
+                        client_capabilities=self._client_capabilities,
+                        service_fabric_http_options=self._service_fabric_http_options,
+                        managed_identity_source=self._managed_identity_source,
+                    )
+                    break
+                except (_ServiceFabricOptionsError, ManagedIdentityMismatchError):
+                    raise  # Fail-closed / config errors must never be retried or masked
+                except requests.exceptions.RequestException:
+                    # A transient transport failure. Retry the *same* approved source;
+                    # the pin guarantees a retry cannot select a different identity.
+                    if attempt >= self._transient_failure_retries:
+                        raise
+                    logger.debug(
+                        "Retrying transient managed identity failure "
+                        "(attempt %s of %s)",
+                        attempt + 1, self._transient_failure_retries)
             if "access_token" in result:
                 expires_in = result.get("expires_in", 3600)
                 if "refresh_in" not in result and expires_in >= 7200:
@@ -513,6 +579,10 @@ class ManagedIdentityClient(object):
             if (result and "error" not in result) or (not access_token_from_cache):
                 return result
         except _ServiceFabricOptionsError:
+            raise
+        except ManagedIdentityMismatchError:
+            # Fail closed: never let a cached, broader-scope identity stand in for an
+            # identity that the platform failed to confirm, even on proactive refresh.
             raise
         except:  # The exact HTTP exception is transportation-layer dependent
             # Typically network error. Potential AAD outage?
@@ -570,13 +640,70 @@ def get_managed_identity_source():
     return DEFAULT_TO_VM
 
 
+def _obtain_token_on_pinned_source(
+    http_client, source, managed_identity, resource,
+    *,
+    access_token_sha256_to_refresh=None,
+    client_capabilities=None,
+    service_fabric_http_options=None,
+):
+    """Acquire a token from one explicitly approved managed identity entry point.
+
+    Unlike the environment-based :func:`_obtain_token`, this never probes for nor
+    fails over to another source, so failure recovery cannot drift to a different
+    (potentially broader) machine identity.
+    """
+    if source is SERVICE_FABRIC:
+        return _obtain_token_on_service_fabric(
+            http_client,
+            os.environ["IDENTITY_ENDPOINT"],
+            os.environ["IDENTITY_HEADER"],
+            os.environ["IDENTITY_SERVER_THUMBPRINT"],
+            resource,
+            access_token_sha256_to_refresh=access_token_sha256_to_refresh,
+            client_capabilities=client_capabilities,
+            service_fabric_http_options=service_fabric_http_options,
+        )
+    if source is APP_SERVICE:
+        return _obtain_token_on_app_service(
+            http_client,
+            os.environ["IDENTITY_ENDPOINT"],
+            os.environ["IDENTITY_HEADER"],
+            managed_identity,
+            resource,
+        )
+    if source is MACHINE_LEARNING:
+        return _obtain_token_on_machine_learning(
+            http_client,
+            os.environ["MSI_ENDPOINT"],
+            os.environ["MSI_SECRET"],
+            managed_identity,
+            resource,
+        )
+    if source is AZURE_ARC:
+        return _obtain_token_on_arc(
+            http_client, _get_arc_endpoint(), resource, managed_identity)
+    if source is DEFAULT_TO_VM:
+        return _obtain_token_on_azure_vm(http_client, managed_identity, resource)
+    raise ManagedIdentityError(
+        "Unsupported managed_identity_source: {!r}".format(source))
+
+
 def _obtain_token(
     http_client, managed_identity, resource,
     *,
     access_token_sha256_to_refresh: Optional[str] = None,
     client_capabilities: Optional[List[str]] = None,
     service_fabric_http_options=None,
+    managed_identity_source=None,
 ):
+    if managed_identity_source is not None:
+        return _obtain_token_on_pinned_source(
+            http_client, managed_identity_source, managed_identity, resource,
+            access_token_sha256_to_refresh=access_token_sha256_to_refresh,
+            client_capabilities=client_capabilities,
+            service_fabric_http_options=service_fabric_http_options,
+        )
     if ("IDENTITY_ENDPOINT" in os.environ and "IDENTITY_HEADER" in os.environ
             and "IDENTITY_SERVER_THUMBPRINT" in os.environ
     ):
@@ -1027,7 +1154,7 @@ def _raise_if_arc_did_not_honor_user_assigned_identity(managed_identity, payload
     # Compare case-insensitively: client_id / object_id are GUIDs, and an ARM resource id
     # (msi_res_id) can legitimately differ in segment casing.
     if not echoed or str(echoed).lower() != str(requested).lower():
-        raise ManagedIdentityError(
+        raise ManagedIdentityMismatchError(
             "Azure Arc did not confirm the requested user-assigned managed identity "
             "in the token response. The agent likely does not support user-assigned "
             "managed identities and returned the system-assigned identity.")

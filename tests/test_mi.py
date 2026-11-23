@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from collections import UserDict
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import nullcontext
+from contextlib import nullcontext, contextmanager
 from urllib.parse import parse_qs, urlparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import List, Optional
@@ -38,6 +38,7 @@ from msal import (
     SystemAssignedManagedIdentity, UserAssignedManagedIdentity,
     ManagedIdentityClient,
     ManagedIdentityError,
+    ManagedIdentityMismatchError,
     ServiceFabricHttpOptions,
     ArcPlatformNotSupportedError,
 )
@@ -53,6 +54,7 @@ from msal.managed_identity import (
     DEFAULT_TO_VM,
     _create_service_fabric_http_client,
     _obtain_token_on_service_fabric,
+    _obtain_token_on_pinned_source,
     _ServiceFabricHTTPAdapter,
     _create_owned_service_fabric_http_client,
 )
@@ -2096,6 +2098,209 @@ class ArcTestCase(ClientTestCase):
         self.assertEqual(
             {}, app._token_cache._cache,
             "An unconfirmed identity token must not be cached")
+
+
+@patch.dict(os.environ, {
+    "IDENTITY_ENDPOINT": "http://localhost/token",
+    "IMDS_ENDPOINT": "http://localhost",
+})
+@patch(
+    "builtins.open" if sys.version_info.major >= 3 else "__builtin__.open",
+    new=mock_open(read_data="secret"),
+)
+@patch("os.stat", return_value=Mock(st_size=4096))
+class PinnedSourceFailClosedTestCase(unittest.TestCase):
+    """Source pinning, fail-closed mismatch, cache isolation, and same-source retry."""
+    approved_client_id = "approved-user-assigned-id"
+    broad_client_id = "system-assigned-managed-identity"
+    challenge = MinimalResponse(status_code=401, text="", headers={
+        "WWW-Authenticate": "Basic realm=/tmp/foo",
+    })
+
+    def _arc_app(self, *, transient_failure_retries=0, token_cache=None):
+        # Pinning to AZURE_ARC means MSAL only ever uses the Arc entry point,
+        # regardless of any other env-based entry point that might be present.
+        return ManagedIdentityClient(
+            UserAssignedManagedIdentity(client_id=self.approved_client_id),
+            http_client=requests.Session(),
+            managed_identity_source=AZURE_ARC,
+            transient_failure_retries=transient_failure_retries,
+            token_cache=token_cache,
+        )
+
+    def _seed_broad_cached_token(self, app, *, aging=False):
+        # Simulate a broad, machine-shared identity token already living in the
+        # process cache, keyed under the *same* approved identity/cache slot so that
+        # the proactive-refresh fallback would otherwise be able to serve it.
+        # An "aging" token (refresh_on in the past) forces a background network
+        # refresh against the approved endpoint while keeping the cached token in hand.
+        response = {
+            "access_token": "BROAD-SYSTEM-ASSIGNED-TOKEN",
+            "expires_in": 3600,
+            "token_type": "Bearer",
+        }
+        if aging:
+            response["refresh_in"] = -1
+        app._token_cache.add({
+            "client_id": self.approved_client_id,
+            "scope": ["R"],
+            "token_endpoint": "https://localhost/managed_identity",
+            "response": response,
+        })
+
+    @contextmanager
+    def _supported_arc_platform(self):
+        # macOS ("darwin") is not a real Arc platform; make the local-key prefix
+        # lookup resolve to a directory that exists, mirroring the existing Arc tests.
+        with patch.dict(_supported_arc_platforms_and_their_prefixes,
+                {sys.platform: os.getcwd()}):
+            yield
+
+    def test_constructor_rejects_unknown_and_cloud_shell_source(self, mocked_stat):
+        for bad_source in (object(), "azure-arc", CLOUD_SHELL):
+            with self.assertRaises(ManagedIdentityError):
+                ManagedIdentityClient(
+                    UserAssignedManagedIdentity(client_id=self.approved_client_id),
+                    http_client=requests.Session(),
+                    managed_identity_source=bad_source,
+                )
+
+    def test_constructor_rejects_bad_retry_count(self, mocked_stat):
+        for bad_retries in (-1, 1.5, "1", True):
+            with self.assertRaises(ManagedIdentityError):
+                ManagedIdentityClient(
+                    UserAssignedManagedIdentity(client_id=self.approved_client_id),
+                    http_client=requests.Session(),
+                    transient_failure_retries=bad_retries,
+                )
+
+    def test_mismatch_raises_recognizable_error_and_bypasses_cached_broad_token(
+            self, mocked_stat):
+        app = self._arc_app()
+        self._seed_broad_cached_token(app, aging=True)
+        with self._supported_arc_platform():
+            with patch.object(app._http_client, "get", side_effect=[
+                self.challenge,
+                MinimalResponse(
+                    status_code=200,
+                    # The platform answers with the broad machine identity, not the approved one.
+                    text=('{"access_token": "WIDE-AT", "expires_in": "1234", '
+                          '"resource": "R", "client_id": "%s"}') % self.broad_client_id,
+                ),
+            ]) as mocked_get:
+                with self.assertRaises(ManagedIdentityMismatchError):
+                    app.acquire_token_for_client(resource="R")
+        # Only the approved Arc endpoint was ever contacted (challenge + token call).
+        self.assertEqual(2, mocked_get.call_count)
+        for call in mocked_get.call_args_list:
+            self.assertEqual("http://localhost/token", call.args[0])
+        # The broad cached token must not be returned and the wrong token not cached.
+        cached_tokens = app._token_cache._cache.get("AccessToken", {})
+        self.assertEqual(1, len(cached_tokens), "The pre-seeded broad token stays as-is")
+        cached_secret = list(cached_tokens.values())[0]["secret"]
+        self.assertEqual("BROAD-SYSTEM-ASSIGNED-TOKEN", cached_secret)
+        self.assertNotIn("WIDE-AT", str(cached_tokens))
+
+    def test_mismatch_is_not_retried_even_when_retry_is_enabled(self, mocked_stat):
+        app = self._arc_app(transient_failure_retries=3)
+        with self._supported_arc_platform():
+            with patch.object(app._http_client, "get", side_effect=[
+                self.challenge,
+                MinimalResponse(
+                    status_code=200,
+                    text=('{"access_token": "WIDE-AT", "expires_in": "1234", '
+                          '"resource": "R", "client_id": "%s"}') % self.broad_client_id,
+                ),
+            ]) as mocked_get:
+                with self.assertRaises(ManagedIdentityMismatchError):
+                    app.acquire_token_for_client(resource="R")
+        # A fail-closed mismatch is not a transient failure: no extra attempts.
+        self.assertEqual(2, mocked_get.call_count)
+
+    def test_transient_failure_retries_same_approved_source_then_succeeds(
+            self, mocked_stat):
+        app = self._arc_app(transient_failure_retries=2)
+        connection_error = requests.exceptions.ConnectionError("simulated transient drop")
+
+        def challenge():
+            return MinimalResponse(status_code=401, text="", headers={
+                "WWW-Authenticate": "Basic realm=/tmp/foo"})
+
+        def approved_token():
+            return MinimalResponse(
+                status_code=200,
+                text=('{"access_token": "APPROVED-AT", "expires_in": 1234, '
+                      '"resource": "R", "client_id": "%s"}') % self.approved_client_id)
+
+        with self._supported_arc_platform():
+            with patch.object(app._http_client, "get", side_effect=[
+                challenge(),        # attempt 1: 401 challenge succeeds
+                connection_error,   # attempt 1: token GET fails transiently
+                challenge(),        # retry restarts the full Arc flow with a new challenge
+                approved_token(),   # retry: same endpoint now confirms the approved identity
+            ]) as mocked_get:
+                result = app.acquire_token_for_client(resource="R")
+        self.assertEqual("APPROVED-AT", result["access_token"])
+        endpoints = [call.args[0] for call in mocked_get.call_args_list]
+        self.assertEqual(
+            ["http://localhost/token"] * 4, endpoints,
+            "Retry must re-issue every request to the same approved Arc endpoint")
+
+    def test_transport_failure_without_retry_bubbles_up_when_no_cache(
+            self, mocked_stat):
+        # No cached fallback: a transport error must propagate to the caller rather
+        # than be silently swallowed.
+        app = self._arc_app(transient_failure_retries=0)
+        with self._supported_arc_platform():
+            with patch.object(app._http_client, "get", side_effect=[
+                self.challenge,
+                requests.exceptions.Timeout("simulated timeout"),
+            ]) as mocked_get:
+                with self.assertRaises(requests.exceptions.Timeout):
+                    app.acquire_token_for_client(resource="R")
+        # No retry was configured, so exactly the challenge + one failed token call.
+        self.assertEqual(2, mocked_get.call_count)
+
+    def test_transport_failure_falls_back_to_cache_but_never_switches_source(
+            self, mocked_stat):
+        # Unlike an identity mismatch, a plain transport error may still fall back to
+        # a cached token, but it must never trigger a call to a different source.
+        app = self._arc_app(transient_failure_retries=0)
+        self._seed_broad_cached_token(app, aging=True)
+        with self._supported_arc_platform():
+            with patch.object(app._http_client, "get", side_effect=[
+                self.challenge,
+                requests.exceptions.Timeout("simulated timeout"),
+            ]) as mocked_get:
+                result = app.acquire_token_for_client(resource="R")
+        self.assertEqual("BROAD-SYSTEM-ASSIGNED-TOKEN", result["access_token"])
+        self.assertEqual("cache", result["token_source"])
+        endpoints = [call.args[0] for call in mocked_get.call_args_list]
+        self.assertEqual(["http://localhost/token"] * 2, endpoints)
+
+    def test_pinned_source_never_routes_to_another_entry_point(self, mocked_stat):
+        # Both an Arc and an App Service style entry point are present in the
+        # environment, but the pin forces Arc and ignores the App Service one.
+        with patch.dict(os.environ, {
+            "IDENTITY_ENDPOINT": "http://localhost/token",
+            "IMDS_ENDPOINT": "http://localhost",
+            "IDENTITY_HEADER": "would-be-app-service-secret",
+        }, clear=True):
+            app = self._arc_app()
+            with patch("msal.managed_identity._obtain_token_on_app_service") as app_service, \
+                    patch("msal.managed_identity._obtain_token_on_arc",
+                          return_value={"access_token": "ARC-AT", "expires_in": 3600}) as arc:
+                result = app.acquire_token_for_client(resource="R")
+        self.assertEqual("ARC-AT", result["access_token"])
+        arc.assert_called_once()
+        app_service.assert_not_called()
+
+    def test_pinned_dispatch_helper_rejects_unknown_sentinel(self, mocked_stat):
+        with self.assertRaises(ManagedIdentityError):
+            _obtain_token_on_pinned_source(
+                Mock(), object(),
+                UserAssignedManagedIdentity(client_id=self.approved_client_id), "R")
+
 
 
 class GetManagedIdentitySourceTestCase(unittest.TestCase):

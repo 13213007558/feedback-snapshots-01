@@ -1,0 +1,141 @@
+{
+  "request_log": [
+    {
+      "headers": {
+        "Metadata": "true"
+      },
+      "params": {
+        "api-version": "2020-06-01",
+        "client_id": "machine-shared-system-assigned-id",
+        "resource": "https://target-resource.example"
+      },
+      "url": "http://broad-platform.example/metadata/identity/oauth2/token"
+    },
+    {
+      "headers": {
+        "Authorization": "Basic simulated-secret",
+        "Metadata": "true"
+      },
+      "params": {
+        "api-version": "2020-06-01",
+        "client_id": "machine-shared-system-assigned-id",
+        "resource": "https://target-resource.example"
+      },
+      "url": "http://broad-platform.example/metadata/identity/oauth2/token"
+    },
+    {
+      "headers": {
+        "Metadata": "true"
+      },
+      "params": {
+        "api-version": "2020-06-01",
+        "client_id": "approved-user-assigned-client-id",
+        "resource": "https://target-resource.example"
+      },
+      "url": "http://approved-platform.example/metadata/identity/oauth2/token"
+    },
+    {
+      "headers": {
+        "Authorization": "Basic simulated-secret",
+        "Metadata": "true"
+      },
+      "params": {
+        "api-version": "2020-06-01",
+        "client_id": "approved-user-assigned-client-id",
+        "resource": "https://target-resource.example"
+      },
+      "url": "http://approved-platform.example/metadata/identity/oauth2/token"
+    },
+    {
+      "headers": {
+        "Metadata": "true"
+      },
+      "params": {
+        "api-version": "2020-06-01",
+        "client_id": "approved-user-assigned-client-id",
+        "resource": "https://target-resource.example"
+      },
+      "url": "http://approved-platform.example/metadata/identity/oauth2/token"
+    },
+    {
+      "headers": {
+        "Authorization": "Basic simulated-secret",
+        "Metadata": "true"
+      },
+      "params": {
+        "api-version": "2020-06-01",
+        "client_id": "approved-user-assigned-client-id",
+        "resource": "https://target-resource.example"
+      },
+      "url": "http://approved-platform.example/metadata/identity/oauth2/token"
+    },
+    {
+      "headers": {
+        "Metadata": "true"
+      },
+      "params": {
+        "api-version": "2020-06-01",
+        "client_id": "approved-user-assigned-client-id",
+        "resource": "https://target-resource.example"
+      },
+      "url": "http://approved-platform.example/metadata/identity/oauth2/token"
+    },
+    {
+      "headers": {
+        "Authorization": "Basic simulated-secret",
+        "Metadata": "true"
+      },
+      "params": {
+        "api-version": "2020-06-01",
+        "client_id": "approved-user-assigned-client-id",
+        "resource": "https://target-resource.example"
+      },
+      "url": "http://approved-platform.example/metadata/identity/oauth2/token"
+    }
+  ],
+  "steps": [
+    {
+      "name": "pre-warm broad machine identity in the process cache",
+      "result": {
+        "broad_access_token": "token-issued-by-machine-shared-system-assigned-id",
+        "broad_client_id": "machine-shared-system-assigned-id",
+        "cached_entries_after_warmup": 1,
+        "note": "broad token seeded as aging to force an approved-endpoint refresh"
+      },
+      "step": 1
+    },
+    {
+      "name": "approved endpoint transient failure retried on the same source",
+      "result": {
+        "access_token": "token-issued-by-approved-user-assigned-client-id",
+        "approved_client_ever_used_broad_endpoint": false,
+        "approved_endpoint": "http://approved-platform.example/metadata/identity/oauth2/token",
+        "approved_endpoints_contacted": [
+          "http://approved-platform.example/metadata/identity/oauth2/token"
+        ],
+        "broad_endpoint": "http://broad-platform.example/metadata/identity/oauth2/token",
+        "token_source": "identity_provider"
+      },
+      "step": 2
+    },
+    {
+      "name": "later success on the original endpoint is cached under the approved identity",
+      "result": {
+        "access_token": "token-issued-by-approved-user-assigned-client-id",
+        "new_network_calls": 0,
+        "token_source": "cache"
+      },
+      "step": 3
+    },
+    {
+      "name": "wrong echoed identity is rejected and never replaced by the broad cache",
+      "result": {
+        "broad_endpoint_ever_called_by_approved_client": false,
+        "message": "Azure Arc did not confirm the requested user-assigned managed identity in the token response. The agent likely does not support user-assigned managed identities and returned the system-assigned identity.",
+        "raised": "msal.ManagedIdentityMismatchError",
+        "rogue_token_cached": false
+      },
+      "step": 4
+    }
+  ]
+}

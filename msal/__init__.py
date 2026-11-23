@@ -40,6 +40,7 @@ from .managed_identity import (
     ManagedIdentityClient,
     ServiceFabricHttpOptions,
     ManagedIdentityError,
+    ManagedIdentityMismatchError,
     ArcPlatformNotSupportedError,
     )
 
