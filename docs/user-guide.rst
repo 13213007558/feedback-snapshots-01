@@ -363,6 +363,40 @@ You can now use the Auth library to call Google Cloud resources with X.509 certi
 
 .. _X.509 certificate-sourced credentials: https://cloud.google.com/iam/docs/workload-identity-federation-with-x509-certificates
 
+Rotating client certificates without downtime
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When a mutual TLS gateway accepts a client certificate for only a short time,
+certificates have to be replaced while the application keeps serving traffic.
+:class:`google.auth.transport.requests.AuthorizedSession` treats each API call
+as belonging to exactly one **certificate authorization**:
+
+* A call takes a lease on the certificate that is published when the call
+  starts. Its authentication (including the token refresh performed after a
+  ``401``), its TLS connections and its internal retry all use that same
+  certificate.
+* ``configure_mtls_channel`` publishes a new authorization. Calls that start
+  after that use the new certificate; calls that are already running finish
+  under the certificate they started with.
+* When a replaced authorization no longer has any calls in flight it is
+  released: its direct and proxy TLS connection pools are closed and any
+  temporary certificate files are removed. The session exposes the current
+  generation as :attr:`AuthorizedSession.certificate_authorization`.
+
+The certificate material itself is only handed to the one transport adapter
+that builds the TLS connection contexts for that authorization. It is never
+copied into request headers or retry arguments. The direct connection path and
+connections through an existing proxy each get a context built from the same
+authorization.
+
+To rotate the certificate, publish the new certificate with the usual API::
+
+    # Generation 1 was published earlier via configure_mtls_channel().
+    authed_session.configure_mtls_channel()  # Re-reads the certificate source.
+
+If the source still returns the same certificate, the current authorization is
+kept, so polling the source does not churn connections.
+
 
 Using Executable-sourced credentials with OIDC and SAML
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

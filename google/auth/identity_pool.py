@@ -46,6 +46,7 @@ import json
 import os
 from typing import NamedTuple
 
+from google.auth import _certificate_context
 from google.auth import _helpers
 from google.auth import exceptions
 from google.auth import external_account
@@ -400,13 +401,20 @@ class Credentials(external_account.Credentials):
             raise exceptions.RefreshError(
                 'The credential is not configured to use mtls requests. The credential should include a "certificate" section in the credential source.'
             )
-        else:
-            return _mtls_helper._get_workload_cert_and_key_paths(
-                self._certificate_config_location
-            )
+        pinned = _certificate_context.get_active()
+        if pinned is not None:
+            return pinned.mtls_cert_and_key_paths()
+        return _mtls_helper._get_workload_cert_and_key_paths(
+            self._certificate_config_location
+        )
 
     def _get_cert_bytes(self):
-        cert_path, _ = self._get_mtls_cert_and_key_paths()
+        pinned = _certificate_context.get_active()
+        if pinned is not None:
+            return pinned.cert
+        cert_path, _ = _mtls_helper._get_workload_cert_and_key_paths(
+            self._certificate_config_location
+        )
         return _mtls_helper._read_cert_file(cert_path)
 
     def _mtls_required(self):
@@ -564,12 +572,21 @@ class Credentials(external_account.Credentials):
         cert_fingerprint = None
         # Check if the credential is X.509 based.
         if self._credential_source_certificate is not None:
-            cert_bytes = self._get_cert_bytes()
+            # If the calling transport pinned a certificate authorization, bind
+            # the token to exactly that certificate so the token and the TLS
+            # connection it is used on belong to the same authorization. This
+            # matters during rotation: the source may already have published a
+            # newer certificate while an older call is still in flight.
+            pinned = _certificate_context.get_active()
+            cert_bytes = pinned.cert if pinned is not None else self._get_cert_bytes()
             cert = _agent_identity_utils.parse_certificate(cert_bytes)
             if _agent_identity_utils.should_request_bound_token(cert):
-                cert_fingerprint = (
-                    _agent_identity_utils.calculate_certificate_fingerprint(cert)
-                )
+                if pinned is not None:
+                    cert_fingerprint = pinned.fingerprint
+                else:
+                    cert_fingerprint = (
+                        _agent_identity_utils.calculate_certificate_fingerprint(cert)
+                    )
 
         self._perform_refresh_token(request, cert_fingerprint=cert_fingerprint)
         self._handle_trust_boundary(request)

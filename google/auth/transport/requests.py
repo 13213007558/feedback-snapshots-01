@@ -35,9 +35,11 @@ from requests.packages.urllib3.util.ssl_ import (  # type: ignore
     create_urllib3_context,
 )  # pylint: disable=ungrouped-imports
 
+from google.auth import _certificate_context
 from google.auth import _helpers
 from google.auth import exceptions
 from google.auth import transport
+from google.auth.transport import _certificate_authorization
 from google.auth.transport import _mtls_helper
 import google.auth.transport._mtls_helper
 from google.oauth2 import service_account
@@ -199,6 +201,11 @@ class _MutualTlsAdapter(requests.adapters.HTTPAdapter):
     """
     A TransportAdapter that enables mutual TLS.
 
+    The adapter carries one certificate authorization generation. Its direct
+    connection pool and its proxy connection pools each get their own TLS
+    context built from the same certificate and key, so both the direct and the
+    existing-proxy paths present the same authorization.
+
     Args:
         cert (bytes): client certificate in PEM format
         key (bytes): client private key in PEM format
@@ -215,30 +222,43 @@ class _MutualTlsAdapter(requests.adapters.HTTPAdapter):
 
         urllib3.contrib.pyopenssl.inject_into_urllib3()
 
-        pkey = crypto.load_privatekey(crypto.FILETYPE_PEM, key)
-        x509 = crypto.load_certificate(crypto.FILETYPE_PEM, cert)
-
-        ctx_poolmanager = create_urllib3_context()
-        ctx_poolmanager.load_verify_locations(cafile=certifi.where())
-        ctx_poolmanager._ctx.use_certificate(x509)
-        ctx_poolmanager._ctx.use_privatekey(pkey)
-        self._ctx_poolmanager = ctx_poolmanager
-
-        ctx_proxymanager = create_urllib3_context()
-        ctx_proxymanager.load_verify_locations(cafile=certifi.where())
-        ctx_proxymanager._ctx.use_certificate(x509)
-        ctx_proxymanager._ctx.use_privatekey(pkey)
-        self._ctx_proxymanager = ctx_proxymanager
+        self._certifi = certifi
+        # Validate and keep the parsed material. The direct TLS context is
+        # created by ``init_poolmanager`` below and the proxy TLS context is
+        # created only if an existing proxy is used, but both are built from
+        # this generation's material and never from per-request arguments.
+        self._pkey = crypto.load_privatekey(crypto.FILETYPE_PEM, key)
+        self._x509 = crypto.load_certificate(crypto.FILETYPE_PEM, cert)
+        self._ctx_poolmanager = None
+        self._ctx_proxymanager = None
 
         super(_MutualTlsAdapter, self).__init__()
 
+    def _build_context(self):
+        ctx = create_urllib3_context()
+        ctx.load_verify_locations(cafile=self._certifi.where())
+        ctx._ctx.use_certificate(self._x509)
+        ctx._ctx.use_privatekey(self._pkey)
+        return ctx
+
     def init_poolmanager(self, *args, **kwargs):
+        if self._ctx_poolmanager is None:
+            self._ctx_poolmanager = self._build_context()
         kwargs["ssl_context"] = self._ctx_poolmanager
         super(_MutualTlsAdapter, self).init_poolmanager(*args, **kwargs)
 
     def proxy_manager_for(self, *args, **kwargs):
+        if self._ctx_proxymanager is None:
+            self._ctx_proxymanager = self._build_context()
         kwargs["ssl_context"] = self._ctx_proxymanager
         return super(_MutualTlsAdapter, self).proxy_manager_for(*args, **kwargs)
+
+    def close(self):
+        super(_MutualTlsAdapter, self).close()
+        self._ctx_poolmanager = None
+        self._ctx_proxymanager = None
+        self._x509 = None
+        self._pkey = None
 
 
 class _MutualTlsOffloadAdapter(requests.adapters.HTTPAdapter):
@@ -397,6 +417,8 @@ class AuthorizedSession(requests.Session):
         self._max_refresh_attempts = max_refresh_attempts
         self._refresh_timeout = refresh_timeout
         self._is_mtls = False
+        self._cached_cert = None
+        self._certificate_authority = _certificate_authorization.CertificateAuthority()
         self._default_host = default_host
 
         if auth_request is None:
@@ -431,8 +453,10 @@ class AuthorizedSession(requests.Session):
         The function does nothing unless `GOOGLE_API_USE_CLIENT_CERTIFICATE` is
         explicitly set to `true`. In this case if client certificate and key are
         successfully obtained (from the given client_cert_callback or from application
-        default SSL credentials), a :class:`_MutualTlsAdapter` instance will be mounted
-        to "https://" prefix.
+        default SSL credentials), the certificate is published as a new
+        authorization generation. Calls that start afterwards use it; calls that
+        are already in flight keep the generation they started with until they
+        finish.
 
         Args:
             client_cert_callback (Optional[Callable[[], (bytes, bytes)]]):
@@ -457,17 +481,12 @@ class AuthorizedSession(requests.Session):
 
         try:
             (
-                self._is_mtls,
+                found_cert_key,
                 cert,
                 key,
             ) = google.auth.transport._mtls_helper.get_client_cert_and_key(
                 client_cert_callback
             )
-
-            if self._is_mtls:
-                mtls_adapter = _MutualTlsAdapter(cert, key)
-                self._cached_cert = cert
-                self.mount("https://", mtls_adapter)
         except (
             exceptions.ClientCertError,
             ImportError,
@@ -475,6 +494,85 @@ class AuthorizedSession(requests.Session):
         ) as caught_exc:
             new_exc = exceptions.MutualTLSChannelError(caught_exc)
             raise new_exc from caught_exc
+
+        if not found_cert_key:
+            self._is_mtls = False
+            return
+
+        self._cached_cert = cert
+        authorization = self._certificate_authority.publish(
+            cert, key, _MutualTlsAdapter
+        )
+        # Keep ``adapters`` pointing at the newest generation for callers that
+        # use ``Session.send`` directly. In-flight calls are unaffected: they
+        # resolve the adapter through the authorization pinned for the call.
+        self.mount("https://", authorization.adapter)
+        self._is_mtls = True
+
+    def _publish_rotated_certificate(self, authorization):
+        """Publishes a newly discovered certificate for subsequent calls.
+
+        The certificate source is only consulted after a 401, exactly like the
+        pre-existing rotation check. An unchanged certificate, an unreadable
+        source or an invalid certificate leaves the published authorization in
+        place; the call that observed the 401 keeps its pinned generation.
+        """
+        if not self.is_mtls:
+            return
+        (
+            call_cert_bytes,
+            call_key_bytes,
+            cached_fingerprint,
+            current_cert_fingerprint,
+        ) = _mtls_helper.check_parameters_for_unauthorized_response(self._cached_cert)
+        if cached_fingerprint == current_cert_fingerprint:
+            _LOGGER.info(
+                "Skipping reconfiguration of mTLS channel because the client "
+                "certificate has not changed."
+            )
+            return
+        try:
+            _LOGGER.info(
+                "Client certificate has changed, publishing a new mTLS channel."
+            )
+            self.configure_mtls_channel(lambda: (call_cert_bytes, call_key_bytes))
+        except Exception as e:
+            _LOGGER.error("Failed to reconfigure mTLS channel: %s", e)
+            raise exceptions.MutualTLSChannelError(
+                "Failed to reconfigure mTLS channel"
+            ) from e
+        published = self._certificate_authority.current
+        if published is not None and authorization is not None:
+            _LOGGER.info(
+                "Published client certificate authorization generation %s; the "
+                "in-flight call keeps generation %s until it finishes.",
+                published.generation,
+                authorization.generation,
+            )
+
+    def get_adapter(self, url):
+        """Returns the adapter to use for ``url``.
+
+        While a call is in progress, the certificate authorization pinned at
+        the start of that call wins for HTTPS URLs. This makes the call keep the
+        TLS connection contexts it started with even if another thread publishes
+        a new certificate in the middle of it. Redirects followed inside the
+        call stay pinned for the same reason.
+        """
+        if url.lower().startswith("https://"):
+            authorization = _certificate_context.get_active()
+            if authorization is not None:
+                return authorization.adapter
+        return super(AuthorizedSession, self).get_adapter(url)
+
+    def _send_with_authorization(self, authorization, *args, **kwargs):
+        """Sends a request over the pinned authorization.
+
+        The authorization is already active for the duration of the call, so
+        ``get_adapter`` resolves HTTPS requests to its adapter. The method is a
+        separate seam so transports and tests can observe or replace the send.
+        """
+        return super(AuthorizedSession, self).request(*args, **kwargs)
 
     def request(
         self,
@@ -517,8 +615,60 @@ class AuthorizedSession(requests.Session):
         # arguments to super, so no need to exhaustively list them here.
 
         # Use a kwarg for this instead of an attribute to maintain
-        # thread-safety.
+        # thread-safety. ``_certificate_lease`` is set on the first execution
+        # and carried through the internal authentication retry so the whole
+        # call stays on one certificate authorization.
         _credential_refresh_attempt = kwargs.pop("_credential_refresh_attempt", 0)
+        certificate_lease = kwargs.pop("_certificate_lease", None)
+
+        owns_lease = False
+        if certificate_lease is None:
+            certificate_lease = self._certificate_authority.acquire()
+            owns_lease = True
+        authorization = (
+            certificate_lease.authorization if certificate_lease is not None else None
+        )
+        try:
+            # Pinning the authorization for the whole call means credential
+            # refresh, the TLS connection, redirects and the internal
+            # authentication retry all observe the same certificate.
+            with _certificate_authorization.activate(authorization):
+                return self._request_with_certificate_lease(
+                    certificate_lease,
+                    method,
+                    url,
+                    data=data,
+                    headers=headers,
+                    max_allowed_time=max_allowed_time,
+                    timeout=timeout,
+                    _credential_refresh_attempt=_credential_refresh_attempt,
+                    **kwargs
+                )
+        finally:
+            if owns_lease and certificate_lease is not None:
+                certificate_lease.release()
+
+    def _request_with_certificate_lease(
+        self,
+        certificate_lease,
+        method,
+        url,
+        data=None,
+        headers=None,
+        max_allowed_time=None,
+        timeout=_DEFAULT_TIMEOUT,
+        _credential_refresh_attempt=0,
+        **kwargs
+    ):
+        authorization = (
+            certificate_lease.authorization if certificate_lease is not None else None
+        )
+        _LOGGER.debug(
+            "Starting call %s %s under client certificate authorization generation %s.",
+            method,
+            url,
+            authorization.generation if authorization is not None else None,
+        )
 
         # Make a copy of the headers. They will be modified by the credentials
         # and we want to pass the original headers if we recurse.
@@ -540,7 +690,8 @@ class AuthorizedSession(requests.Session):
 
         with TimeoutGuard(remaining_time) as guard:
             _helpers.request_log(_LOGGER, method, url, data, headers)
-            response = super(AuthorizedSession, self).request(
+            response = self._send_with_authorization(
+                authorization,
                 method,
                 url,
                 data=data,
@@ -560,35 +711,8 @@ class AuthorizedSession(requests.Session):
             and _credential_refresh_attempt < self._max_refresh_attempts
         ):
             # Handle unauthorized permission error(401 status code)
-            if response.status_code == http_client.UNAUTHORIZED:
-                if self.is_mtls:
-                    (
-                        call_cert_bytes,
-                        call_key_bytes,
-                        cached_fingerprint,
-                        current_cert_fingerprint,
-                    ) = _mtls_helper.check_parameters_for_unauthorized_response(
-                        self._cached_cert
-                    )
-                    if cached_fingerprint != current_cert_fingerprint:
-                        try:
-                            _LOGGER.info(
-                                "Client certificate has changed, reconfiguring mTLS "
-                                "channel."
-                            )
-                            self.configure_mtls_channel(
-                                lambda: (call_cert_bytes, call_key_bytes)
-                            )
-                        except Exception as e:
-                            _LOGGER.error("Failed to reconfigure mTLS channel: %s", e)
-                            raise exceptions.MutualTLSChannelError(
-                                "Failed to reconfigure mTLS channel"
-                            ) from e
-                    else:
-                        _LOGGER.info(
-                            "Skipping reconfiguration of mTLS channel because the client"
-                            " certificate has not changed."
-                        )
+            if response.status_code == http_client.UNAUTHORIZED and self.is_mtls:
+                self._publish_rotated_certificate(authorization)
             _LOGGER.info(
                 "Refreshing credentials due to a %s response. Attempt %s/%s.",
                 response.status_code,
@@ -608,8 +732,9 @@ class AuthorizedSession(requests.Session):
                 self.credentials.refresh(auth_request)
             remaining_time = guard.remaining_timeout
 
-            # Recurse. Pass in the original headers, not our modified set, but
-            # do pass the adjusted max allowed time (i.e. the remaining total time).
+            # Recurse on the same lease. Pass in the original headers, not our
+            # modified set, but do pass the adjusted max allowed time (i.e. the
+            # remaining total time).
             return self.request(
                 method,
                 url,
@@ -618,6 +743,7 @@ class AuthorizedSession(requests.Session):
                 max_allowed_time=remaining_time,
                 timeout=timeout,
                 _credential_refresh_attempt=_credential_refresh_attempt + 1,
+                _certificate_lease=certificate_lease,
                 **kwargs
             )
 
@@ -628,7 +754,26 @@ class AuthorizedSession(requests.Session):
         """Indicates if the created SSL channel is mutual TLS."""
         return self._is_mtls
 
+    @property
+    def certificate_authorization(self):
+        """The certificate authorization used by calls that start now.
+
+        Returns:
+            Optional[CertificateAuthorization]: The currently published
+            authorization, or ``None`` when mTLS is not configured.
+        """
+        return self._certificate_authority.current
+
     def close(self):
         if self._auth_request_session is not None:
             self._auth_request_session.close()
-        super(AuthorizedSession, self).close()
+        # ``requests.Session.close`` closes every mounted adapter. That would
+        # tear down the TLS pools of authorizations that still have calls in
+        # flight, so close only adapters this session does not share with a
+        # live generation. A generation closes its own adapter when the last
+        # call using it finishes.
+        generation_adapters = set(self._certificate_authority.owned_adapters())
+        for adapter in set(self.adapters.values()):
+            if adapter not in generation_adapters:
+                adapter.close()
+        self._certificate_authority.close()
