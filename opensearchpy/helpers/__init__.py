@@ -44,6 +44,12 @@ from .actions import (
 from .asyncsigner import AWSV4SignerAsyncAuth
 from .errors import BulkIndexError, ScanError
 from .signer import AWSV4SignerAuth, RequestsAWSV4SignerAuth, Urllib3AWSV4SignerAuth
+from .transmission import (
+    ReceiptStatus,
+    TransmissionBudget,
+    TransmissionReceipt,
+    recoverable_actions,
+)
 
 __all__ = [
     "BulkIndexError",
@@ -64,4 +70,8 @@ __all__ = [
     "async_bulk",
     "async_reindex",
     "async_streaming_bulk",
+    "ReceiptStatus",
+    "TransmissionBudget",
+    "TransmissionReceipt",
+    "recoverable_actions",
 ]

@@ -38,6 +38,7 @@ __all__ = [
     "ConnectionError",
     "SSLError",
     "ConnectionTimeout",
+    "TransmissionBudgetExhausted",
     "AuthenticationException",
     "AuthorizationException",
     "OpenSearchDslException",
@@ -150,6 +151,19 @@ class ConnectionTimeout(ConnectionError):
             self.info.__class__.__name__,
             self.info,
         )
+
+
+class TransmissionBudgetExhausted(TransportError):
+    """
+    Error raised (instead of sending) when the shared
+    :class:`~opensearchpy.helpers.TransmissionBudget` of an import has been
+    spent or cancelled before a request could be transmitted. The request was
+    never put on the wire, so no cost was charged to the budget for it and the
+    affected actions can be resumed safely.
+    """
+
+    def __init__(self, error: str = "Transmission budget exhausted.") -> None:
+        super().__init__("N/A", error)
 
 
 class NotFoundError(TransportError):

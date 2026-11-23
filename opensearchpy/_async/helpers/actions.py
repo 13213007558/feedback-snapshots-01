@@ -45,7 +45,7 @@ from typing import (
 )
 
 from ...compat import map
-from ...exceptions import TransportError
+from ...exceptions import ConnectionError, TransmissionBudgetExhausted, TransportError
 from ...helpers.actions import (
     _ActionChunker,
     _process_bulk_chunk_error,
@@ -53,6 +53,7 @@ from ...helpers.actions import (
     expand_action,
 )
 from ...helpers.errors import ScanError
+from ...helpers.transmission import ReceiptStatus, TransmissionReceipt
 
 logger: logging.Logger = logging.getLogger("opensearchpy.helpers")
 
@@ -95,6 +96,10 @@ async def _process_bulk_chunk(
     try:
         # send the actual request
         resp = await client.bulk(body="\n".join(bulk_actions) + "\n", *args, **kwargs)
+    except TransmissionBudgetExhausted:
+        # never converted into per-item failures: the chunk was not sent at
+        # all, let the caller mark its actions as unsent
+        raise
     except TransportError as e:
         gen = _process_bulk_chunk_error(
             error=e,
@@ -158,6 +163,7 @@ async def async_streaming_bulk(
     max_backoff: Union[float, int] = 600,
     yield_ok: bool = True,
     ignore_status: Any = (),
+    transmission_budget: Any = None,
     *args: Any,
     **kwargs: Any
 ) -> AsyncGenerator[Tuple[bool, Any], None]:
@@ -173,6 +179,15 @@ async def async_streaming_bulk(
     asyncio.sleep**) for ``initial_backoff`` seconds and then,
     every subsequent rejection for the same chunk, for double the time every
     time up to ``max_backoff`` seconds.
+
+    If you specify ``transmission_budget`` (a
+    :class:`~opensearchpy.helpers.TransmissionBudget` instance) every request
+    transmission - including retries issued by this helper and internally by
+    the transport - is charged to the shared budget and each yielded result
+    is a ``(ok, receipt)`` pair carrying a
+    :class:`~opensearchpy.helpers.TransmissionReceipt` instead of the raw
+    response dict. Actions that could not be sent because the budget was
+    spent or cancelled are reported with an ``unsent`` receipt.
 
     :arg client: instance of :class:`~opensearchpy.AsyncOpenSearch` to use
     :arg actions: iterable or async iterable containing the actions to be executed
@@ -193,66 +208,116 @@ async def async_streaming_bulk(
     :arg max_backoff: maximum number of seconds a retry will wait
     :arg yield_ok: if set to False will skip successful documents in the output
     :arg ignore_status: list of HTTP status code that you want to ignore
+    :arg transmission_budget: optional
+        :class:`~opensearchpy.helpers.TransmissionBudget` shared by all
+        transmissions of this import
     """
 
     async def map_actions() -> Any:
         async for item in aiter(actions):
             yield expand_action_callback(item)
 
+    if transmission_budget is not None:
+        kwargs["transmission_budget"] = transmission_budget
+
+    def _success(info: Any, data: Any, attempt: int) -> Any:
+        if transmission_budget is None:
+            return True, info
+        return True, TransmissionReceipt(
+            action=data,
+            status=ReceiptStatus.SUCCEEDED,
+            attempts=attempt + 1,
+            info=info,
+        )
+
+    def _failure(action: Any, info: Any, data: Any, attempt: int) -> Any:
+        if transmission_budget is None:
+            return False, {action: info}
+        # a response confirmed the failure unless the attached exception
+        # shows the request went out without any reply
+        if isinstance(info.get("exception"), ConnectionError):
+            status = ReceiptStatus.UNCONFIRMED
+        else:
+            status = ReceiptStatus.CONFIRMED_FAILURE
+        return False, TransmissionReceipt(
+            action=data,
+            status=status,
+            attempts=attempt + 1,
+            info={action: info},
+        )
+
+    def _unsent(data: Any) -> Any:
+        return False, TransmissionReceipt(
+            action=data, status=ReceiptStatus.UNSENT
+        )
+
+    budget_exhausted = False
     async for bulk_data, bulk_actions in _chunk_actions(
         map_actions(), chunk_size, max_chunk_bytes, client.transport.serializer
     ):
-        for attempt in range(max_retries + 1):
-            to_retry: Any = []
-            to_retry_data: Any = []
-            if attempt:
-                await asyncio.sleep(
-                    min(max_backoff, initial_backoff * 2 ** (attempt - 1))
-                )
+        if budget_exhausted:
+            # the budget is spent or cancelled: report the remaining actions
+            # as unsent without transmitting anything
+            for data in bulk_data:
+                yield _unsent(data)
+            continue
 
-            try:
-                async for data, (ok, info) in azip(
-                    bulk_data,
-                    _process_bulk_chunk(
-                        client,
-                        bulk_actions,
+        try:
+            for attempt in range(max_retries + 1):
+                to_retry: Any = []
+                to_retry_data: Any = []
+                if attempt:
+                    await asyncio.sleep(
+                        min(max_backoff, initial_backoff * 2 ** (attempt - 1))
+                    )
+
+                try:
+                    async for data, (ok, info) in azip(
                         bulk_data,
-                        raise_on_exception,
-                        raise_on_error,
-                        ignore_status,
-                        *args,
-                        **kwargs,
-                    ),
-                ):
-                    if not ok:
-                        action, info = info.popitem()
-                        # retry if retries enabled, we get 429, and we are not
-                        # in the last attempt
-                        if (
-                            max_retries
-                            and info["status"] == 429
-                            and (attempt + 1) <= max_retries
-                        ):
-                            # _process_bulk_chunk expects strings so we need to
-                            # re-serialize the data
-                            to_retry.extend(
-                                map(client.transport.serializer.dumps, data)
-                            )
-                            to_retry_data.append(data)
-                        else:
-                            yield ok, {action: info}
-                    elif yield_ok:
-                        yield ok, info
+                        _process_bulk_chunk(
+                            client,
+                            bulk_actions,
+                            bulk_data,
+                            raise_on_exception,
+                            raise_on_error,
+                            ignore_status,
+                            *args,
+                            **kwargs,
+                        ),
+                    ):
+                        if not ok:
+                            action, info = info.popitem()
+                            # retry if retries enabled, we get 429, and we are not
+                            # in the last attempt
+                            if (
+                                max_retries
+                                and info["status"] == 429
+                                and (attempt + 1) <= max_retries
+                            ):
+                                # _process_bulk_chunk expects strings so we need to
+                                # re-serialize the data
+                                to_retry.extend(
+                                    map(client.transport.serializer.dumps, data)
+                                )
+                                to_retry_data.append(data)
+                            else:
+                                yield _failure(action, info, data, attempt)
+                        elif yield_ok:
+                            yield _success(info, data, attempt)
 
-            except TransportError as e:
-                # suppress 429 errors since we will retry them
-                if attempt == max_retries or e.status_code != 429:
-                    raise
-            else:
-                if not to_retry:
-                    break
-                # retry only subset of documents that didn't succeed
-                bulk_actions, bulk_data = to_retry, to_retry_data
+                except TransportError as e:
+                    # suppress 429 errors since we will retry them
+                    if attempt == max_retries or e.status_code != 429:
+                        raise
+                else:
+                    if not to_retry:
+                        break
+                    # retry only subset of documents that didn't succeed
+                    bulk_actions, bulk_data = to_retry, to_retry_data
+        except TransmissionBudgetExhausted:
+            budget_exhausted = True
+            for data in bulk_data:
+                yield _unsent(data)
 
 
 async def async_bulk(

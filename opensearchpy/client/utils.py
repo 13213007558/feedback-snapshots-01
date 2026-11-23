@@ -163,7 +163,9 @@ def query_params(*opensearch_query_params: Any) -> Callable:  # type: ignore
                 headers["authorization"] = f"ApiKey {_base64_auth_header(api_key)}"
 
             # don't escape ignore, request_timeout, or timeout
-            for p in ("ignore", "request_timeout", "timeout"):
+            # transmission_budget is a client-side object forwarded to the
+            # transport, never a query parameter
+            for p in ("ignore", "request_timeout", "timeout", "transmission_budget"):
                 if p in kwargs:
                     params[p] = kwargs.pop(p)
 

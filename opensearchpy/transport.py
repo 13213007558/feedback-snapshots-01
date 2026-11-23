@@ -37,6 +37,7 @@ from .exceptions import (
     ConnectionError,
     ConnectionTimeout,
     SerializationError,
+    TransmissionBudgetExhausted,
     TransportError,
 )
 from .serializer import DEFAULT_SERIALIZERS, Deserializer, JSONSerializer, Serializer
@@ -406,13 +407,24 @@ class Transport:
             passed to the connection
         :arg timeout: timeout of the request. If it is not presented as argument
             will be extracted from `params`
+
+        A ``transmission_budget`` entry in `params` is treated as a shared
+        :class:`~opensearchpy.helpers.TransmissionBudget`: every transmission
+        (including internal retries) is charged to it and a
+        :class:`~opensearchpy.exceptions.TransmissionBudgetExhausted` error is
+        raised instead of sending once it is spent or cancelled.
         """
-        method, params, body, ignore, timeout = self._resolve_request_args(
-            method, params, body, ignore, timeout
+        method, params, body, ignore, timeout, transmission_budget = (
+            self._resolve_request_args(method, params, body, ignore, timeout)
         )
 
         for attempt in range(self.max_retries + 1):
             connection = self.get_connection()
+
+            if transmission_budget is not None and not transmission_budget.spend():
+                # the request is not sent at all, so nothing is charged;
+                # raise instead of consuming another attempt
+                raise TransmissionBudgetExhausted()
 
             try:
                 status, headers_response, data = connection.perform_request(
@@ -508,6 +520,7 @@ class Transport:
                 pass
 
         if params:
+            transmission_budget = params.pop("transmission_budget", None)
             if not timeout:
                 timeout = params.pop("request_timeout", None) or params.pop(
                     "timeout", None
@@ -516,8 +529,10 @@ class Transport:
                 ignore = params.pop("ignore", ())
             if isinstance(ignore, int):
                 ignore = (ignore,)
+        else:
+            transmission_budget = None
 
-        return method, params, body, ignore, timeout
+        return method, params, body, ignore, timeout, transmission_budget
 
 
 __all__ = ["TransportError"]

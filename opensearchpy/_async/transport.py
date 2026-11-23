@@ -38,6 +38,7 @@ from ..exceptions import (
     ConnectionError,
     ConnectionTimeout,
     SerializationError,
+    TransmissionBudgetExhausted,
     TransportError,
 )
 from ..serializer import JSONSerializer
@@ -380,12 +381,17 @@ class AsyncTransport(Transport):
         """
         await self._async_call()
 
-        method, params, body, ignore, timeout = self._resolve_request_args(
-            method, params, body, ignore, timeout
+        method, params, body, ignore, timeout, transmission_budget = (
+            self._resolve_request_args(method, params, body, ignore, timeout)
         )
 
         for attempt in range(self.max_retries + 1):
             connection = self.get_connection()
+
+            if transmission_budget is not None and not transmission_budget.spend():
+                # the request is not sent at all, so nothing is charged;
+                # raise instead of consuming another attempt
+                raise TransmissionBudgetExhausted()
 
             try:
                 status, headers_response, data = await connection.perform_request(
