@@ -1,0 +1,27 @@
+PATH
+  remote: ..
+  specs:
+    rack-attack (6.8.0)
+      rack (>= 1.0, < 4)
+
+GEM
+  remote: https://rubygems.org/
+  specs:
+    rack (3.2.9)
+
+PLATFORMS
+  arm64-darwin-25
+  ruby
+
+DEPENDENCIES
+  rack-attack!
+
+CHECKSUMS
+  rack (3.2.9) sha256=8235c1d08f0c461bedcff4413bbeba888173e5b09e1332ae951c98f0ee460dcc
+  rack-attack (6.8.0)
+
+RUBY VERSION
+  ruby 3.3.12
+
+BUNDLED WITH
+  4.0.16
