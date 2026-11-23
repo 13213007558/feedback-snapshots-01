@@ -427,6 +427,13 @@ class Registry(Mapping[URI, Resource[D]]):
         ):
             raise
         except Exception as error:
+            # Budget failures originate inside a configured retriever but are
+            # not retrieval failures: they must surface with their own type so
+            # callers can tell which kind of resolution work hit its limit.
+            from referencing.budget import BudgetExceeded
+
+            if isinstance(error, BudgetExceeded):
+                raise
             raise exceptions.Unretrievable(ref=uri) from error
         else:
             registry = registry.with_resource(uri, resource)
