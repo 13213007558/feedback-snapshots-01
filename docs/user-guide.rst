@@ -1288,6 +1288,13 @@ example ::
 
     id_token = google.oauth2.id_token.fetch_id_token(request, target_audience)
 
+The ID token credentials verify that the returned token's ``aud`` claim matches
+their configured ``target_audience``. A token issued for another audience is
+rejected with a :class:`~google.auth.exceptions.RefreshError` during refresh,
+and the audience is checked again immediately before the token is attached to a
+request. A rejection never changes the token cached on other credentials, even
+when they share the same signing account.
+
 IDToken verification can be done for various type of IDTokens using the
 :class:`google.oauth2.id_token` module. It supports ID token signed with RS256
 and ES256 algorithms. However, ES256 algorithm won't be available unless

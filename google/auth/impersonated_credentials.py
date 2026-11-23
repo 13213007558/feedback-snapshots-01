@@ -602,6 +602,56 @@ class IDTokenCredentials(credentials.CredentialsWithQuotaProject):
             quota_project_id=quota_project_id,
         )
 
+    def _verify_id_token_audience(self, id_token):
+        """Verifies that an ID token was issued for the configured audience.
+
+        Args:
+            id_token (str): The encoded ID token.
+
+        Raises:
+            google.auth.exceptions.RefreshError: If the token's ``aud`` claim
+                does not match ``target_audience``.
+        """
+        if id_token is None:
+            return
+        try:
+            jwt.verify_audience(id_token, self._target_audience)
+        except exceptions.MalformedError:
+            # Not a JSON Web Token, so it carries no Google ID token audience
+            # claim to compare.
+            return
+        except exceptions.InvalidValue as caught_exc:
+            raise exceptions.RefreshError(
+                "The ID token returned is not valid for the requested "
+                "audience {}.".format(self._target_audience)
+            ) from caught_exc
+
+    def _set_id_token(self, id_token, expiry):
+        """Validates an ID token before publishing it on this credential.
+
+        Args:
+            id_token (str): The encoded ID token.
+            expiry (datetime.datetime): The token expiration.
+
+        Raises:
+            google.auth.exceptions.RefreshError: If the token is not valid for
+                the configured audience.
+        """
+        self._verify_id_token_audience(id_token)
+        self.token = id_token
+        self.expiry = expiry
+
+    def apply(self, headers, token=None):
+        """Applies the ID token to the request headers.
+
+        The audience claim is verified immediately before the token is
+        attached. A failed verification leaves the request headers untouched.
+        """
+        id_token = token if token is not None else self.token
+        if id_token is not None:
+            self._verify_id_token_audience(id_token)
+        super(IDTokenCredentials, self).apply(headers, token)
+
     @_helpers.copy_docstring(credentials.Credentials)
     def refresh(self, request):
         from google.auth.transport.requests import AuthorizedSession
@@ -648,10 +698,10 @@ class IDTokenCredentials(credentials.CredentialsWithQuotaProject):
             )
             raise new_exc from caught_exc
 
-        self.token = id_token
-        self.expiry = _helpers.utcfromtimestamp(
+        expiry = _helpers.utcfromtimestamp(
             jwt.decode(id_token, verify=False)["exp"]
         )
+        self._set_id_token(id_token, expiry)
 
 
 def _sign_jwt_request(request, principal, headers, payload, delegates=[]):

@@ -700,3 +700,35 @@ class TestOnDemandCredentials(object):
         token = self.credentials._get_jwt_for_audience("audience")
 
         assert token != mock.sentinel.token
+
+
+def test_verify_audience_matching(token_factory):
+    token = token_factory()
+    jwt.verify_audience(token, "audience@example.com")
+
+
+def test_verify_audience_matching_list(token_factory):
+    token = token_factory()
+    jwt.verify_audience(token, ["other@example.com", "audience@example.com"])
+
+
+def test_verify_audience_none_skips(token_factory):
+    token = token_factory(claims={"aud": None})
+    jwt.verify_audience(token, None)
+
+
+def test_verify_audience_wrong_audience(token_factory):
+    token = token_factory()
+    with pytest.raises(exceptions.InvalidValue) as excinfo:
+        jwt.verify_audience(token, "other@example.com")
+    assert excinfo.match(r"Token has wrong audience")
+
+
+def test_verify_audience_malformed_token():
+    with pytest.raises(exceptions.MalformedError):
+        jwt.verify_audience("not-a-jwt", "audience@example.com")
+
+
+def test_verify_audience_non_string_token():
+    with pytest.raises(exceptions.MalformedError):
+        jwt.verify_audience({"not": "bytes"}, "audience@example.com")

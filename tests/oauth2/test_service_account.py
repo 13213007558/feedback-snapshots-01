@@ -1121,3 +1121,138 @@ class TestIDTokenCredentials(object):
 
         # Credentials should now be valid.
         assert credentials.valid
+
+    @staticmethod
+    def _make_id_token(audience, expires_in=500):
+        """Builds a signed-looking ID token payload for the given audience."""
+        now = _helpers.utcnow()
+        payload = {
+            "aud": audience,
+            "iat": _helpers.datetime_to_secs(now),
+            "exp": _helpers.datetime_to_secs(
+                now + datetime.timedelta(seconds=expires_in)
+            ),
+        }
+        header = _helpers.unpadded_urlsafe_b64encode(
+            json.dumps({"alg": "RS256", "typ": "JWT"}).encode("utf-8")
+        )
+        encoded = _helpers.unpadded_urlsafe_b64encode(
+            json.dumps(payload).encode("utf-8")
+        )
+        signature = _helpers.unpadded_urlsafe_b64encode(b"signature")
+        return b".".join([header, encoded, signature])
+
+    @mock.patch("google.oauth2._client.id_token_jwt_grant", autospec=True)
+    def test_refresh_rejects_wrong_audience(self, id_token_jwt_grant):
+        credentials = self.make_credentials()
+        other_audience_token = self._make_id_token("https://other.example.com")
+        id_token_jwt_grant.return_value = (
+            other_audience_token,
+            _helpers.utcnow() + datetime.timedelta(seconds=500),
+            {},
+        )
+        request = mock.create_autospec(transport.Request, instance=True)
+
+        with pytest.raises(exceptions.RefreshError) as excinfo:
+            credentials.refresh(request)
+
+        assert "not valid for the requested audience" in str(excinfo.value)
+        # The rejected token must not be published on the credential.
+        assert credentials.token is None
+        assert not credentials.valid
+
+    @mock.patch("google.oauth2._client.id_token_jwt_grant", autospec=True)
+    def test_refresh_accepts_matching_audience(self, id_token_jwt_grant):
+        credentials = self.make_credentials()
+        token = self._make_id_token(self.TARGET_AUDIENCE)
+        expiry = _helpers.utcnow() + datetime.timedelta(seconds=500)
+        id_token_jwt_grant.return_value = (token, expiry, {})
+        request = mock.create_autospec(transport.Request, instance=True)
+
+        credentials.refresh(request)
+
+        assert credentials.token == token
+        assert credentials.expiry == expiry
+
+    @mock.patch(
+        "google.oauth2._client.call_iam_generate_id_token_endpoint", autospec=True
+    )
+    def test_refresh_iam_rejects_wrong_audience(self, call_iam):
+        credentials = self.make_credentials()
+        credentials._use_iam_endpoint = True
+        call_iam.return_value = (
+            self._make_id_token("https://other.example.com"),
+            _helpers.utcnow() + datetime.timedelta(seconds=500),
+        )
+
+        with pytest.raises(exceptions.RefreshError) as excinfo:
+            credentials.refresh(mock.Mock())
+
+        assert "not valid for the requested audience" in str(excinfo.value)
+        assert credentials.token is None
+
+    @mock.patch(
+        "google.oauth2._client.call_iam_generate_id_token_endpoint", autospec=True
+    )
+    def test_refresh_iam_accepts_matching_audience(self, call_iam):
+        credentials = self.make_credentials()
+        credentials._use_iam_endpoint = True
+        token = self._make_id_token(self.TARGET_AUDIENCE)
+        expiry = _helpers.utcnow() + datetime.timedelta(seconds=500)
+        call_iam.return_value = (token, expiry)
+
+        credentials.refresh(mock.Mock())
+
+        assert credentials.token == token
+        assert credentials.expiry == expiry
+
+    def test_apply_rejects_swapped_wrong_audience_token(self):
+        credentials = self.make_credentials()
+        # Simulate a token that was swapped onto the credential after refresh
+        # (for example by a race or a bad cache entry).
+        credentials.token = self._make_id_token("https://other.example.com")
+        credentials.expiry = _helpers.utcnow() + datetime.timedelta(seconds=500)
+        headers = {}
+
+        with pytest.raises(exceptions.RefreshError):
+            credentials.apply(headers)
+
+        assert "authorization" not in headers
+
+    def test_before_request_rejects_wrong_audience_token(self):
+        credentials = self.make_credentials()
+        credentials.token = self._make_id_token("https://other.example.com")
+        credentials.expiry = _helpers.utcnow() + datetime.timedelta(seconds=500)
+        headers = {}
+
+        with pytest.raises(exceptions.RefreshError):
+            credentials.before_request(mock.Mock(), "GET", "https://api", headers)
+
+        assert "authorization" not in headers
+
+    def test_before_request_attaches_matching_id_token(self):
+        credentials = self.make_credentials()
+        token = self._make_id_token(self.TARGET_AUDIENCE)
+        credentials.token = token
+        credentials.expiry = _helpers.utcnow() + datetime.timedelta(seconds=500)
+        headers = {}
+
+        credentials.before_request(mock.Mock(), "GET", "https://api", headers)
+
+        # The ID token is attached as a bearer token, not as an access token
+        # or a self-signed JWT.
+        assert headers["authorization"] == "Bearer {}".format(
+            token.decode("utf-8")
+        )
+
+    def test_apply_allows_explicit_matching_token_override(self):
+        credentials = self.make_credentials()
+        credentials.token = self._make_id_token("https://other.example.com")
+        override = self._make_id_token(self.TARGET_AUDIENCE)
+        headers = {}
+
+        credentials.apply(headers, token=override)
+
+        assert headers["authorization"] == "Bearer {}".format(
+            override.decode("utf-8")
+        )

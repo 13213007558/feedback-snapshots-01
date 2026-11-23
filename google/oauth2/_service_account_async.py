@@ -128,5 +128,4 @@ class IDTokenCredentials(
         access_token, expiry, _ = await _client_async.id_token_jwt_grant(
             request, self._token_uri, assertion
         )
-        self.token = access_token
-        self.expiry = expiry
+        self._set_id_token(access_token, expiry)

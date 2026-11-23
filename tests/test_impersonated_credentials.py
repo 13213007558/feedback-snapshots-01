@@ -27,6 +27,7 @@ from google.auth import crypt
 from google.auth import environment_vars
 from google.auth import exceptions
 from google.auth import impersonated_credentials
+from google.auth import jwt
 from google.auth import transport
 from google.auth.impersonated_credentials import Credentials
 from google.oauth2 import credentials
@@ -1310,3 +1311,164 @@ class TestImpersonatedCredentials(object):
             == "Unable to acquire impersonated credentials: No signed JWT in response."
         )
         assert excinfo.value.args[1] == "invalid_data"
+
+
+class TestIDTokenAudienceDelivery(object):
+    """Cross-client audience checks for derived impersonated ID tokens."""
+
+    TARGET_AUDIENCE_A = "https://inventory-a.example.com"
+    TARGET_AUDIENCE_B = "https://inventory-b.example.com"
+
+    @staticmethod
+    def _make_id_token(audience, expires_in=500):
+        now = _helpers.utcnow()
+        payload = {
+            "aud": audience,
+            "iat": _helpers.datetime_to_secs(now),
+            "exp": _helpers.datetime_to_secs(
+                now + datetime.timedelta(seconds=expires_in)
+            ),
+        }
+        header = _helpers.unpadded_urlsafe_b64encode(
+            json.dumps({"alg": "RS256", "typ": "JWT"}).encode("utf-8")
+        )
+        encoded = _helpers.unpadded_urlsafe_b64encode(
+            json.dumps(payload).encode("utf-8")
+        )
+        signature = _helpers.unpadded_urlsafe_b64encode(b"signature")
+        return b".".join([header, encoded, signature]).decode("utf-8")
+
+    def _make_target_credentials(self):
+        source_credentials = service_account.Credentials(
+            SIGNER, "source@example.com", TOKEN_URI
+        )
+        source_credentials.token = "source-token"
+        source_credentials.expiry = _helpers.utcnow() + datetime.timedelta(
+            seconds=500
+        )
+        return impersonated_credentials.Credentials(
+            source_credentials=source_credentials,
+            target_principal="impersonated@project.iam.gserviceaccount.com",
+            target_scopes=["https://www.googleapis.com/auth/iam"],
+        )
+
+    def test_refresh_rejects_wrong_audience(self):
+        target_credentials = self._make_target_credentials()
+        id_creds = impersonated_credentials.IDTokenCredentials(
+            target_credentials, target_audience=self.TARGET_AUDIENCE_B
+        )
+
+        with mock.patch(
+            "google.auth.transport.requests.AuthorizedSession.post",
+            return_value=MockResponse(
+                {"token": self._make_id_token(self.TARGET_AUDIENCE_A)},
+                http_client.OK,
+            ),
+        ):
+            with pytest.raises(exceptions.RefreshError) as excinfo:
+                id_creds.refresh(None)
+
+        assert "not valid for the requested audience" in str(excinfo.value)
+        assert id_creds.token is None
+        assert not id_creds.valid
+        # The shared target credential must not have been touched.
+        assert target_credentials.token is None
+
+    def test_apply_rejects_swapped_wrong_audience_token(self):
+        target_credentials = self._make_target_credentials()
+        id_creds = impersonated_credentials.IDTokenCredentials(
+            target_credentials, target_audience=self.TARGET_AUDIENCE_B
+        )
+        id_creds.token = self._make_id_token(self.TARGET_AUDIENCE_A)
+        id_creds.expiry = _helpers.utcnow() + datetime.timedelta(seconds=500)
+        headers = {}
+
+        with pytest.raises(exceptions.RefreshError):
+            id_creds.apply(headers)
+
+        assert "authorization" not in headers
+
+    def test_interleaved_clients_keep_their_own_tokens(self):
+        """A and B share a signer; a rejected B token must not poison A."""
+        target_credentials = self._make_target_credentials()
+        client_a = impersonated_credentials.IDTokenCredentials(
+            target_credentials, target_audience=self.TARGET_AUDIENCE_A
+        )
+        client_b = impersonated_credentials.IDTokenCredentials(
+            target_credentials, target_audience=self.TARGET_AUDIENCE_B
+        )
+
+        token_a = self._make_id_token(self.TARGET_AUDIENCE_A)
+        token_b = self._make_id_token(self.TARGET_AUDIENCE_B)
+
+        # A warms up and attaches its own token.
+        with mock.patch(
+            "google.auth.transport.requests.AuthorizedSession.post",
+            return_value=MockResponse({"token": token_a}, http_client.OK),
+        ):
+            client_a.refresh(None)
+        headers_a = {}
+        client_a.apply(headers_a)
+        assert headers_a["authorization"] == "Bearer {}".format(token_a)
+
+        # B's first approved call incorrectly receives A's validly-issued
+        # token. It must be rejected and must not publish anything.
+        with mock.patch(
+            "google.auth.transport.requests.AuthorizedSession.post",
+            return_value=MockResponse({"token": token_a}, http_client.OK),
+        ):
+            with pytest.raises(exceptions.RefreshError):
+                client_b.refresh(None)
+        assert client_b.token is None
+
+        # B's correct token then arrives.
+        with mock.patch(
+            "google.auth.transport.requests.AuthorizedSession.post",
+            return_value=MockResponse({"token": token_b}, http_client.OK),
+        ):
+            client_b.refresh(None)
+        headers_b = {}
+        client_b.apply(headers_b)
+
+        # Both headers are bearer ID tokens, each with its own audience.
+        assert headers_b["authorization"] == "Bearer {}".format(token_b)
+        assert jwt.decode(headers_a["authorization"].split(" ")[1], verify=False)[
+            "aud"
+        ] == self.TARGET_AUDIENCE_A
+        assert jwt.decode(headers_b["authorization"].split(" ")[1], verify=False)[
+            "aud"
+        ] == self.TARGET_AUDIENCE_B
+
+        # A's cache is untouched: it can still serve its valid token.
+        headers_a_again = {}
+        client_a.apply(headers_a_again)
+        assert headers_a_again["authorization"] == "Bearer {}".format(token_a)
+        assert client_a.valid
+
+    def test_interleaved_iam_and_exchange_paths(self):
+        """One client uses the IAM endpoint, the other the JWT grant path."""
+        target_credentials = self._make_target_credentials()
+        iam_client = impersonated_credentials.IDTokenCredentials(
+            target_credentials, target_audience=self.TARGET_AUDIENCE_A
+        )
+        token_a = self._make_id_token(self.TARGET_AUDIENCE_A)
+
+        # Both paths in this module post through AuthorizedSession, so a wrong
+        # audience response is rejected identically before publication.
+        with mock.patch(
+            "google.auth.transport.requests.AuthorizedSession.post",
+            return_value=MockResponse(
+                {"token": self._make_id_token(self.TARGET_AUDIENCE_B)},
+                http_client.OK,
+            ),
+        ):
+            with pytest.raises(exceptions.RefreshError):
+                iam_client.refresh(None)
+
+        with mock.patch(
+            "google.auth.transport.requests.AuthorizedSession.post",
+            return_value=MockResponse({"token": token_a}, http_client.OK),
+        ):
+            iam_client.refresh(None)
+
+        assert iam_client.token == token_a

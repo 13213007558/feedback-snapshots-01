@@ -228,6 +228,50 @@ def _verify_iat_and_exp(payload, clock_skew_in_seconds=0):
         raise exceptions.InvalidValue("Token expired, {} < {}".format(latest, now))
 
 
+def verify_audience(token, audience):
+    """Verifies the ``aud`` claim of an encoded JWT without verifying its
+    signature.
+
+    This is meant for tokens that were just obtained from a trusted token
+    endpoint, where only the audience assertion needs to be checked before the
+    token is handed to a caller.
+
+    Args:
+        token (Union[str, bytes]): The encoded JWT.
+        audience (str or Sequence[str]): The audience claim, ``aud``, that the
+            token must contain. Or a sequence of acceptable audiences. If
+            ``None`` then the audience is not verified.
+
+    Raises:
+        google.auth.exceptions.MalformedError: If the token cannot be decoded.
+        google.auth.exceptions.InvalidValue: If the token's ``aud`` claim does
+            not match any of the expected audiences.
+    """
+    if audience is None:
+        return
+
+    if not isinstance(token, (str, bytes)):
+        raise exceptions.MalformedError(
+            "Could not decode token to verify its audience."
+        )
+
+    try:
+        _, payload, _, _ = _unverified_decode(token)
+    except ValueError as caught_exc:
+        raise exceptions.MalformedError(
+            "Could not decode token to verify its audience."
+        ) from caught_exc
+
+    claim_audience = payload.get("aud")
+    expected_audiences = [audience] if isinstance(audience, str) else list(audience)
+    if claim_audience not in expected_audiences:
+        raise exceptions.InvalidValue(
+            "Token has wrong audience {}, expected one of {}".format(
+                claim_audience, expected_audiences
+            )
+        )
+
+
 def decode(token, certs=None, verify=True, audience=None, clock_skew_in_seconds=0):
     """Decode and verify a JWT.
 

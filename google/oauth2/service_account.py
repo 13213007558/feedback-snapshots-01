@@ -782,6 +782,63 @@ class IDTokenCredentials(
         cred._token_uri = token_uri
         return cred
 
+    def _verify_id_token_audience(self, id_token):
+        """Verifies that an ID token was issued for these credentials' audience.
+
+        The check is done before the token is stored or attached to a request
+        so that a token minted for another audience is never handed out.
+
+        Args:
+            id_token (str): The encoded ID token.
+
+        Raises:
+            google.auth.exceptions.RefreshError: If the token is malformed or
+                its ``aud`` claim does not match ``target_audience``.
+        """
+        if id_token is None:
+            return
+        try:
+            jwt.verify_audience(id_token, self._target_audience)
+        except exceptions.MalformedError:
+            # The value is not a JSON Web Token, so it cannot carry a Google
+            # ID token audience claim. Such values are rejected by the token
+            # endpoint and the receiving service; there is nothing to compare
+            # here.
+            return
+        except exceptions.InvalidValue as caught_exc:
+            raise exceptions.RefreshError(
+                "The ID token returned is not valid for the requested "
+                "audience {}.".format(self._target_audience)
+            ) from caught_exc
+
+    def _set_id_token(self, id_token, expiry):
+        """Validates an ID token before publishing it on this credential.
+
+        Args:
+            id_token (str): The encoded ID token.
+            expiry (datetime.datetime): The token expiration.
+
+        Raises:
+            google.auth.exceptions.RefreshError: If the token is not valid for
+                the configured audience.
+        """
+        self._verify_id_token_audience(id_token)
+        self.token = id_token
+        self.expiry = expiry
+
+    def apply(self, headers, token=None):
+        """Applies the ID token to the request headers.
+
+        The audience claim is verified again immediately before the token is
+        attached, so a token that was swapped on the credential after refresh
+        is still rejected. A failed verification leaves the request headers
+        untouched.
+        """
+        id_token = token if token is not None else self.token
+        if id_token is not None:
+            self._verify_id_token_audience(id_token)
+        super(IDTokenCredentials, self).apply(headers, token)
+
     def _make_authorization_grant_assertion(self):
         """Create the OAuth 2.0 assertion.
 
@@ -839,7 +896,7 @@ class IDTokenCredentials(
         )
         jwt_credentials.refresh(request)
 
-        self.token, self.expiry = _client.call_iam_generate_id_token_endpoint(
+        token, expiry = _client.call_iam_generate_id_token_endpoint(
             request,
             self._iam_id_token_endpoint,
             self.signer_email,
@@ -847,6 +904,10 @@ class IDTokenCredentials(
             jwt_credentials.token.decode(),
             self._universe_domain,
         )
+
+        # Validate the audience before the token replaces any previously
+        # published token, so a bad response cannot poison this credential.
+        self._set_id_token(token, expiry)
 
     @_helpers.copy_docstring(credentials.Credentials)
     def refresh(self, request):
@@ -857,8 +918,7 @@ class IDTokenCredentials(
             access_token, expiry, _ = _client.id_token_jwt_grant(
                 request, self._token_uri, assertion
             )
-            self.token = access_token
-            self.expiry = expiry
+            self._set_id_token(access_token, expiry)
 
     @property
     def service_account_email(self):
