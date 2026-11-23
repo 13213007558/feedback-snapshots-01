@@ -61,6 +61,69 @@ def _get_fields(attrs) -> list[tuple[str, Field]]:
     return ret
 
 
+class _ObjectPairs(list):
+    """Marker for JSON objects decoded with ``object_pairs_hook``.
+
+    Keeps object members as ``(key, value)`` pairs so that duplicate members
+    can be detected before the object is collapsed into a ``dict``.
+    """
+
+
+def _format_member_path(path: tuple[str | int, ...]) -> str:
+    parts: list[str] = []
+    for item in path:
+        if isinstance(item, int):
+            parts.append(f"[{item}]")
+        else:
+            parts.append(("." if parts else "") + str(item))
+    return "".join(parts)
+
+
+def _resolve_object_pairs(node, path: tuple[str | int, ...] = ()):
+    """Collapse `_ObjectPairs` markers into dicts, rejecting duplicate members.
+
+    A plain ``dict`` in the decoded data means the render module silently
+    ignored ``object_pairs_hook`` and may already have discarded duplicate
+    members, so strict decoding cannot be honored.
+    """
+    if isinstance(node, _ObjectPairs):
+        seen: set[str] = set()
+        result = {}
+        for key, value in node:
+            if key in seen:
+                raise ValidationError(
+                    "Duplicate object member at path "
+                    + _format_member_path((*path, key))
+                )
+            seen.add(key)
+            result[key] = _resolve_object_pairs(value, (*path, key))
+        return result
+    if isinstance(node, dict):
+        raise ValueError(
+            "Strict decoding requires the configured render_module to apply "
+            "the 'object_pairs_hook' keyword argument."
+        )
+    if isinstance(node, list):
+        return [
+            _resolve_object_pairs(item, (*path, index))
+            for index, item in enumerate(node)
+        ]
+    return node
+
+
+def _supports_object_pairs_hook(loads_func) -> bool:
+    try:
+        parameters = inspect.signature(loads_func).parameters.values()
+    except (TypeError, ValueError):
+        # Signature unavailable; the leftover-dict check in
+        # _resolve_object_pairs still detects modules that ignore the hook.
+        return True
+    return any(
+        param.kind is inspect.Parameter.VAR_KEYWORD or param.name == "object_pairs_hook"
+        for param in parameters
+    )
+
+
 # This function allows Schemas to inherit from non-Schema classes and ensures
 #   inheritance according to the MRO
 def _get_fields_by_mro(klass: SchemaMeta):
@@ -743,6 +806,7 @@ class Schema(metaclass=SchemaMeta):
         many: bool | None = None,
         partial: bool | types.StrSequenceOrSet | None = None,
         unknown: types.UnknownOption | None = None,
+        strict: bool = False,
         **kwargs,
     ):
         """Same as :meth:`load`, except it uses `marshmallow.Schema.Meta.render_module` to deserialize
@@ -758,6 +822,12 @@ class Schema(metaclass=SchemaMeta):
         :param unknown: Whether to exclude, include, or raise an error for unknown
             fields in the data. Use `EXCLUDE`, `INCLUDE` or `RAISE`.
             If `None`, the value for `self.unknown` is used.
+        :param strict: If `True`, reject input containing duplicate object
+            members. The duplicate is reported with its structural position
+            (e.g. ``items[0].name``) before any preprocessing or validation
+            runs. This requires the configured ``render_module`` to support
+            the ``object_pairs_hook`` keyword argument (the standard library
+            `json` module does); a `ValueError` is raised if it does not.
         :return: Deserialized data
 
         .. versionchanged:: 3.0.0b7
@@ -766,9 +836,32 @@ class Schema(metaclass=SchemaMeta):
             if invalid data are passed.
         .. versionchanged:: 4.0.0
             Rename ``json_module`` parameter to ``s``.
+        .. versionchanged:: 4.5.0
+            Add ``strict`` parameter.
         """
-        data = self.opts.render_module.loads(s, **kwargs)
+        if strict:
+            if "object_pairs_hook" in kwargs:
+                raise ValueError(
+                    "'object_pairs_hook' may not be passed when strict decoding "
+                    "is enabled."
+                )
+            data = self._loads_preserving_pairs(s, **kwargs)
+        else:
+            data = self.opts.render_module.loads(s, **kwargs)
         return self.load(data, many=many, partial=partial, unknown=unknown)
+
+    def _loads_preserving_pairs(self, s: str | bytes | bytearray, **kwargs):
+        """Deserialize `s`, keeping object members as pairs so duplicates can
+        be detected and reported with their structural position.
+        """
+        render_loads = self.opts.render_module.loads
+        if not _supports_object_pairs_hook(render_loads):
+            raise ValueError(
+                "Strict decoding requires the configured render_module to "
+                "support the 'object_pairs_hook' keyword argument."
+            )
+        data = render_loads(s, object_pairs_hook=_ObjectPairs, **kwargs)
+        return _resolve_object_pairs(data)
 
     def _run_validator(
         self,

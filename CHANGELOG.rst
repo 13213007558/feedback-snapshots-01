@@ -1,6 +1,17 @@
 Changelog
 =========
 
+4.5.0 (unreleased)
+------------------
+
+Features:
+
+- Add ``strict`` parameter to `Schema.loads <marshmallow.Schema.loads>` to
+  reject input with duplicate object members. Duplicates are reported with
+  their structural position (e.g. ``items[0].name``) before any preprocessing
+  or validation runs. Requires the configured ``render_module`` to support
+  the ``object_pairs_hook`` keyword argument.
+
 4.4.0 (2026-11-03)
 ------------------
 
