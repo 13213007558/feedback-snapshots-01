@@ -15,16 +15,21 @@ from databases.interfaces import (
     Record as RecordInterface,
     TransactionBackend,
 )
+from databases.tls import PostgresTLSPolicy, resolve_postgres_tls
 
 logger = logging.getLogger("databases")
 
 
 class PostgresBackend(DatabaseBackend):
     def __init__(
-        self, database_url: typing.Union[DatabaseURL, str], **options: typing.Any
+        self,
+        database_url: typing.Union[DatabaseURL, str],
+        tls_policy: typing.Optional[PostgresTLSPolicy] = None,
+        **options: typing.Any,
     ) -> None:
         self._database_url = DatabaseURL(database_url)
         self._options = options
+        self._tls_policy = tls_policy
         self._dialect = self._get_dialect()
         self._pool = None
 
@@ -53,11 +58,16 @@ class PostgresBackend(DatabaseBackend):
             kwargs["min_size"] = int(min_size)
         if max_size is not None:
             kwargs["max_size"] = int(max_size)
-        if ssl is not None:
+        if ssl is not None and self._tls_policy is None:
             ssl = ssl.lower()
             kwargs["ssl"] = {"true": True, "false": False}.get(ssl, ssl)
 
         kwargs.update(self._options)
+
+        if self._tls_policy is not None:
+            kwargs["ssl"] = resolve_postgres_tls(
+                self._tls_policy, self._database_url, self._options
+            )
 
         return kwargs
 

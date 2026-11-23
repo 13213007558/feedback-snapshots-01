@@ -13,6 +13,7 @@ from sqlalchemy.sql import ClauseElement
 
 from databases.importer import import_from_string
 from databases.interfaces import DatabaseBackend, Record, TransactionBackend
+from databases.tls import PostgresTLSPolicy, TLSPolicyError
 
 try:  # pragma: no cover
     import click
@@ -46,6 +47,7 @@ class Database:
         "postgresql": "databases.backends.postgres:PostgresBackend",
         "postgresql+aiopg": "databases.backends.aiopg:AiopgBackend",
         "postgres": "databases.backends.postgres:PostgresBackend",
+        "postgres+aiopg": "databases.backends.aiopg:AiopgBackend",
         "mysql": "databases.backends.mysql:MySQLBackend",
         "mysql+asyncmy": "databases.backends.asyncmy:AsyncMyBackend",
         "sqlite": "databases.backends.sqlite:SQLiteBackend",
@@ -58,6 +60,7 @@ class Database:
         url: typing.Union[str, "DatabaseURL"],
         *,
         force_rollback: bool = False,
+        tls_policy: typing.Optional["PostgresTLSPolicy"] = None,
         **options: typing.Any,
     ):
         self.url = DatabaseURL(url)
@@ -66,6 +69,11 @@ class Database:
         self._connection_map = weakref.WeakKeyDictionary()
 
         self._force_rollback = force_rollback
+        self._tls_policy = tls_policy
+
+        if tls_policy is not None:
+            self._confirm_tls_policy_backend()
+            self.options["tls_policy"] = tls_policy
 
         backend_str = self._get_backend()
         backend_cls = import_from_string(backend_str)
@@ -240,6 +248,18 @@ class Database:
         return self.SUPPORTED_BACKENDS.get(
             self.url.scheme, self.SUPPORTED_BACKENDS[self.url.dialect]
         )
+
+    def _confirm_tls_policy_backend(self) -> None:
+        if self.url.dialect not in ("postgres", "postgresql"):
+            raise TLSPolicyError(
+                "TLS policies are only supported for PostgreSQL connections; "
+                f"the connection URL uses scheme {self.url.scheme!r}."
+            )
+        if self.url.scheme not in self.SUPPORTED_BACKENDS:
+            raise TLSPolicyError(
+                "TLS policy cannot confirm the driver selected by the "
+                f"connection URL scheme {self.url.scheme!r}."
+            )
 
 
 class Connection:

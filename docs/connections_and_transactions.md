@@ -59,6 +59,29 @@ Available keyword arguments may differ between database backends.
 database = Database('postgresql+asyncpg://localhost/example', ssl=True, min_size=5, max_size=20)
 ```
 
+### PostgreSQL TLS policies
+
+For PostgreSQL connections you can optionally approve a single host and a
+single CA up front. Every connection created by the pool then verifies the
+certificate chain against the approved CA and matches the certificate
+against the approved hostname. This works with the default `asyncpg` driver
+(`postgres://` or `postgresql://`) and with an explicitly selected `aiopg`
+driver (`postgresql+aiopg://` or `postgres+aiopg://`).
+
+```python
+from databases import Database, PostgresTLSPolicy
+
+policy = PostgresTLSPolicy(hostname='db.internal.example', ca='/path/to/ca.pem')
+database = Database('postgresql://db.internal.example/example', tls_policy=policy, min_size=5)
+```
+
+Regular pool options such as `min_size`/`max_size` may be combined with a
+policy. Conflicting settings (for example `ssl=false` in the URL or keyword
+arguments), repeated transport options in the connection URL, an
+unconfirmable driver, or a target host that does not match the approved
+host raise `databases.TLSPolicyError` before any connection pool is
+created, identifying the source of the problem.
+
 ## Transactions
 
 Transactions are managed by async context blocks.
