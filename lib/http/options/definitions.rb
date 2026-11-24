@@ -126,6 +126,22 @@ module HTTP
       validate_base_uri_and_persistent!
     end
 
+    def_option :ssl_allowed_origins, reader_only: true
+
+    # Sets the origins allowed to receive the client certificate
+    #
+    # @param [Array<String, HTTP::URI>, String, HTTP::URI, nil] value
+    # @api private
+    # @return [Array<String>]
+    def ssl_allowed_origins=(value)
+      @ssl_allowed_origins =
+        if value.nil? || (value.respond_to?(:empty?) && value.empty?)
+          []
+        else
+          ClientTLS::Permission.new(value).allowed_origins
+        end
+    end
+
     # Checks whether persistent connection is enabled
     #
     # @example

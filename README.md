@@ -147,6 +147,34 @@ HTTP.base_uri("https://api.example.com/v1").persistent do |http|
 end
 ```
 
+### Client Certificates (mTLS)
+
+Client certificate material is sensitive: it authenticates the caller, so it
+must only be presented to services approved by your deployment convention.
+Pass `ssl_allowed_origins` to bind the certificate to the origins allowed to
+receive it. Origins are compared by scheme, host and port, and requests to any
+other HTTPS origin raise `HTTP::ClientCertificateError` before any connection
+is opened. Connection reuse and reconnects within an approved origin are
+unaffected.
+
+```ruby
+http = HTTP.ssl_allowed_origins(
+  "https://billing.internal", "https://vault.internal:8443"
+)
+
+http.get(
+  "https://billing.internal/v1/charges",
+  ssl: {
+    cert:    File.read("client.crt"),
+    key:     File.read("client.key"),
+    ca_file: "/etc/internal/ca.pem"
+  }
+)
+
+# Raises HTTP::ClientCertificateError before connecting:
+http.get("https://elsewhere.example.com/")
+```
+
 ### Thread Safety
 
 Configured sessions are safe to share across threads:

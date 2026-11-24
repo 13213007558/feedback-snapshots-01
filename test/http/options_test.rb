@@ -49,7 +49,7 @@ class HTTPOptionsTest < Minitest::Test
       headers encoding features proxy params form json body response
       socket_class nodelay ssl_socket_class ssl_context ssl
       keep_alive_timeout timeout_class timeout_options
-      follow retriable base_uri persistent
+      follow retriable base_uri persistent ssl_allowed_origins
     ]
 
     expected.each do |name|
@@ -194,6 +194,30 @@ class HTTPOptionsTest < Minitest::Test
     opts = HTTP::Options.new
 
     assert_nil opts.ssl_context
+  end
+
+  def test_initialize_defaults_ssl_allowed_origins_to_empty
+    opts = HTTP::Options.new
+
+    assert_equal [], opts.ssl_allowed_origins
+  end
+
+  def test_initialize_normalizes_ssl_allowed_origins
+    opts = HTTP::Options.new(
+      ssl_allowed_origins: ["https://billing.internal/v1", "https://vault.internal:8443"]
+    )
+
+    assert_equal ["https://billing.internal", "https://vault.internal:8443"],
+                 opts.ssl_allowed_origins
+  end
+
+  def test_with_ssl_allowed_origins_returns_new_options
+    opts = HTTP::Options.new
+    result = opts.with_ssl_allowed_origins(["https://billing.internal"])
+
+    refute_same opts, result
+    assert_equal [], opts.ssl_allowed_origins
+    assert_equal ["https://billing.internal"], result.ssl_allowed_origins
   end
 
   # #to_hash

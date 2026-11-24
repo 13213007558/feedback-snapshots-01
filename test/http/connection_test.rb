@@ -1237,6 +1237,53 @@ class HTTPConnectionTest < Minitest::Test
     refute start_tls_called
   end
 
+  def test_start_tls_passes_trust_material_for_an_allowed_origin
+    https_req = build_req(uri: "https://billing.internal/v1/charges")
+    ssl_ctx = OpenSSL::SSL::SSLContext.new
+
+    start_tls_args = nil
+    tls_socket = fake(
+      connect:   nil,
+      close:     nil,
+      start_tls: ->(*args) { start_tls_args = args }
+    )
+    tls_timeout_class = fake(new: tls_socket)
+    tls_opts = HTTP::Options.new(
+      timeout_class: tls_timeout_class,
+      ssl_context: ssl_ctx,
+      ssl_allowed_origins: ["https://billing.internal"]
+    )
+
+    HTTP::Connection.new(https_req, tls_opts)
+
+    assert_equal "billing.internal", start_tls_args[0]
+    assert_same ssl_ctx, start_tls_args[2]
+  end
+
+  def test_start_tls_rejects_a_disallowed_origin_before_the_handshake
+    rejected_req = build_req(uri: "https://evil.example.com/collect")
+    start_tls_called = false
+    tls_socket = fake(
+      connect:   nil,
+      close:     nil,
+      start_tls: ->(*) { start_tls_called = true }
+    )
+    tls_timeout_class = fake(new: tls_socket)
+    tls_opts = HTTP::Options.new(
+      timeout_class: tls_timeout_class,
+      ssl: { cert: OpenSSL::X509::Certificate.new },
+      ssl_allowed_origins: ["https://billing.internal"]
+    )
+
+    error = assert_raises(HTTP::ClientCertificateError) do
+      HTTP::Connection.new(rejected_req, tls_opts)
+    end
+
+    refute start_tls_called, "TLS handshake material must never reach a rejected address"
+    assert_includes error.message, "https://evil.example.com"
+    assert_includes error.message, "https://billing.internal"
+  end
+
   def test_start_tls_skips_tls_when_proxy_connect_failed
     proxy_req = build_req(
       uri:   "https://example.com/",

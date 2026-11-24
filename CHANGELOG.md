@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `HTTP.ssl_allowed_origins` (and the matching `ssl_allowed_origins` option)
+  binds configured client certificate (mTLS) handshake material to an
+  allowlist of origins. Requests to any other HTTPS origin raise
+  `HTTP::ClientCertificateError` before a connection is opened, while reuse
+  and reconnects within an approved origin keep working.
 - `HTTP.nodelay` (and `HTTP::Session#nodelay`) now accepts an optional boolean,
   so `HTTP.nodelay(false)` disables `TCP_NODELAY` for a session. ([#863])
 

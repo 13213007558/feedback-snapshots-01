@@ -323,6 +323,38 @@ module HTTP
       branch default_options.with_nodelay(enabled)
     end
 
+    # Restrict the configured client certificate to specific origins
+    #
+    # When client certificate (mTLS) material is configured via `ssl` or
+    # `ssl_context`, it must only be presented to services explicitly
+    # approved by deployment convention. Passing one or more origins
+    # allowlists them; a request to any other HTTPS origin raises
+    # {HTTP::ClientCertificateError} before a connection is opened.
+    #
+    # Origins are compared by scheme, host and port, so different ports or
+    # schemes count as separate addresses. Reuse within the same approved
+    # configuration (including persistent connections and reconnects) is
+    # unaffected.
+    #
+    # @example
+    #   HTTP.ssl_allowed_origins("https://billing.internal")
+    #     .get("https://billing.internal/v1", ssl: { cert: client_cert, key: client_key })
+    #
+    # @example Several approved services
+    #   HTTP.ssl_allowed_origins(
+    #     "https://billing.internal", "https://vault.internal:8443"
+    #   )
+    #
+    # @param origins [Array<String, HTTP::URI>] origins allowed to receive
+    #   the client certificate
+    # @return [HTTP::Session]
+    # @raise [HTTP::ClientCertificateError] when a later request targets an
+    #   origin outside the allowlist
+    # @api public
+    def ssl_allowed_origins(*origins)
+      branch default_options.with_ssl_allowed_origins(origins.flatten)
+    end
+
     # Enable one or more features
     #
     # @example

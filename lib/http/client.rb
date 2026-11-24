@@ -178,11 +178,24 @@ module HTTP
     # @api private
     def perform_exchange(req, options)
       around_request(req, options) do |request|
+        verify_client_certificate_allowed!(request.uri, options)
         verify_connection!(request.uri)
         @state = :dirty
         send_request(request, options)
         build_wrapped_response(request, options)
       end
+    end
+
+    # Reject requests that would present the client certificate to an
+    # origin outside the configured allowlist, before any socket is opened
+    # @return [void]
+    # @raise [ClientCertificateError] when the origin is not allowlisted
+    # @api private
+    def verify_client_certificate_allowed!(uri, options)
+      origins = options.ssl_allowed_origins
+      return unless uri.https? && !origins.empty?
+
+      ClientTLS::Permission.new(origins).verify!(uri)
     end
 
     # Compose around_request chains from all features

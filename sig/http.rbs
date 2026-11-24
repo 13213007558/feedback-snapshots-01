@@ -113,6 +113,7 @@ module HTTP
     def default_options: () -> Options
     def default_options=: (Hash[Symbol, untyped] | Options opts) -> Options
     def nodelay: (?bool enabled) -> Session
+    def ssl_allowed_origins: (*(String | URI) origins) -> Session
     def use: (*(Symbol | Hash[Symbol, Hash[Symbol, untyped]]) features) -> Session
     def retriable: (?tries: Integer?, ?delay: (Numeric | ^(Integer) -> Numeric)?, ?exceptions: Array[singleton(Exception)]?, ?retry_statuses: untyped, ?on_retry: (^(Request, Exception?, Response?) -> void)?, ?max_delay: Numeric?, ?should_retry: (^(Request, Exception?, Response?, Integer) -> bool)?) -> Session
 
@@ -174,6 +175,7 @@ module HTTP
     def build_wrapped_response: (Request req, Options options) -> Response
     def send_request: (Request req, Options options) -> void
     def verify_connection!: (URI uri) -> void
+    def verify_client_certificate_allowed!: (URI uri, Options options) -> void
   end
 
   class Session
@@ -647,7 +649,8 @@ module HTTP
       ?retriable: bool | Hash[Symbol, untyped],
       ?base_uri: String | URI?,
       ?persistent: String?,
-      ?ssl_context: OpenSSL::SSL::SSLContext?
+      ?ssl_context: OpenSSL::SSL::SSLContext?,
+      ?ssl_allowed_origins: Array[String | URI] | String | URI
     ) -> void
     def features=: (Hash[Symbol, untyped] features) -> Hash[Symbol, Feature]
 
@@ -659,6 +662,7 @@ module HTTP
     def base_uri?: () -> bool
     def persistent=: (String? value) -> String?
     def persistent?: () -> bool
+    def ssl_allowed_origins=: (Array[String | URI] | String | URI | nil value) -> Array[String]
     def merge: (Hash[Symbol, untyped] | Options other) -> Options
     def to_hash: () -> Hash[Symbol, untyped]
     def dup: () ?{ (Options) -> void } -> Options
@@ -685,6 +689,7 @@ module HTTP
     attr_reader retriable: Hash[Symbol, untyped]?
     attr_reader base_uri: URI?
     attr_reader persistent: String?
+    attr_reader ssl_allowed_origins: Array[String]
 
     def with_headers: (Hash[String | Symbol, untyped] | Headers value) -> Options
     def with_encoding: (String | Encoding value) -> Options
@@ -704,6 +709,7 @@ module HTTP
     def with_ssl_socket_class: (Class value) -> Options
     def with_ssl_context: (OpenSSL::SSL::SSLContext? value) -> Options
     def with_ssl: (Hash[Symbol, untyped] value) -> Options
+    def with_ssl_allowed_origins: (Array[String | URI] | String | URI value) -> Options
     def with_keep_alive_timeout: (Integer value) -> Options
     def with_timeout_class: (Class value) -> Options
     def with_timeout_options: (Hash[Symbol, Numeric] value) -> Options
@@ -1488,6 +1494,18 @@ module HTTP
   end
 
   class HeaderError < Error
+  end
+
+  class ClientCertificateError < Error
+  end
+
+  module ClientTLS
+    class Permission
+      attr_reader allowed_origins: Array[String]
+      def initialize: (Array[String | URI] | String | URI origins) -> void
+      def allowed?: (URI uri) -> bool
+      def verify!: (URI uri) -> void
+    end
   end
 
   class OutOfRetriesError < Error

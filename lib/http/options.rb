@@ -4,6 +4,7 @@ require "http/headers"
 require "openssl"
 require "socket"
 require "http/uri"
+require "http/client_tls/permission"
 
 module HTTP
   # Configuration options for HTTP requests and clients
@@ -152,7 +153,8 @@ module HTTP
       retriable: nil,
       base_uri: nil,
       persistent: nil,
-      ssl_context: nil
+      ssl_context: nil,
+      ssl_allowed_origins: []
     )
       assign_options(binding)
     end

@@ -69,6 +69,7 @@ class HTTPOptionsMergeTest < Minitest::Test
         nodelay:            true,
         ssl_socket_class:   HTTP::Options.default_ssl_socket_class,
         ssl_context:        nil,
+        ssl_allowed_origins: [],
         encoding:           nil,
         features:           {}
       },

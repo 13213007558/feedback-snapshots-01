@@ -37,9 +37,13 @@ module HTTP
       # Sets up SSL context and starts TLS if needed
       # @param (see Connection#initialize)
       # @return [void]
+      # @raise [ClientCertificateError] when the target origin is not
+      #   allowed to receive the configured client certificate
       # @api private
       def start_tls(req, options)
         return unless req.uri.https? && !failed_proxy_connect?
+
+        verify_client_certificate_allowed!(req, options)
 
         ssl_context = options.ssl_context
 
@@ -49,6 +53,17 @@ module HTTP
         end
 
         @socket.start_tls(req.uri.host, options.ssl_socket_class, ssl_context)
+      end
+
+      # Enforces the client certificate origin allowlist at handshake time
+      # @return [void]
+      # @raise [ClientCertificateError] when the origin is not allowlisted
+      # @api private
+      def verify_client_certificate_allowed!(req, options)
+        origins = options.ssl_allowed_origins
+        return unless req.uri.https? && !origins.empty?
+
+        ClientTLS::Permission.new(origins).verify!(req.uri)
       end
 
       # Open tunnel through proxy

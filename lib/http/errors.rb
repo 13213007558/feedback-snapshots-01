@@ -64,4 +64,8 @@ module HTTP
 
   # Header value is of unexpected format (similar to Net::HTTPHeaderSyntaxError)
   class HeaderError < Error; end
+
+  # Client certificate would be presented to an address that is not on the
+  # configured allowlist of origins permitted to receive it
+  class ClientCertificateError < Error; end
 end
