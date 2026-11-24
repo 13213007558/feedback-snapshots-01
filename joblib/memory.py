@@ -11,6 +11,7 @@ is called with the same input arguments.
 import asyncio
 import datetime
 import functools
+import hmac
 import inspect
 import logging
 import os
@@ -20,6 +21,7 @@ import textwrap
 import time
 import tokenize
 import traceback
+import uuid
 import warnings
 import weakref
 
@@ -160,6 +162,28 @@ def _build_func_identifier(func):
 _FUNCTION_HASHES = weakref.WeakKeyDictionary()
 
 
+class RestrictedHandleError(Exception):
+    """Base class for failures while resolving a restricted handle.
+
+    A restricted :class:`MemorizedResult` only resolves to the exact
+    artifact that was approved when the handle was created. Reading the
+    handle raises a subclass of this exception instead of silently
+    returning a different value whenever this guarantee cannot be met.
+    """
+
+
+class ApprovalRevokedError(RestrictedHandleError):
+    """Raised when the approval backing a restricted handle was revoked."""
+
+
+class StaleResultError(RestrictedHandleError):
+    """Raised when a restricted handle no longer matches its cached artifact.
+
+    This happens when the approved artifact was cleared and rebuilt (for
+    instance after a cache cleanup), or when the artifact itself is missing.
+    """
+
+
 ###############################################################################
 # class `MemorizedResult`
 ###############################################################################
@@ -261,6 +285,119 @@ class MemorizedResult(Logger):
 
     def __getstate__(self):
         state = self.__dict__.copy()
+        state["timestamp"] = None
+        return state
+
+
+class RestrictedMemorizedResult(MemorizedResult):
+    """A handle bound to one approved artifact.
+
+    Unlike a plain :class:`MemorizedResult`, a restricted handle does not
+    resolve to whatever currently sits under its logical cache key. It carries
+    an approval identifier and the identity (artifact id and content digest)
+    of the exact artifact that was approved when the handle was created.
+
+    On :meth:`get`, the handle verifies, against the store, that:
+
+    - the approval still exists and has not been revoked,
+    - the approval was issued for this exact call identifier,
+    - the artifact currently stored under that key still has the approved
+      artifact id (it was not cleared and rebuilt) and the approved content
+      digest (it was not modified in place).
+
+    Only then is the artifact loaded and returned. If the approval was
+    revoked, an :class:`ApprovalRevokedError` is raised. If the artifact was
+    rebuilt, modified in place, or is missing, a :class:`StaleResultError`
+    is raised instead. Both checks happen before any artifact is loaded, so a
+    rebuilt artifact can never be returned through a stale handle.
+    """
+
+    def __init__(
+        self,
+        location,
+        call_id,
+        approval_id,
+        approved_artifact_id,
+        approved_digest,
+        backend="local",
+        mmap_mode=None,
+        verbose=0,
+        timestamp=None,
+        metadata=None,
+    ):
+        super().__init__(
+            location,
+            call_id,
+            backend=backend,
+            mmap_mode=mmap_mode,
+            verbose=verbose,
+            timestamp=timestamp,
+            metadata=metadata,
+        )
+        self.approval_id = approval_id
+        self.approved_artifact_id = approved_artifact_id
+        self.approved_digest = approved_digest
+
+    def _verify_approval(self):
+        record = self.store_backend.get_approval(self.approval_id)
+        if record is None:
+            raise StaleResultError(
+                "Approval {!r} for {} is no longer registered. The approved "
+                "artifact cannot be verified.".format(self.approval_id, self._call_id)
+            )
+        if record.get("revoked"):
+            raise ApprovalRevokedError(
+                "Approval {!r} for {} has been revoked.".format(
+                    self.approval_id, self._call_id
+                )
+            )
+        if tuple(record.get("call_id", [])) != tuple(self._call_id):
+            raise StaleResultError(
+                "Approval {!r} is bound to a different call than {}.".format(
+                    self.approval_id, self._call_id
+                )
+            )
+        try:
+            current_artifact_id, current_digest = (
+                self.store_backend.get_item_identity(self._call_id)
+            )
+        except KeyError:
+            raise StaleResultError(
+                "The approved artifact for {} is missing (it may have been "
+                "cleared).".format(self._call_id)
+            )
+        if not hmac.compare_digest(
+            current_artifact_id, self.approved_artifact_id
+        ) or not hmac.compare_digest(current_digest, self.approved_digest):
+            raise StaleResultError(
+                "The artifact stored under {} no longer matches the artifact "
+                "approved by {!r} (it was rebuilt or modified), so the stale "
+                "handle cannot resolve to it.".format(
+                    self._call_id, self.approval_id
+                )
+            )
+
+    def get(self):
+        """Return the approved artifact after verifying the handle."""
+        self._verify_approval()
+        return super().get()
+
+    def revoke(self):
+        """Revoke the approval backing this handle."""
+        self.store_backend.revoke_approval(self.approval_id)
+
+    def __repr__(self):
+        return (
+            "{}(location={!r}, call_id={!r}, approval_id={!r})".format(
+                self.__class__.__name__,
+                self.store_backend.location,
+                self._call_id,
+                self.approval_id,
+            )
+        )
+
+    def __getstate__(self):
+        state = super().__getstate__()
         state["timestamp"] = None
         return state
 
@@ -405,6 +542,12 @@ class MemorizedFunc(Logger):
         the callback is called with the cache entry's metadata as its sole
         argument. If it returns True, the cached result is returned, else the
         cache for these arguments is cleared and the result is recomputed.
+
+    restricted: bool, optional
+        If True, ``call_and_shelve`` returns a :class:`RestrictedMemorizedResult`
+        bound to the exact artifact approved at creation time, instead of a
+        plain :class:`MemorizedResult`. Defaults to False, which preserves the
+        existing caching behavior.
     """
 
     # ------------------------------------------------------------------------
@@ -422,6 +565,7 @@ class MemorizedFunc(Logger):
         verbose=1,
         timestamp=None,
         cache_validation_callback=None,
+        restricted=False,
     ):
         Logger.__init__(self)
         self.mmap_mode = mmap_mode
@@ -431,6 +575,7 @@ class MemorizedFunc(Logger):
         self.func_id = _build_func_identifier(func)
         self.ignore = ignore if ignore is not None else []
         self._verbose = verbose
+        self.restricted = restricted
 
         # retrieve store object from backend type and location.
         self.store_backend = _store_backend_factory(
@@ -902,9 +1047,32 @@ class MemorizedFunc(Logger):
         return metadata
 
     def _get_memorized_result(self, call_id, metadata=None):
-        return MemorizedResult(
+        if not self.restricted:
+            return MemorizedResult(
+                self.store_backend,
+                call_id,
+                metadata=metadata,
+                timestamp=self.timestamp,
+                verbose=self._verbose - 1,
+            )
+
+        # Bind the handle to the exact artifact currently on the store and
+        # register a matching approval. A later cleanup/rebuild under the same
+        # logical key produces a new artifact id, so the stale handle cannot
+        # resolve to the new artifact.
+        approved_artifact_id, approved_digest = (
+            self.store_backend.get_item_identity(call_id)
+        )
+        approval_id = uuid.uuid4().hex
+        self.store_backend.store_approval(
+            approval_id, call_id, approved_artifact_id, approved_digest
+        )
+        return RestrictedMemorizedResult(
             self.store_backend,
             call_id,
+            approval_id=approval_id,
+            approved_artifact_id=approved_artifact_id,
+            approved_digest=approved_digest,
             metadata=metadata,
             timestamp=self.timestamp,
             verbose=self._verbose - 1,
@@ -1004,6 +1172,14 @@ class Memory(Logger):
     backend_options: dict, optional
         Contains a dictionary of named parameters used to configure
         the store backend.
+
+    restricted: bool, optional
+        If True, handles returned by ``call_and_shelve`` are restricted to
+        the exact artifact that was approved when the handle was created.
+        Such a handle raises an :class:`ApprovalRevokedError` or
+        :class:`StaleResultError` instead of loading an artifact that was
+        rebuilt under the same cache key or whose approval was revoked.
+        Plain (non-restricted) caching is unaffected when this is False.
     """
 
     # ------------------------------------------------------------------------
@@ -1018,6 +1194,7 @@ class Memory(Logger):
         compress=False,
         verbose=1,
         backend_options=None,
+        restricted=False,
     ):
         Logger.__init__(self)
         self._verbose = verbose
@@ -1025,6 +1202,7 @@ class Memory(Logger):
         self.timestamp = time.time()
         self.backend = backend
         self.compress = compress
+        self.restricted = restricted
         if backend_options is None:
             backend_options = {}
         self.backend_options = backend_options
@@ -1052,6 +1230,7 @@ class Memory(Logger):
         verbose=None,
         mmap_mode=False,
         cache_validation_callback=None,
+        restricted=None,
     ):
         """Decorates the given function func to only compute its return
         value for input arguments not cached on disk.
@@ -1076,6 +1255,10 @@ class Memory(Logger):
             result as its sole argument. If it returns True, then the
             cached result is returned, else the cache for these arguments
             is cleared and recomputed.
+        restricted: bool, optional
+            If True, ``call_and_shelve`` returns restricted handles bound to
+            the approved artifact. Defaults to the ``restricted`` setting of
+            the :class:`Memory` object.
 
         Returns
         -------
@@ -1092,6 +1275,8 @@ class Memory(Logger):
                 "cache_validation_callback needs to be callable. "
                 f"Got {cache_validation_callback}."
             )
+        if restricted is None:
+            restricted = self.restricted
         if func is None:
             # Partial application, to be able to specify extra keyword
             # arguments in decorators
@@ -1101,6 +1286,7 @@ class Memory(Logger):
                 mmap_mode=mmap_mode,
                 verbose=verbose,
                 cache_validation_callback=cache_validation_callback,
+                restricted=restricted,
             )
         if self.store_backend is None:
             cls = (
@@ -1144,6 +1330,7 @@ class Memory(Logger):
             verbose=verbose,
             timestamp=self.timestamp,
             cache_validation_callback=cache_validation_callback,
+            restricted=restricted,
         )
 
     def clear(self, warn=True):

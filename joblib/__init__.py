@@ -117,7 +117,16 @@ from ._store_backends import StoreBackendBase
 from .compressor import register_compressor
 from .hashing import hash
 from .logger import Logger, PrintTime
-from .memory import MemorizedResult, Memory, expires_after, register_store_backend
+from .memory import (
+    ApprovalRevokedError,
+    MemorizedResult,
+    Memory,
+    RestrictedHandleError,
+    RestrictedMemorizedResult,
+    StaleResultError,
+    expires_after,
+    register_store_backend,
+)
 from .numpy_pickle import dump, load
 from .parallel import (
     Parallel,
@@ -133,6 +142,10 @@ __all__ = [
     # On-disk result caching
     "Memory",
     "MemorizedResult",
+    "RestrictedMemorizedResult",
+    "RestrictedHandleError",
+    "ApprovalRevokedError",
+    "StaleResultError",
     "expires_after",
     # Parallel code execution
     "Parallel",

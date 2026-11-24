@@ -2,6 +2,7 @@
 
 import collections
 import datetime
+import hashlib
 import json
 import operator
 import os
@@ -21,6 +22,10 @@ from .disk import memstr_to_bytes, mkdirp, rm_subdirs
 from .logger import format_time
 
 CacheItemInfo = collections.namedtuple("CacheItemInfo", "path size last_access")
+
+# Name of the directory, at the root of a store, holding the approval
+# records of restricted MemorizedResult handles.
+APPROVALS_DIRNAME = "joblib_approvals"
 
 
 class CacheWarning(Warning):
@@ -220,6 +225,21 @@ class StoreBackendMixin(object):
                         )
 
             self._concurrency_safe_write(item, filename, write_func)
+            # Every (re)write gets a fresh artifact identity. Restricted
+            # handles bind to it, so clearing and rebuilding an item under
+            # the same logical key invalidates handles approved against the
+            # previous artifact, even when the new bytes are identical.
+            artifact_id = uuid.uuid4().hex
+
+            def write_artifact_id(to_write, dest_filename):
+                with self._open_item(dest_filename, "wb") as f:
+                    f.write(to_write.encode("utf-8"))
+
+            self._concurrency_safe_write(
+                artifact_id,
+                os.path.join(item_path, "artifact_id"),
+                write_artifact_id,
+            )
         except Exception as e:  # noqa: E722
             warnings.warn(
                 "Unable to cache to disk. Possibly a race condition in the "
@@ -268,6 +288,111 @@ class StoreBackendMixin(object):
             self._concurrency_safe_write(metadata, filename, write_func)
         except:  # noqa: E722
             pass
+
+    def get_item_digest(self, call_id):
+        """Return a stable digest of the artifact backing a cached item.
+
+        The digest is computed over the exact bytes of the item's
+        ``output.pkl`` file, i.e. the same bytes that :meth:`load_item`
+        reads. It lets a restricted ``MemorizedResult`` check that the
+        artifact currently on the store still has the content that was
+        approved when the handle was issued.
+
+        Raises a ``KeyError`` if the item has been cleared and no artifact
+        is available.
+        """
+        full_path = os.path.join(self.location, *call_id)
+        filename = os.path.join(full_path, "output.pkl")
+        if not self._item_exists(filename):
+            raise KeyError(
+                "Non-existing item (may have been "
+                "cleared).\nFile %s does not exist" % filename
+            )
+        digest = hashlib.sha256()
+        with self._open_item(filename, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def get_item_identity(self, call_id):
+        """Return the ``(artifact_id, digest)`` identity of a cached item.
+
+        ``artifact_id`` is regenerated on every :meth:`dump_item`, and so
+        changes whenever the item is rebuilt under the same logical key.
+        ``digest`` covers the exact bytes of ``output.pkl`` and detects an
+        in-place modification of an existing artifact. Restricted handles
+        bind to both values.
+
+        Raises a ``KeyError`` if the item (or its identity record) is
+        missing, for instance after a cache cleanup.
+        """
+        full_path = os.path.join(self.location, *call_id)
+        identity_filename = os.path.join(full_path, "artifact_id")
+        if not self._item_exists(identity_filename):
+            raise KeyError(
+                "Non-existing item identity (may have been "
+                "cleared).\nFile %s does not exist" % identity_filename
+            )
+        with self._open_item(identity_filename, "rb") as f:
+            artifact_id = f.read().decode("utf-8")
+        return artifact_id, self.get_item_digest(call_id)
+
+    def _approval_path(self, approval_id):
+        return os.path.join(
+            self.location, APPROVALS_DIRNAME, "{}.json".format(approval_id)
+        )
+
+    def store_approval(self, approval_id, call_id, artifact_id, digest):
+        """Persist an approval binding a handle to an approved artifact.
+
+        The approval record is stored at the root of the store so that it
+        survives the clearing and recomputation of individual cache items,
+        and so that handles restored in another process can verify it.
+        """
+        record = {
+            "approval_id": approval_id,
+            "call_id": list(call_id),
+            "artifact_id": artifact_id,
+            "digest": digest,
+            "revoked": False,
+        }
+        approvals_dir = os.path.join(self.location, APPROVALS_DIRNAME)
+        if not self._item_exists(approvals_dir):
+            self.create_location(approvals_dir)
+
+        def write_func(to_write, dest_filename):
+            with self._open_item(dest_filename, "wb") as f:
+                f.write(json.dumps(to_write).encode("utf-8"))
+
+        self._concurrency_safe_write(
+            record, self._approval_path(approval_id), write_func
+        )
+
+    def get_approval(self, approval_id):
+        """Return the approval record, or None if it does not exist."""
+        filename = self._approval_path(approval_id)
+        if not self._item_exists(filename):
+            return None
+        try:
+            with self._open_item(filename, "rb") as f:
+                return json.loads(f.read().decode("utf-8"))
+        except:  # noqa: E722
+            return None
+
+    def revoke_approval(self, approval_id):
+        """Mark an approval as revoked, if it still exists."""
+        record = self.get_approval(approval_id)
+        if record is None:
+            return
+        record["revoked"] = True
+
+        def write_func(to_write, dest_filename):
+            with self._open_item(dest_filename, "wb") as f:
+                f.write(json.dumps(to_write).encode("utf-8"))
+
+        self._concurrency_safe_write(
+            record, self._approval_path(approval_id), write_func
+        )
 
     def contains_path(self, call_id):
         """Check cached function is available in store."""
@@ -497,6 +622,8 @@ def _split_decorator(cls):
         "clear_item",
         "contains_item",
         "get_item_info",
+        "get_item_digest",
+        "get_item_identity",
         "get_metadata",
         "store_metadata",
     ]:

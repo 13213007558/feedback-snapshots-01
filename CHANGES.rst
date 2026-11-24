@@ -8,6 +8,15 @@ In Development
    This version changes the way functions defined in jupyter notebook are hashed.
    This invalidates existing cache and will automatically clear them in these cases.
 
+- Add an opt-in restricted mode to ``Memory`` (``Memory(..., restricted=True)``
+  or ``memory.cache(..., restricted=True)``). Restricted ``call_and_shelve``
+  handles are bound to the exact approved artifact and its persisted approval.
+  A handle restored in another process raises ``ApprovalRevokedError`` when
+  its approval is revoked and ``StaleResultError`` when the artifact has been
+  cleared and rebuilt (even with identical bytes) or modified in place,
+  instead of silently loading the newer artifact. Plain caching is unchanged
+  when the mode is disabled.
+
 - Preserve the values and shared-memory writes of reversed memmap-backed
   array views passed to ``Parallel`` workers.
   https://github.com/joblib/joblib/pull/1872
