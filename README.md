@@ -2570,6 +2570,35 @@ class API < Grape::API
 end
 ```
 
+### Helper Call Permissions
+
+When several mounted APIs share helper names, an update can make the same helper name resolve to a different module implementation. Opt in to call permissions to approve the exact implementation owner allowed in each scope:
+
+```ruby
+policy = Grape::HelperCallPermission::Policy.new
+policy.allow(:charge!, scope: :billing, owner: Billing::RestrictedCharge)
+policy.allow(:charge!, scope: :storefront, owner: Storefront::PublicCharge)
+
+class BillingAPI < Grape::API
+  helpers CheckoutWorkflow, Billing::RestrictedCharge
+
+  enforce_helper_call_permissions(
+    policy: policy,
+    scope: :billing,
+    methods: :charge!,
+    recorder: AuditLog.method(:record)
+  )
+
+  post :charge do
+    checkout(params[:order_id]) # CheckoutWorkflow calls charge! indirectly
+  end
+end
+```
+
+Grape installs the check around the composed helper class for each endpoint. At call time it reads the next resolved method definition (`Method#super_method`), including its owner and source location, so a same-named plugin override is judged rather than the helper name or the module originally passed to `helpers`. Calls made from another ordinary helper pass through the same wrapper.
+
+An allowed call records and invokes the resolved implementation. An unapproved implementation records the owner, scope and source location and raises `Grape::HelperCallPermission::Denied`, which Grape answers with `403` and a reason naming the resolved implementation before that implementation can call its business object.
+
 ## Path Helpers
 
 If you need methods for generating paths inside your endpoints, please see the [grape-route-helpers](https://github.com/reprah/grape-route-helpers) gem.

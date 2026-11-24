@@ -3,6 +3,8 @@
 module Grape
   module DSL
     module Helpers
+      include Grape::HelperCallPermission::DSL
+
       # Add helper methods that will be accessible from any
       # endpoint within this namespace (and child namespaces).
       #
