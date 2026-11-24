@@ -1,5 +1,6 @@
 ## 3.7.1
 
+* Reuse a record or relation preloaded before `load_resource` only when it belongs to the parent selected by the route when `through` is used: a `before_action` that ran first could hand the action a record of another parent, or the whole preloaded relation. A record of another parent now raises `CanCan::AccessDenied` before the action runs, and a preloaded collection is narrowed to the parent association and to the records allowed by the current ability. Without `through`, an earlier query is still reused as before. ([@coorasse][])
 * [#939](https://github.com/CanCanCommunity/cancancan/issues/939): Do not match a record of another model with the same id in `can?` when the value of a condition is a relation, as `accessible_by` already did: with a polymorphic association, `can :read, Document, owner: Introduction.where(client: user)` allowed a document owned by a record of another model with the id of an allowed introduction. ([@manuelmeurer][])
 
 ## 3.7.0

@@ -124,6 +124,27 @@ If the project has no task, `@task` is `nil` and the action is authorized on `{ 
 before_action -> { raise ActiveRecord::RecordNotFound unless @task }, only: :show
 ```
 
+## Preloaded records
+
+A `before_action` declared before `load_resource` can load the record or the relation itself. With `through`, CanCanCan reuses a preloaded record only when it belongs to the parent selected by the current route. When it does not, it raises `CanCan::AccessDenied` before the action runs, instead of handing the action a record of another parent.
+
+```ruby
+class TasksController < ApplicationController
+  before_action :find_tasks
+  load_and_authorize_resource :project
+  load_and_authorize_resource :task, through: :project
+
+  private
+
+  def find_tasks
+    @task = Task.find(params[:id]) if params[:id]
+    @tasks = Task.where(id: params[:ids]) if params[:ids]
+  end
+end
+```
+
+A preloaded collection is narrowed to the association of the routed parent and then to the records the current ability allows, so the action never receives the wider relation. The same applies to a polymorphic `through` option: the parent that exists for this request decides the range. Without `through`, a preloaded record is still reused as is, so an earlier query that intentionally scopes the records keeps working.
+
 ## Polymorphic associations
 
 Let's say tasks can either be assigned to a Project or an Event through a polymorphic association. An array can be passed into the `:through` option and it will use the first one it finds.

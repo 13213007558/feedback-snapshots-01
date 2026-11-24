@@ -217,6 +217,8 @@ end
 The instance variable must be set to a record: if it is `nil`, CanCanCan loads the resource again. Use `find`, which raises `ActiveRecord::RecordNotFound`, instead of `find_by`.
 The instance variable is used only for member actions, so when the record is identified by another parameter than `:id`, set `id_param` as explained in [Custom find](#custom-find).
 
+When the resource is nested with `through`, a preloaded record is reused only if it belongs to the parent of the current route; otherwise the request is denied before the action runs. See [Preloaded records](./nested_resources.md#preloaded-records).
+
 ## check_authorization
 
 If you want to be certain authorization is not forgotten in some controller action, add `check_authorization` to your `ApplicationController`.

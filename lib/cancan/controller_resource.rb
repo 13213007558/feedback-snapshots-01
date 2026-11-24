@@ -35,16 +35,16 @@ module CanCan
       return if skip?(:load)
 
       if load_instance?
-        self.resource_instance ||= load_resource_instance
-      elsif load_collection?
-        self.collection_instance ||= load_collection
+        load_instance_resource
+      else
+        load_collection_resource
       end
     end
 
     def authorize_resource
       return if skip?(:authorize)
 
-      @controller.authorize!(authorization_action, resource_instance || resource_class_with_parent)
+      @controller.authorize!(authorization_action, authorization_resource)
     end
 
     def parent?
@@ -161,6 +161,171 @@ module CanCan
 
     def load_collection
       resource_base.accessible_by(current_ability, authorization_action)
+    end
+
+    def load_instance_resource
+      instance = resource_instance
+      if instance
+        verify_preloaded_instance!(instance)
+        self.resource_instance = instance
+      else
+        instance = load_resource_instance
+        remember_verified_instance(instance)
+        self.resource_instance = instance
+      end
+    end
+
+    def load_collection_resource
+      collection = collection_instance
+      if collection
+        self.collection_instance = scope_preloaded_collection(collection)
+      elsif load_collection?
+        self.collection_instance = load_collection
+      end
+    end
+
+    def authorization_resource
+      instance = resource_instance
+      verify_preloaded_instance!(instance) if instance
+      instance || resource_class_with_parent
+    end
+
+    # A record loaded by an earlier before action is reused only when it belongs to the parent selected by
+    # this request. Otherwise the action must not receive it, even though the record exists somewhere.
+    def verify_preloaded_instance!(instance)
+      return unless @options[:through]
+      return if verified_preloaded_instance.equal?(instance)
+
+      verified = parent_resource && preloaded_instance_in_parent_scope?(instance)
+      verified ||= parent_resource.nil? && @options[:shallow]
+
+      raise AccessDenied.new(nil, authorization_action, resource_class) unless verified
+
+      remember_verified_instance(instance)
+    end
+
+    def remember_verified_instance(instance)
+      @verified_preloaded_instance = instance unless instance.nil?
+    end
+
+    def verified_preloaded_instance
+      @verified_preloaded_instance if defined?(@verified_preloaded_instance)
+    end
+
+    def preloaded_instance_in_parent_scope?(instance)
+      association = parent_resource_association
+      return false unless association
+      return false unless instance_of_resource_class?(instance)
+
+      return true if same_record?(association, instance)
+      return true if association_contains_record?(association, instance)
+      return true if instance_foreign_key_matches_parent?(instance)
+
+      false
+    end
+
+    def association_contains_record?(association, instance)
+      target = association.target if association.respond_to?(:target)
+      return true if target.respond_to?(:any?) && target.any? { |record| same_record?(record, instance) }
+      return association_records_include?(association, instance) if collection_association?(association)
+
+      records = association.respond_to?(:to_a) ? association.to_a : Array(association)
+      records.any? { |record| same_record?(record, instance) }
+    end
+
+    # Only a collection association can be queried for one of its records. A has_one association returns
+    # the record itself, and querying its class would match a record of another parent with the same id.
+    def association_records_include?(association, instance)
+      return false if instance.id.nil?
+
+      association.where(primary_key_for(instance) => instance.id).exists?
+    end
+
+    def collection_association?(association)
+      reflection = association.reflection if association.respond_to?(:reflection)
+      reflection ||= association.proxy_association.reflection if association.respond_to?(:proxy_association)
+      reflection.respond_to?(:collection?) && reflection.collection?
+    rescue StandardError
+      false
+    end
+
+    def instance_of_resource_class?(instance)
+      resource_class.is_a?(Class) ? instance.is_a?(resource_class) : instance.class.name == resource_class.to_s.camelize
+    end
+
+    # A preloaded collection is narrowed to the parent selected by this request, then to the records the
+    # current ability allows. The action never receives the wider relation the earlier before action loaded.
+    def scope_preloaded_collection(collection)
+      return collection unless @options[:through]
+
+      return scope_collection_by_ability(collection) if parent_resource.nil? && @options[:shallow]
+
+      raise AccessDenied.new(nil, authorization_action, resource_class) unless parent_resource
+
+      association = parent_resource_association
+      collection = collection_in_parent_scope(collection, association) if association
+      scope_collection_by_ability(collection)
+    end
+
+    def scope_collection_by_ability(collection)
+      if load_collection? && collection.respond_to?(:accessible_by)
+        collection.accessible_by(current_ability, authorization_action)
+      elsif collection.respond_to?(:select)
+        collection.select { |record| current_ability.can?(authorization_action, record) }
+      else
+        collection
+      end
+    end
+
+    def collection_in_parent_scope(collection, association)
+      return [] unless association
+
+      if mergeable_relations?(collection, association)
+        collection.merge(association)
+      else
+        records = association.respond_to?(:to_a) ? association.to_a : Array(association)
+        collection.select { |record| records.any? { |parent_record| same_record?(parent_record, record) } }
+      end
+    end
+
+    def mergeable_relations?(collection, association)
+      return false unless collection.respond_to?(:merge) && association.respond_to?(:merge)
+      return false unless collection.respond_to?(:klass) && association.respond_to?(:klass)
+
+      collection.klass == association.klass
+    end
+
+    def parent_resource_association
+      association_name = @options[:through_association] || (@options[:singleton] ? name : name.to_s.pluralize)
+      parent_resource.send(association_name) if parent_resource.respond_to?(association_name)
+    end
+
+    # A newly built record can be assigned to the parent before it has an id, so its foreign key is checked.
+    def instance_foreign_key_matches_parent?(instance)
+      return false unless parent_resource.respond_to?(:id) && !parent_resource.id.nil?
+      return false unless instance.respond_to?(:class) && instance.class.respond_to?(:reflect_on_all_associations)
+
+      reflection = parent_belongs_to_association(instance)
+      reflection && instance.public_send(reflection.foreign_key) == parent_resource.id
+    end
+
+    def parent_belongs_to_association(instance)
+      instance.class.reflect_on_all_associations(:belongs_to).find do |candidate|
+        candidate.foreign_key && candidate.klass == parent_resource.class
+      end
+    rescue StandardError
+      nil
+    end
+
+    def same_record?(first, second)
+      return true if first.equal?(second)
+
+      first.respond_to?(:id) && second.respond_to?(:id) && !first.id.nil? && first.id == second.id &&
+        first.class == second.class
+    end
+
+    def primary_key_for(instance)
+      instance.class.respond_to?(:primary_key) ? instance.class.primary_key : :id
     end
 
     def load_resource_instance
