@@ -1143,6 +1143,31 @@ module Net   #:nodoc:
       #   http.write_timeout  # => 1
       #
       attr_accessor :default_configuration
+
+      # Optional process-wide NetworkPathPolicy used when an HTTP instance
+      # does not define its own #network_path_policy.
+      def network_path_policy=(policy)
+        @network_path_policy =
+          if policy.nil? || policy.is_a?(NetworkPathPolicy)
+            policy
+          elsif policy.is_a?(Hash)
+            NetworkPathPolicy.new(**policy.transform_keys(&:to_sym))
+          else
+            NetworkPathPolicy.new(approvals: policy)
+          end
+      end
+
+      def network_path_policy
+        @network_path_policy
+      end
+
+      def network_path_approval=(approval)
+        self.network_path_policy = approval
+      end
+
+      def network_path_approval
+        network_path_policy
+      end
     end
 
     # Creates a new \Net::HTTP object for the specified server address,
@@ -1191,6 +1216,12 @@ module Net   #:nodoc:
       @proxy_user     = nil
       @proxy_pass     = nil
       @proxy_use_ssl  = nil
+
+      self.network_path_policy =
+        options[:network_path_policy] || options[:network_path_approval]
+      @pending_network_path = nil
+      @connect_network_path = nil
+      @connected_network_path = nil
 
       @use_ssl = false
       @ssl_context = nil
@@ -1329,6 +1360,39 @@ module Net   #:nodoc:
     # Sets whether the proxy uses SSL;
     # see {Proxy Server}[rdoc-ref:Net::HTTP@Proxy+Server].
     attr_writer :proxy_use_ssl
+
+    # Policy that separately approves direct and proxied network paths.
+    def network_path_policy=(policy)
+      @network_path_policy = coerce_network_path_policy(policy)
+    end
+
+    def network_path_policy
+      @network_path_policy || self.class.network_path_policy
+    end
+
+    def network_path_approval=(approval)
+      self.network_path_policy = approval
+    end
+
+    def network_path_approval
+      network_path_policy
+    end
+
+    def coerce_network_path_policy(approval)
+      return if approval.nil?
+      return approval if approval.is_a?(NetworkPathPolicy)
+      if approval.is_a?(Hash)
+        return NetworkPathPolicy.new(**approval.transform_keys(&:to_sym))
+      end
+
+      NetworkPathPolicy.new(approvals: approval)
+    end
+    private :coerce_network_path_policy
+
+    # Returns the network path bound to the currently open connection, if any.
+    def connected_network_path
+      @connected_network_path if @socket && !@socket.closed?
+    end
 
     # Returns the IP address for the connection.
     #
@@ -1678,21 +1742,27 @@ module Net   #:nodoc:
 
     # :stopdoc:
     def do_start
+      @connect_network_path = @pending_network_path || resolve_network_path
+      @pending_network_path = nil
       connect
       @started = true
     end
     private :do_start
 
     def connect
+      network_path = @connect_network_path || resolve_network_path
+      @connect_network_path = nil
+      authorize_network_path!(network_path)
+
       if use_ssl?
         # reference early to load OpenSSL before connecting,
         # as OpenSSL may take time to load.
         @ssl_context = OpenSSL::SSL::SSLContext.new
       end
 
-      if proxy? then
-        conn_addr = proxy_address
-        conn_port = proxy_port
+      if network_path.proxy? then
+        conn_addr = network_path.proxy_address
+        conn_port = network_path.proxy_port
       else
         conn_addr = conn_address
         conn_port = port
@@ -1711,8 +1781,8 @@ module Net   #:nodoc:
       s.setsockopt(Socket::IPPROTO_TCP, Socket::TCP_NODELAY, 1)
       debug "opened"
       if use_ssl?
-        if proxy?
-          if @proxy_use_ssl
+        if network_path.proxy?
+          if network_path.proxy_use_ssl
             proxy_sock = OpenSSL::SSL::SSLSocket.new(s)
             ssl_socket_connect(proxy_sock, @open_timeout)
           else
@@ -1730,8 +1800,8 @@ module Net   #:nodoc:
           end
           buf = +"CONNECT #{conn_address}:#{@port} HTTP/#{HTTPVersion}\r\n" \
             "Host: #{@address}:#{@port}\r\n"
-          if proxy_user
-            credential = ["#{proxy_user}:#{proxy_pass}"].pack('m0')
+          if network_path.proxy_user
+            credential = ["#{network_path.proxy_user}:#{network_path.proxy_pass}"].pack('m0')
             buf << "Proxy-Authorization: Basic #{credential}\r\n"
           end
           buf << "\r\n"
@@ -1795,6 +1865,7 @@ module Net   #:nodoc:
                                write_timeout: @write_timeout,
                                continue_timeout: @continue_timeout,
                                debug_output: @debug_output)
+      @connected_network_path = network_path
       @last_communicated = nil
       on_connect
     rescue => exception
@@ -1835,6 +1906,7 @@ module Net   #:nodoc:
       @started = false
       @socket.close if @socket
       @socket = nil
+      @connected_network_path = nil
     end
     private :do_finish
 
@@ -1984,6 +2056,61 @@ module Net   #:nodoc:
       CGI.unescape(value)
     end
 
+    # Resolves the route to use for one request invocation. Proxy configuration
+    # is read now, but the returned path is retained for that request's retries.
+    def resolve_network_path
+      if (proxy = current_proxy_attributes)
+        NetworkPath.proxy(
+          target_address: address,
+          target_port: port,
+          use_ssl: use_ssl?,
+          **proxy
+        )
+      else
+        NetworkPath.direct(
+          target_address: address,
+          target_port: port,
+          use_ssl: use_ssl?
+        )
+      end
+    end
+
+    def authorize_network_path!(network_path)
+      policy = network_path_policy
+      return network_path unless policy
+
+      verdict = policy.authorize!(network_path)
+      raise MissingNetworkApproval.new(network_path) if verdict == false
+
+      network_path
+    end
+
+    def current_proxy_attributes
+      if @proxy_from_env
+        uri = URI::HTTP.new(
+          "http", nil, address, port, nil, nil, nil, nil, nil
+        ).find_proxy
+        @proxy_uri = uri || false
+        return nil unless uri
+
+        {
+          proxy_address: uri.hostname,
+          proxy_port: uri.port,
+          proxy_user: uri.user ? unescape(uri.user) : nil,
+          proxy_pass: uri.password ? unescape(uri.password) : nil,
+          proxy_use_ssl: @proxy_use_ssl
+        }
+      elsif @proxy_address
+        {
+          proxy_address: @proxy_address,
+          proxy_port: @proxy_port,
+          proxy_user: @proxy_user,
+          proxy_pass: @proxy_pass,
+          proxy_use_ssl: @proxy_use_ssl
+        }
+      end
+    end
+
     # without proxy, obsolete
 
     def conn_address # :nodoc:
@@ -1994,8 +2121,9 @@ module Net   #:nodoc:
       port()
     end
 
-    def edit_path(path)
-      if proxy?
+    def edit_path(path, network_path = nil)
+      via_proxy = network_path ? network_path.proxy? : proxy?
+      if via_proxy
         if path.start_with?("ftp://") || use_ssl?
           path
         else
@@ -2477,21 +2605,25 @@ module Net   #:nodoc:
     #
     #   #<Net::HTTPOK 200 OK readbody=false>
     #
-    def request(req, body = nil, &block)  # :yield: +response+
+    def request(req, body = nil, network_path: nil, &block)  # :yield: +response+
+      network_path ||= resolve_network_path
       unless started?
+        @pending_network_path = network_path
         start {
           req['connection'] ||= 'close'
-          return request(req, body, &block)
+          return request(req, body, network_path: network_path, &block)
         }
       end
-      if proxy_user()
+      if network_path.proxy? && network_path.proxy_user
+        req.proxy_basic_auth network_path.proxy_user, network_path.proxy_pass unless use_ssl?
+      elsif proxy_user()
         req.proxy_basic_auth proxy_user(), proxy_pass() unless use_ssl?
       end
       req.set_body_internal body
-      res = transport_request(req, &block)
+      res = transport_request(req, network_path, &block)
       if sspi_auth?(res)
         sspi_auth(req)
-        res = transport_request(req, &block)
+        res = transport_request(req, network_path, &block)
       end
       res
     end
@@ -2513,13 +2645,13 @@ module Net   #:nodoc:
 
     IDEMPOTENT_METHODS_ = %w/GET HEAD PUT DELETE OPTIONS TRACE QUERY/.freeze # :nodoc:
 
-    def transport_request(req)
+    def transport_request(req, network_path = resolve_network_path)
       count = 0
       begin
-        begin_transport req
+        begin_transport req, network_path
         res = catch(:response) {
           begin
-            req.exec @socket, @curr_http_version, edit_path(req.path)
+            req.exec @socket, @curr_http_version, edit_path(req.path, network_path)
           rescue Errno::EPIPE
             # Failure when writing full request, but we can probably
             # still read the received response.
@@ -2574,17 +2706,29 @@ module Net   #:nodoc:
       raise exception
     end
 
-    def begin_transport(req)
-      if @socket.closed?
+    def begin_transport(req, network_path = resolve_network_path)
+      if @socket && !@socket.closed? && @connected_network_path &&
+         @connected_network_path != network_path
+        debug 'Conn close because network path changed'
+        @socket.close
+        @socket = nil
+      end
+
+      if @socket.nil? || @socket.closed?
+        @connect_network_path = network_path
         connect
       elsif @last_communicated
+        authorize_network_path!(network_path)
+
         if @last_communicated + @keep_alive_timeout < Process.clock_gettime(Process::CLOCK_MONOTONIC)
           debug 'Conn close because of keep_alive_timeout'
           @socket.close
+          @connect_network_path = network_path
           connect
         elsif @socket.io.to_io.wait_readable(0) && @socket.eof?
           debug "Conn close because of EOF"
           @socket.close
+          @connect_network_path = network_path
           connect
         end
       end
@@ -2625,8 +2769,9 @@ module Net   #:nodoc:
 
     def sspi_auth?(res)
       return false unless @sspi_enabled
+      using_proxy = @connected_network_path ? @connected_network_path.proxy? : proxy?
       if res.kind_of?(HTTPProxyAuthenticationRequired) and
-          proxy? and res["Proxy-Authenticate"].include?("Negotiate")
+          using_proxy and res["Proxy-Authenticate"].include?("Negotiate")
         begin
           require 'win32/sspi'
           true
@@ -2644,7 +2789,7 @@ module Net   #:nodoc:
       # Some versions of ISA will close the connection if this isn't present.
       req["Connection"] = "Keep-Alive"
       req["Proxy-Connection"] = "Keep-Alive"
-      res = transport_request(req)
+      res = transport_request(req, @connected_network_path || resolve_network_path)
       authphrase = res["Proxy-Authenticate"]  or return res
       req["Proxy-Authorization"] = "Negotiate #{n.complete_authentication(authphrase)}"
     rescue => err
@@ -2682,6 +2827,7 @@ module Net   #:nodoc:
 end
 
 require_relative 'http/exceptions'
+require_relative 'http/network_path'
 
 require_relative 'http/header'
 
