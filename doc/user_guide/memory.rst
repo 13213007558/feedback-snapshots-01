@@ -524,6 +524,16 @@ keys:
   - ``time``: the timestamp when the cache called has been recorded
   - ``input_args``: a dictionary of keywords arguments for the cached function call.
 
+For caches that are shipped to operational logs or shared storage, enable
+``restricted_metadata=True`` on :class:`~joblib.Memory` or
+:meth:`~joblib.Memory.cache`. Restricted metadata omits ``input_args`` and
+keeps ``duration``, ``time``, ``func_id`` and the stable argument hash
+``args_id``. Joblib diagnostics and :class:`~joblib.MemorizedResult` metadata
+also omit argument representations. When a legacy ``metadata.json`` containing
+``input_args`` is read by a restricted cache, Joblib exposes only the
+allow-listed fields and best-effort rewrites that metadata file without
+recomputing the result.
+
 Note a validity duration for cached results can be defined via
 :func:`joblib.expires_after` by providing arguments similar to the ones of a
 ``datetime.timedelta``:

@@ -168,11 +168,21 @@ class StoreBackendMixin(object):
                 else ""
             )
             signature = os.path.basename(call_id[0])
-            if metadata is not None and "input_args" in metadata:
+            if (
+                metadata is not None
+                and "input_args" in metadata
+                and not getattr(self, "restricted_metadata", False)
+            ):
                 kwargs = ", ".join(
                     "{}={}".format(*item) for item in metadata["input_args"].items()
                 )
                 signature += "({})".format(kwargs)
+            elif getattr(self, "restricted_metadata", False):
+                args_id = metadata.get("args_id") if metadata else None
+                if args_id is not None:
+                    signature += f"(arguments omitted; args_id={args_id})"
+                else:
+                    signature += "(arguments omitted)"
             msg = "[Memory]{}: Loading {}".format(ts_string, signature)
             if verbose < 10:
                 print("{0}...".format(msg))
@@ -651,6 +661,7 @@ class FileSystemStoreBackend(StoreBackendBase, StoreBackendMixin):
             )
 
         self.mmap_mode = mmap_mode
+        self.restricted_metadata = backend_options.get("restricted_metadata", False)
         self.verbose = verbose
 
     def _split_id(self, call_id):

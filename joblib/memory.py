@@ -155,6 +155,58 @@ def _build_func_identifier(func):
     return os.path.join(*modules, funcname)
 
 
+_RESTRICTED_METADATA_KEYS = ("duration", "time")
+_METADATA_POLICY_ALIASES = {
+    "default": False,
+    "full": False,
+    "legacy": False,
+    "all": False,
+    "restricted": True,
+    "safe": True,
+    "minimal": True,
+    "redacted": True,
+    "private": True,
+}
+
+
+def _coerce_restricted_metadata(value):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        policy = value.strip().lower().replace("-", "_")
+        try:
+            return _METADATA_POLICY_ALIASES[policy]
+        except KeyError as exc:
+            raise ValueError(
+                "metadata policy must be one of 'full' or 'restricted', "
+                f"got {value!r}."
+            ) from exc
+    return bool(value)
+
+
+def _restrict_metadata(metadata, call_id=None):
+    """Return the non-sensitive subset of a cache entry's metadata."""
+    if not isinstance(metadata, dict):
+        return {}
+
+    restricted = {
+        key: metadata[key]
+        for key in _RESTRICTED_METADATA_KEYS
+        if key in metadata
+    }
+
+    if call_id is not None:
+        func_id, args_id = call_id
+        restricted["func_id"] = func_id
+        restricted["args_id"] = args_id
+    else:
+        for key in ("func_id", "args_id"):
+            if key in metadata:
+                restricted[key] = metadata[key]
+
+    return restricted
+
+
 # An in-memory store to avoid looking at the disk-based function
 # source code to check if a function definition has changed
 _FUNCTION_HASHES = weakref.WeakKeyDictionary()
@@ -200,9 +252,16 @@ class MemorizedResult(Logger):
         verbose=0,
         timestamp=None,
         metadata=None,
+        restricted_metadata=None,
+        metadata_policy=None,
     ):
         Logger.__init__(self)
         self._call_id = call_id
+        self.restricted_metadata = _coerce_restricted_metadata(
+            metadata_policy
+            if metadata_policy is not None
+            else restricted_metadata
+        )
         self.store_backend = _store_backend_factory(
             backend,
             location,
@@ -210,11 +269,34 @@ class MemorizedResult(Logger):
             backend_options=dict(mmap_mode=mmap_mode),
         )
         self.mmap_mode = mmap_mode
+        if self.restricted_metadata is None:
+            self.restricted_metadata = bool(
+                getattr(self.store_backend, "restricted_metadata", False)
+            )
+        if self.store_backend is not None:
+            try:
+                self.store_backend.restricted_metadata = (
+                    self.restricted_metadata
+                )
+            except Exception:
+                # Some custom backends may use slots without this policy flag.
+                # Metadata returned by Joblib is still filtered explicitly.
+                pass
 
-        if metadata is not None:
-            self.metadata = metadata
+        if metadata is None:
+            metadata = self.store_backend.get_metadata(self._call_id)
+
+        if self.restricted_metadata:
+            self.metadata = _restrict_metadata(metadata, self._call_id)
+            if metadata != self.metadata:
+                try:
+                    self.store_backend.store_metadata(self._call_id, self.metadata)
+                except Exception:
+                    # Reading a usable cache entry must not fail because the
+                    # best-effort legacy metadata cleanup could not be written.
+                    pass
         else:
-            self.metadata = self.store_backend.get_metadata(self._call_id)
+            self.metadata = metadata
 
         self.duration = self.metadata.get("duration", None)
         self.verbose = verbose
@@ -405,6 +487,13 @@ class MemorizedFunc(Logger):
         the callback is called with the cache entry's metadata as its sole
         argument. If it returns True, the cached result is returned, else the
         cache for these arguments is cleared and the result is recomputed.
+
+    restricted_metadata: bool or str, optional
+        If True or ``"restricted"``, do not persist or expose ``input_args``
+        representations. Metadata keeps timing fields and the stable
+        ``func_id`` / ``args_id`` identifiers. Legacy metadata containing
+        ``input_args`` is filtered at read time and best-effort scrubbed from
+        disk.
     """
 
     # ------------------------------------------------------------------------
@@ -422,12 +511,19 @@ class MemorizedFunc(Logger):
         verbose=1,
         timestamp=None,
         cache_validation_callback=None,
+        restricted_metadata=None,
+        metadata_policy=None,
     ):
         Logger.__init__(self)
         self.mmap_mode = mmap_mode
         self.compress = compress
         self.func = func
         self.cache_validation_callback = cache_validation_callback
+        self.restricted_metadata = _coerce_restricted_metadata(
+            metadata_policy
+            if metadata_policy is not None
+            else restricted_metadata
+        )
         self.func_id = _build_func_identifier(func)
         self.ignore = ignore if ignore is not None else []
         self._verbose = verbose
@@ -439,7 +535,17 @@ class MemorizedFunc(Logger):
             verbose=verbose,
             backend_options=dict(compress=compress, mmap_mode=mmap_mode),
         )
+        if self.restricted_metadata is None:
+            self.restricted_metadata = bool(
+                getattr(self.store_backend, "restricted_metadata", False)
+            )
         if self.store_backend is not None:
+            try:
+                self.store_backend.restricted_metadata = (
+                    self.restricted_metadata
+                )
+            except Exception:
+                pass
             # Create func directory on demand.
             self.store_backend.store_cached_func_code([self.func_id])
 
@@ -462,6 +568,44 @@ class MemorizedFunc(Logger):
         self._func_code_info = None
         self._func_code_id = None
 
+    def _read_metadata(self, call_id):
+        """Read metadata and apply the configured exposure policy."""
+        metadata = self.store_backend.get_metadata(call_id)
+        if not self.restricted_metadata:
+            return metadata
+
+        restricted = _restrict_metadata(metadata, call_id)
+        if metadata != restricted:
+            # Best-effort migration for entries written by older Joblib
+            # versions. Metadata persistence failures are non-fatal.
+            try:
+                self.store_backend.store_metadata(call_id, restricted)
+            except Exception:
+                pass
+        return restricted
+
+    def _get_valid_cached_metadata(self, call_id):
+        """Return sanitized metadata when the cached entry can be reused."""
+        # Check if the code of the function has changed
+        if not self._check_previous_func_code(stacklevel=5):
+            return None
+
+        # Check if this specific call is in the cache
+        if not self.store_backend.contains_item(call_id):
+            return None
+
+        metadata = self._read_metadata(call_id)
+
+        # Call the user defined cache validation callback
+        if (
+            self.cache_validation_callback is not None
+            and not self.cache_validation_callback(metadata)
+        ):
+            self.store_backend.clear_item(call_id)
+            return None
+
+        return metadata
+
     def _is_in_cache_and_valid(self, call_id):
         """Check if the function call is cached and valid for given arguments.
 
@@ -473,24 +617,7 @@ class MemorizedFunc(Logger):
         Returns True if the function call is in cache and can be used, and
         returns False otherwise.
         """
-        # Check if the code of the function has changed
-        if not self._check_previous_func_code(stacklevel=5):
-            return False
-
-        # Check if this specific call is in the cache
-        if not self.store_backend.contains_item(call_id):
-            return False
-
-        # Call the user defined cache validation callback
-        metadata = self.store_backend.get_metadata(call_id)
-        if (
-            self.cache_validation_callback is not None
-            and not self.cache_validation_callback(metadata)
-        ):
-            self.store_backend.clear_item(call_id)
-            return False
-
-        return True
+        return self._get_valid_cached_metadata(call_id) is not None
 
     def _cached_call(self, args, kwargs, shelving):
         """Call wrapped function and cache result, or read cache if available.
@@ -522,7 +649,7 @@ class MemorizedFunc(Logger):
 
         if self._verbose >= 20:
             logging.basicConfig(level=logging.INFO)
-            _, signature = format_signature(self.func, *args, **kwargs)
+            signature = self._format_arguments(args_id, args, kwargs)
             self.info(
                 textwrap.dedent(
                     f"""
@@ -539,13 +666,15 @@ class MemorizedFunc(Logger):
         # Compare the function code with the previous to see if the
         # function code has changed and check if the results are present in
         # the cache.
-        if self._is_in_cache_and_valid(call_id):
+        metadata = self._get_valid_cached_metadata(call_id)
+        if metadata is not None:
             if shelving:
-                return self._get_memorized_result(call_id), {}
+                return self._get_memorized_result(call_id, metadata), {}
 
             try:
                 start_time = time.time()
-                output = self._load_item(call_id)
+                load_metadata = metadata if self.restricted_metadata else None
+                output = self._load_item(call_id, load_metadata)
                 if self._verbose > 4:
                     self._print_duration(
                         time.time() - start_time, context="cache loaded "
@@ -553,7 +682,7 @@ class MemorizedFunc(Logger):
                 return output, {}
             except Exception:
                 # XXX: Should use an exception logger
-                _, signature = format_signature(self.func, *args, **kwargs)
+                signature = self._format_arguments(args_id, args, kwargs)
                 self.warn(
                     "Exception while loading results for {}\n {}".format(
                         signature, traceback.format_exc()
@@ -647,7 +776,7 @@ class MemorizedFunc(Logger):
             Whether or not the function call is in cache and can be used.
         """
         call_id = (self.func_id, self._get_args_id(*args, **kwargs))
-        return self._is_in_cache_and_valid(call_id)
+        return self._get_valid_cached_metadata(call_id) is not None
 
     # ------------------------------------------------------------------------
     # Private interface
@@ -659,6 +788,13 @@ class MemorizedFunc(Logger):
             filter_args(self.func, self.ignore, args, kwargs),
             coerce_mmap=self.mmap_mode is not None,
         )
+
+    def _format_arguments(self, args_id, args, kwargs):
+        """Format arguments for diagnostics without leaking restricted data."""
+        if self.restricted_metadata:
+            return f"<arguments omitted; args_id={args_id}>"
+        _, signature = format_signature(self.func, *args, **kwargs)
+        return signature
 
     def _hash_func(self):
         """Hash a function to key the online cache"""
@@ -827,14 +963,25 @@ class MemorizedFunc(Logger):
 
     def _call(self, call_id, args, kwargs, shelving=False):
         # Return the output and the metadata
-        self._before_call(args, kwargs)
+        self._before_call(args, kwargs, call_id=call_id)
         start_time = time.time()
         output = self.func(*args, **kwargs)
         return self._after_call(call_id, args, kwargs, shelving, output, start_time)
 
-    def _before_call(self, args, kwargs):
+    def _before_call(self, args, kwargs, call_id=None):
         if self._verbose > 0:
-            print(format_call(self.func, args, kwargs))
+            if self.restricted_metadata:
+                args_id = (
+                    call_id[1]
+                    if call_id is not None
+                    else self._get_args_id(*args, **kwargs)
+                )
+                print(
+                    f"{80 * '_'}\n[Memory] Calling {self.func_id}...\n"
+                    f"<arguments omitted; args_id={args_id}>"
+                )
+            else:
+                print(format_call(self.func, args, kwargs))
 
     def _after_call(self, call_id, args, kwargs, shelving, output, start_time):
         self.store_backend.dump_item(call_id, output, verbose=self._verbose)
@@ -869,16 +1016,23 @@ class MemorizedFunc(Logger):
             Max execution time for this function before issuing a warning.
         """
         start_time = time.time()
-        argument_dict = filter_args(self.func, self.ignore, args, kwargs)
-
-        input_repr = dict((k, repr(v)) for k, v in argument_dict.items())
-        # This can fail due to race-conditions with multiple
-        # concurrent joblibs removing the file or the directory
-        metadata = {
-            "duration": duration,
-            "input_args": input_repr,
-            "time": start_time,
-        }
+        if self.restricted_metadata:
+            metadata = {
+                "duration": duration,
+                "time": start_time,
+                "func_id": call_id[0],
+                "args_id": call_id[1],
+            }
+        else:
+            argument_dict = filter_args(self.func, self.ignore, args, kwargs)
+            input_repr = dict((k, repr(v)) for k, v in argument_dict.items())
+            # This can fail due to race-conditions with multiple
+            # concurrent joblibs removing the file or the directory
+            metadata = {
+                "duration": duration,
+                "input_args": input_repr,
+                "time": start_time,
+            }
 
         self.store_backend.store_metadata(call_id, metadata)
 
@@ -908,6 +1062,7 @@ class MemorizedFunc(Logger):
             metadata=metadata,
             timestamp=self.timestamp,
             verbose=self._verbose - 1,
+            restricted_metadata=self.restricted_metadata,
         )
 
     def _load_item(self, call_id, metadata=None):
@@ -951,7 +1106,7 @@ class AsyncMemorizedFunc(MemorizedFunc):
         return await out if asyncio.iscoroutine(out) else out
 
     async def _call(self, call_id, args, kwargs, shelving=False):
-        self._before_call(args, kwargs)
+        self._before_call(args, kwargs, call_id=call_id)
         start_time = time.time()
         output = await self.func(*args, **kwargs)
         return self._after_call(call_id, args, kwargs, shelving, output, start_time)
@@ -1004,6 +1159,12 @@ class Memory(Logger):
     backend_options: dict, optional
         Contains a dictionary of named parameters used to configure
         the store backend.
+
+    restricted_metadata: bool or str, optional
+        Do not store argument representations in ``metadata.json`` and filter
+        legacy ``input_args`` from metadata returned to callbacks, lazy
+        results and diagnostics. Timing fields and stable call identifiers are
+        preserved. Use ``"restricted"`` as an alias for ``True``.
     """
 
     # ------------------------------------------------------------------------
@@ -1018,9 +1179,16 @@ class Memory(Logger):
         compress=False,
         verbose=1,
         backend_options=None,
+        restricted_metadata=False,
+        metadata_policy=None,
     ):
         Logger.__init__(self)
         self._verbose = verbose
+        self.restricted_metadata = _coerce_restricted_metadata(
+            metadata_policy
+            if metadata_policy is not None
+            else restricted_metadata
+        )
         self.mmap_mode = mmap_mode
         self.timestamp = time.time()
         self.backend = backend
@@ -1044,6 +1212,13 @@ class Memory(Logger):
                 compress=compress, mmap_mode=mmap_mode, **backend_options
             ),
         )
+        if self.store_backend is not None:
+            try:
+                self.store_backend.restricted_metadata = (
+                    self.restricted_metadata
+                )
+            except Exception:
+                pass
 
     def cache(
         self,
@@ -1052,6 +1227,8 @@ class Memory(Logger):
         verbose=None,
         mmap_mode=False,
         cache_validation_callback=None,
+        restricted_metadata=None,
+        metadata_policy=None,
     ):
         """Decorates the given function func to only compute its return
         value for input arguments not cached on disk.
@@ -1076,6 +1253,8 @@ class Memory(Logger):
             result as its sole argument. If it returns True, then the
             cached result is returned, else the cache for these arguments
             is cleared and recomputed.
+        restricted_metadata: bool or str, optional
+            Override the metadata policy of this ``Memory`` instance.
 
         Returns
         -------
@@ -1092,6 +1271,16 @@ class Memory(Logger):
                 "cache_validation_callback needs to be callable. "
                 f"Got {cache_validation_callback}."
             )
+
+        if metadata_policy is not None or restricted_metadata is not None:
+            effective_restricted_metadata = _coerce_restricted_metadata(
+                metadata_policy
+                if metadata_policy is not None
+                else restricted_metadata
+            )
+        else:
+            effective_restricted_metadata = self.restricted_metadata
+
         if func is None:
             # Partial application, to be able to specify extra keyword
             # arguments in decorators
@@ -1101,6 +1290,7 @@ class Memory(Logger):
                 mmap_mode=mmap_mode,
                 verbose=verbose,
                 cache_validation_callback=cache_validation_callback,
+                restricted_metadata=effective_restricted_metadata,
             )
         if self.store_backend is None:
             cls = (
@@ -1144,6 +1334,7 @@ class Memory(Logger):
             verbose=verbose,
             timestamp=self.timestamp,
             cache_validation_callback=cache_validation_callback,
+            restricted_metadata=effective_restricted_metadata,
         )
 
     def clear(self, warn=True):
