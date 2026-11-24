@@ -34,13 +34,20 @@ from fsspec.utils import other_paths, setup_logging, stringify_path
 from . import __version__ as version
 from ._dircache import DirCacheUpdater
 from .checkers import get_consistency_checker
+from .commits import confirm_commit as _confirm_commit_result
+from .commits import confirm_commit_async as _confirm_commit_async
+from .commits import recover_commit_async as _recover_commit_async
 from .concurrency import parallel_tasks_first_completed, split_range
 from .credentials import GoogleCredentials
 from .inventory_report import InventoryReport
 from .retry import (
+    CommitResult,
+    CommitStatus,
     GenerationMismatchError,
     HttpError,
+    UnconfirmedCommitError,
     errs,
+    is_ambiguous_commit_exception,
     retry_request,
     validate_response,
 )
@@ -409,6 +416,14 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         data = fs.cat_file(path, generation=g)
         fs.pipe_file(path, merge(data), if_generation_match=g)
 
+    If the connection is lost during the final commit, gcsfs raises
+    :class:`~gcsfs.retry.UnconfirmedCommitError` carrying a ``CommitResult``
+    token. Call ``fs.confirm_commit(token)`` to query the resumable session or
+    ``fs.recover_commit(token)`` to confirm first and replay the original chunk
+    only when it was not accepted. Recovery retains the original
+    ``if_generation_match`` value; it never replaces it with the current object
+    generation. Ordinary download retries are unchanged.
+
     Parameters
     ----------
     project : string
@@ -510,6 +525,7 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         self.cache_timeout = cache_timeout or kwargs.pop("listings_expiry_time", None)
         self.requests_timeout = requests_timeout
         self.timeout = timeout
+        self.last_commit_result = None
         self._session = None
         self._endpoint = endpoint_url
         self.session_kwargs = session_kwargs or {}
@@ -732,6 +748,25 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             return headers, contents
 
     call = asyn.sync_wrapper(_call)
+
+    async def _confirm_commit(self, token=None, **kwargs):
+        """Authoritatively confirm a commit receipt without writing."""
+        if token is None:
+            token = kwargs
+        return await _confirm_commit_async(self, token)
+
+    confirm_commit = asyn.sync_wrapper(_confirm_commit)
+
+    async def _recover_commit(self, token=None, retry=None, **kwargs):
+        """Confirm and, only if unaccepted, replay a conditional commit."""
+        if token is None:
+            token = kwargs
+        return await _recover_commit_async(self, token, retry=retry, **kwargs)
+
+    recover_commit = asyn.sync_wrapper(_recover_commit)
+
+    check_commit = confirm_commit
+    resolve_commit = recover_commit
 
     @property
     def buckets(self):
@@ -1886,18 +1921,49 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
         size = len(data)
         out = None
         if size < chunksize:
-            location = await simple_upload(
-                self,
-                bucket,
-                key,
-                data,
-                metadata,
-                consistency,
-                content_type,
-                fixed_key_metadata=fixed_key_metadata,
-                mode=mode,
-                if_generation_match=if_generation_match,
-            )
+            try:
+                location = await simple_upload(
+                    self,
+                    bucket,
+                    key,
+                    data,
+                    metadata,
+                    consistency,
+                    content_type,
+                    fixed_key_metadata=fixed_key_metadata,
+                    mode=mode,
+                    if_generation_match=if_generation_match,
+                )
+            except Exception as exc:
+                if is_ambiguous_commit_exception(exc):
+                    result = CommitResult(
+                        state=CommitStatus.UNCONFIRMED,
+                        path=path,
+                        condition_generation=if_generation_match,
+                        expected_size=size,
+                        md5_hash=_md5_base64(data),
+                        fs=self,
+                        error=exc,
+                    )
+
+                    async def replay_simple_upload():
+                        return await simple_upload(
+                            self,
+                            bucket,
+                            key,
+                            data,
+                            metadata,
+                            consistency,
+                            content_type,
+                            fixed_key_metadata=fixed_key_metadata,
+                            mode=mode,
+                            if_generation_match=if_generation_match,
+                        )
+
+                    result.retry_callback = replay_simple_upload
+                    self.last_commit_result = result
+                    raise UnconfirmedCommitError(result) from exc
+                raise
         else:
             location = await initiate_upload(
                 self,
@@ -1914,9 +1980,50 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                 with _translate_generation_mismatch(path, if_generation_match):
                     for offset in range(0, size, chunksize):
                         bit = data_view[offset : offset + chunksize]
-                        out = await upload_chunk(
-                            self, location, bit, offset, size, content_type
-                        )
+                        is_final_chunk = offset + len(bit) >= size
+                        try:
+                            out = await upload_chunk(
+                                self,
+                                location,
+                                bit,
+                                offset,
+                                size,
+                                content_type,
+                                if_generation_match=if_generation_match,
+                                final=is_final_chunk,
+                            )
+                        except Exception as exc:
+                            if is_final_chunk and is_ambiguous_commit_exception(exc):
+                                failed_offset = offset
+                                failed_bit = bit
+
+                                async def replay_original_chunk():
+                                    return await upload_chunk(
+                                        self,
+                                        location,
+                                        failed_bit,
+                                        failed_offset,
+                                        size,
+                                        content_type,
+                                        if_generation_match=if_generation_match,
+                                        final=True,
+                                    )
+
+                                result = CommitResult(
+                                    state=CommitStatus.UNCONFIRMED,
+                                    path=path,
+                                    condition_generation=if_generation_match,
+                                    location=location,
+                                    expected_size=size,
+                                    fs=self,
+                                )
+                                result.retry_callback = replay_original_chunk
+                                self.last_commit_result = result
+                                raise UnconfirmedCommitError(result) from exc
+                            raise
+            except UnconfirmedCommitError:
+                # Keep the resumable session for authoritative confirmation.
+                raise
             except Exception:
                 await self._call("DELETE", _strip_generation_match(location))
                 raise
@@ -1962,18 +2069,50 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
             callback.set_size(size)
 
             if size < 5 * 2**20:
-                await simple_upload(
-                    self,
-                    bucket,
-                    key,
-                    f0.read(),
-                    consistency=consistency,
-                    metadatain=metadata,
-                    content_type=content_type,
-                    fixed_key_metadata=fixed_key_metadata,
-                    mode=mode,
-                    if_generation_match=if_generation_match,
-                )
+                payload = f0.read()
+                try:
+                    await simple_upload(
+                        self,
+                        bucket,
+                        key,
+                        payload,
+                        consistency=consistency,
+                        metadatain=metadata,
+                        content_type=content_type,
+                        fixed_key_metadata=fixed_key_metadata,
+                        mode=mode,
+                        if_generation_match=if_generation_match,
+                    )
+                except Exception as exc:
+                    if is_ambiguous_commit_exception(exc):
+                        result = CommitResult(
+                            state=CommitStatus.UNCONFIRMED,
+                            path=rpath,
+                            condition_generation=if_generation_match,
+                            expected_size=size,
+                            md5_hash=_md5_base64(payload),
+                            fs=self,
+                            error=exc,
+                        )
+
+                        async def replay_simple_put():
+                            return await simple_upload(
+                                self,
+                                bucket,
+                                key,
+                                payload,
+                                consistency=consistency,
+                                metadatain=metadata,
+                                content_type=content_type,
+                                fixed_key_metadata=fixed_key_metadata,
+                                mode=mode,
+                                if_generation_match=if_generation_match,
+                            )
+
+                        result.retry_callback = replay_simple_put
+                        self.last_commit_result = result
+                        raise UnconfirmedCommitError(result) from exc
+                    raise
                 callback.absolute_update(size)
 
             else:
@@ -1994,12 +2133,54 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                             bit = f0.read(chunksize)
                             if not bit:
                                 break
-                            out = await upload_chunk(
-                                self, location, bit, offset, size, content_type
-                            )
+                            is_final_chunk = offset + len(bit) >= size
+                            try:
+                                out = await upload_chunk(
+                                    self,
+                                    location,
+                                    bit,
+                                    offset,
+                                    size,
+                                    content_type,
+                                    if_generation_match=if_generation_match,
+                                    final=is_final_chunk,
+                                )
+                            except Exception as exc:
+                                if is_final_chunk and is_ambiguous_commit_exception(
+                                    exc
+                                ):
+                                    failed_offset = offset
+                                    failed_bit = bit
+
+                                    async def replay_original_chunk():
+                                        return await upload_chunk(
+                                            self,
+                                            location,
+                                            failed_bit,
+                                            failed_offset,
+                                            size,
+                                            content_type,
+                                            if_generation_match=if_generation_match,
+                                            final=True,
+                                        )
+
+                                    result = CommitResult(
+                                        state=CommitStatus.UNCONFIRMED,
+                                        path=rpath,
+                                        condition_generation=if_generation_match,
+                                        location=location,
+                                        expected_size=size,
+                                        fs=self,
+                                    )
+                                    result.retry_callback = replay_original_chunk
+                                    self.last_commit_result = result
+                                    raise UnconfirmedCommitError(result) from exc
+                                raise
                             offset += len(bit)
                             callback.absolute_update(offset)
                             checker.update(bit)
+                except UnconfirmedCommitError:
+                    raise
                 except Exception:
                     await self._call("DELETE", _strip_generation_match(location))
                     raise
@@ -2870,6 +3051,164 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                 self.blocksize = GCS_MIN_BLOCK_SIZE
             self.location = None
 
+        self.commit_result = None
+        self.commit_receipt = None
+        self.commit_status = None
+        self.commit_metadata = None
+        self._commit_expected_size = None
+
+    def _new_commit_result(self):
+        """Create the recovery token preserving the original approval."""
+        expected_size = getattr(self, "_commit_expected_size", None)
+        if expected_size is None:
+            try:
+                expected_size = self.offset + len(self.buffer.getbuffer())
+            except Exception:
+                expected_size = None
+        result = CommitResult(
+            state=CommitStatus.UNCONFIRMED,
+            path=self.path,
+            generation=None,
+            condition_generation=self.if_generation_match,
+            location=self.location,
+            expected_size=expected_size,
+            fs=self.gcsfs,
+        )
+        self.commit_result = result
+        self.commit_receipt = result
+        self.commit_status = result.state
+        return result
+
+    def _record_commit_response(self, metadata):
+        """Record a definite final-object response for this exact commit."""
+        if not isinstance(metadata, dict):
+            metadata = {}
+        self.commit_metadata = metadata
+        generation = metadata.get("generation", getattr(self, "generation", None))
+        self.generation = generation
+        result = self.commit_result or self._new_commit_result()
+        result.state = CommitStatus.COMMITTED
+        result.metadata = metadata
+        result.generation = generation
+        result.location = self.location
+        result.path = self.path
+        result.condition_generation = self.if_generation_match
+        if metadata.get("md5Hash"):
+            result.md5_hash = metadata["md5Hash"]
+        if metadata.get("crc32c"):
+            result.crc32c = metadata["crc32c"]
+        if metadata.get("etag"):
+            result.etag = metadata["etag"]
+        try:
+            if metadata.get("size") is not None:
+                result.expected_size = int(metadata["size"])
+                self._commit_expected_size = result.expected_size
+        except (TypeError, ValueError):
+            pass
+        self.commit_status = result.state
+        return result
+
+    def _mark_commit_unconfirmed(self, exc):
+        result = self.commit_result or self._new_commit_result()
+        result.state = CommitStatus.UNCONFIRMED
+        result.error = exc
+        result.location = self.location
+        result.condition_generation = self.if_generation_match
+        self.commit_status = result.state
+        return result
+
+    def confirm_commit(self):
+        """Query whether the last final commit was accepted.
+
+        Returns a :class:`~gcsfs.retry.CommitResult`; this method never starts
+        a replacement upload or refreshes the generation precondition.
+        """
+        result = self.commit_result or self._new_commit_result()
+        confirmed = _confirm_commit_result(self.gcsfs, result)
+        self.commit_result = confirmed
+        self.commit_receipt = confirmed
+        self.commit_status = confirmed.state
+        if confirmed.committed:
+            self.generation = confirmed.generation or self.generation
+            if confirmed.expected_size is not None:
+                self.offset = confirmed.expected_size
+            self.buffer = UnclosableBytesIO()
+            if confirmed.metadata:
+                self._details = self.gcsfs._process_object(
+                    self.bucket, confirmed.metadata
+                )
+        return confirmed
+
+    def recover_commit(self):
+        """Confirm the final request, replaying it only if it was not accepted.
+
+        The replay uses the same resumable session and original
+        ``if_generation_match`` approval. It never substitutes the current
+        object generation.
+        """
+        recovered = self.confirm_commit()
+        if recovered.committed:
+            return recovered
+        if recovered.conflict:
+            raise GenerationMismatchError(
+                self.path, self.if_generation_match
+            ) from recovered.error
+        if not recovered.location or recovered.resumable is False:
+            raise UnconfirmedCommitError(recovered)
+
+        try:
+            self.autocommit = True
+            self._upload_chunk(final=True)
+        except Exception as exc:
+            classified = self._classify_commit_failure(exc)
+            if classified is not exc:
+                raise classified from exc
+            raise
+
+        if self.commit_result is None or not self.commit_result.committed:
+            self._record_commit_response(
+                self.commit_metadata or {"generation": self.generation}
+            )
+        self.commit_result.attempts += 1
+        return self.commit_result
+
+    check_commit = confirm_commit
+    resolve_commit = recover_commit
+
+    def commit_outcome(self, *, recover=False):
+        """Return a committed/unconfirmed/conflict result instead of raising.
+
+        With ``recover=True`` this performs the same confirm-first recovery as
+        :meth:`recover_commit`; conflict is returned as a result as well.
+        """
+        try:
+            return self.commit()
+        except UnconfirmedCommitError as exc:
+            if not recover:
+                return exc.result
+            try:
+                return self.recover_commit()
+            except UnconfirmedCommitError as retry_exc:
+                return retry_exc.result
+            except GenerationMismatchError:
+                return self.commit_result or CommitResult(
+                    state=CommitStatus.CONFLICT,
+                    path=self.path,
+                    condition_generation=self.if_generation_match,
+                )
+        except GenerationMismatchError:
+            return self.commit_result or CommitResult(
+                state=CommitStatus.CONFLICT,
+                path=self.path,
+                condition_generation=self.if_generation_match,
+            )
+
+    def safe_commit(self):
+        """Commit and resolve the outcome, including safe original-session retry."""
+        return self.commit_outcome(recover=True)
+
+    commit_checked = commit_outcome
+
     def _reopen_kwargs(self):
         """Keyword arguments that reopen this file with the options it was opened with."""
         kwargs = dict(self.kwargs)
@@ -2968,9 +3307,28 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
             head.update(
                 {"Content-Type": self.content_type, "Content-Length": str(chunk_length)}
             )
+            call_kwargs = {}
+            if (
+                final
+                and self.if_generation_match is not None
+                and "ifGenerationMatch=" not in str(self.location)
+            ):
+                # Keep the original approval on state-aware replays. Do not
+                # refresh this from info()/the current object generation.
+                call_kwargs["ifGenerationMatch"] = str(self.if_generation_match)
+            if final:
+                self._commit_expected_size = self.offset + l
+                if self.commit_result is None:
+                    self._new_commit_result()
+                self.commit_result.expected_size = self._commit_expected_size
+                self.commit_result.location = self.location
             with _translate_generation_mismatch(self.path, self.if_generation_match):
                 headers, contents = self.gcsfs.call(
-                    "POST", self.location, headers=head, data=chunk
+                    "POST",
+                    self.location,
+                    headers=head,
+                    data=chunk,
+                    **call_kwargs,
                 )
             if "Range" in headers:
                 end = int(headers["Range"].split("-")[1])
@@ -2985,24 +3343,92 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                     self.checker.update(data_view)
                 if final and contents:
                     j = json.loads(contents)
-                    self.generation = j.get("generation")
+                    self._record_commit_response(j)
             else:
                 assert final, "Response looks like upload is over"
                 if l:
                     j = json.loads(contents)
                     self.checker.update(data_view)
                     self.checker.validate_json_response(j)
-                    self.generation = j.get("generation")
+                    self._record_commit_response(j)
+                elif final:
+                    self._record_commit_response(
+                        {"generation": self.generation} if self.generation else {}
+                    )
             # Clear buffer and update offset when all is received
             self.buffer = UnclosableBytesIO()
             self.offset += l
             break
         return True
 
+    def _classify_commit_failure(self, exc):
+        if isinstance(exc, UnconfirmedCommitError):
+            return exc
+        if isinstance(exc, (FileExistsError, GenerationMismatchError)):
+            conflict = CommitResult(
+                state=CommitStatus.CONFLICT,
+                path=self.path,
+                condition_generation=self.if_generation_match,
+                location=self.location,
+                error=exc,
+            )
+            self.commit_result = conflict
+            self.commit_receipt = conflict
+            self.commit_status = conflict.state
+            return exc
+        if is_ambiguous_commit_exception(exc):
+            result = self._mark_commit_unconfirmed(exc)
+            error = UnconfirmedCommitError(result)
+            error.__cause__ = exc
+            return error
+        return exc
+
+    def flush(self, force=False):
+        if force and self.commit_status == CommitStatus.COMMITTED:
+            # Authoritative confirmation already established that the original
+            # final chunk was published; do not replay its buffered payload.
+            self.buffer = UnclosableBytesIO()
+            return
+        if force and self.commit_status == CommitStatus.CONFLICT:
+            raise GenerationMismatchError(self.path, self.if_generation_match)
+        try:
+            return super().flush(force=force)
+        except Exception as exc:
+            if force:
+                classified = self._classify_commit_failure(exc)
+                if classified is not exc:
+                    raise classified from exc
+            raise
+
     def commit(self):
-        """If not auto-committing, finalize file"""
+        """Finalize the file and return its commit receipt.
+
+        A successful response returns a ``CommitResult`` with state
+        ``committed``. If the connection is lost after the final request may
+        have been accepted, this raises :class:`UnconfirmedCommitError`; use
+        :meth:`confirm_commit` or :meth:`recover_commit` on the file (or the
+        attached receipt) instead of starting a replacement write from a
+        newer object generation.
+        """
         self.autocommit = True
-        self._upload_chunk(final=True)
+        if self.offset is None:
+            self.offset = 0
+            self._initiate_upload()
+        if self.commit_result is None:
+            self._new_commit_result()
+        try:
+            self._upload_chunk(final=True)
+        except Exception as exc:
+            classified = self._classify_commit_failure(exc)
+            if classified is not exc:
+                raise classified from exc
+            raise
+
+        if self.commit_result is None or not self.commit_result.committed:
+            self._record_commit_response(
+                self.commit_metadata or {"generation": self.generation}
+            )
+        return self.commit_result
 
     def _initiate_upload(self):
         """Create multi-upload"""
@@ -3140,7 +3566,16 @@ def _convert_fixed_key_metadata(metadata, *, from_google=False):
     return out
 
 
-async def upload_chunk(fs, location, data, offset, size, content_type):
+async def upload_chunk(
+    fs,
+    location,
+    data,
+    offset,
+    size,
+    content_type,
+    if_generation_match=None,
+    final=False,
+):
     """
     Uploads a chunk of data. This function has a conditional path to support
     experimental features for Zonal buckets, and RCU buckets with ``rcu_rapid_write``,
@@ -3171,15 +3606,38 @@ async def upload_chunk(fs, location, data, offset, size, content_type):
         if isinstance(data, (bytes, bytearray, memoryview))
         else UnclosableBytesIO(data)
     )
-    headers, txt = await fs._call("POST", location, headers=head, data=payload)
+    call_kwargs = {}
+    if (
+        final
+        and if_generation_match is not None
+        and "ifGenerationMatch=" not in str(location)
+    ):
+        call_kwargs["ifGenerationMatch"] = str(if_generation_match)
+    headers, txt = await fs._call(
+        "POST", location, headers=head, data=payload, **call_kwargs
+    )
     if "Range" in headers:
         end = int(headers["Range"].split("-")[1])
         shortfall = (offset + l - 1) - end
         if shortfall:
             return await upload_chunk(
-                fs, location, data[-shortfall:], end + 1, size, content_type
+                fs,
+                location,
+                data[-shortfall:],
+                end + 1,
+                size,
+                content_type,
+                if_generation_match=if_generation_match,
+                final=final,
             )
     return json.loads(txt) if txt else None
+
+
+def _md5_base64(data):
+    from base64 import b64encode
+    from hashlib import md5
+
+    return b64encode(md5(data).digest()).decode("ascii")
 
 
 def _resolve_generation_match(mode, if_generation_match):

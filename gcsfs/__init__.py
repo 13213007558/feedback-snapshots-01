@@ -12,8 +12,38 @@ except ImportError:
         __version__ = "unknown"
 
 logger = logging.getLogger(__name__)
+from .commits import (
+    check_commit,
+    confirm_before_retry,
+    confirm_commit,
+    parse_upload_status,
+    recover_commit,
+    resolve_commit,
+    safe_retry_commit,
+)
 from .core import GCSFileSystem
 from .mapping import GCSMap
+from .retry import (
+    AmbiguousCommitError,
+    CommitConfirmation,
+    CommitConflict,
+    CommitConflictError,
+    CommitOutcome,
+    CommitReceipt,
+    CommitResult,
+    CommitState,
+    CommitStatus,
+    CommitTicket,
+    CommitToken,
+    GenerationMismatchError,
+    PendingCommit,
+    PendingCommitError,
+    UnconfirmedCommitError,
+    UnknownCommitError,
+    UploadReceipt,
+    WriteReceipt,
+    WriteResult,
+)
 
 if os.getenv("GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT", "true").lower() in ("true", "1"):
     try:
@@ -28,4 +58,33 @@ if os.getenv("GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT", "true").lower() in ("true", "1
         )
         # Fallback to core GCSFileSystem, do not register here
 
-__all__ = ["GCSFileSystem", "GCSMap"]
+__all__ = [
+    "AmbiguousCommitError",
+    "CommitConfirmation",
+    "CommitConflict",
+    "CommitConflictError",
+    "CommitOutcome",
+    "CommitReceipt",
+    "CommitResult",
+    "CommitState",
+    "CommitStatus",
+    "CommitTicket",
+    "CommitToken",
+    "GCSFileSystem",
+    "GCSMap",
+    "GenerationMismatchError",
+    "PendingCommit",
+    "PendingCommitError",
+    "UnconfirmedCommitError",
+    "UnknownCommitError",
+    "UploadReceipt",
+    "WriteReceipt",
+    "WriteResult",
+    "check_commit",
+    "confirm_before_retry",
+    "confirm_commit",
+    "parse_upload_status",
+    "recover_commit",
+    "resolve_commit",
+    "safe_retry_commit",
+]

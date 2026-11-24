@@ -15,7 +15,7 @@ from gcsfs.core import (
     _get_prefetcher_and_cache_config,
     _resolve_open_generation_match,
 )
-from gcsfs.retry import HttpError
+from gcsfs.retry import CommitResult, CommitStatus, HttpError
 from gcsfs.telemetry.wrapper import wrap_file_methods
 from gcsfs.utils import as_byte_buffer, is_empty_range
 from gcsfs.zb_hns_utils import DEFAULT_TEARDOWN_TIMEOUT_SECONDS, sync_teardown
@@ -423,9 +423,15 @@ class ZonalFile(GCSFile):
             logger.warning(
                 "This file has already been finalized. Ignoring commit call."
             )
-            return
+            return self.commit_result
 
         self._ensure_aaow()
+        if self.commit_result is None:
+            self.commit_result = CommitResult(
+                path=self.path,
+                condition_generation=self.if_generation_match,
+                fs=self.gcsfs,
+            )
         try:
             asyn.sync(self.gcsfs.loop, self.aaow.finalize)
         except BaseException:
@@ -434,6 +440,10 @@ class ZonalFile(GCSFile):
         self.finalized = True
         # File is already finalized, avoid finalizing again on close
         self.finalize_on_close = False
+        self.commit_result.state = CommitStatus.COMMITTED
+        self.commit_result.generation = self.generation
+        self.commit_status = CommitStatus.COMMITTED
+        return self.commit_result
 
     def _abort_write(self):
         """Makes the file close-only after a failed append, flush or finalize.
@@ -448,8 +458,8 @@ class ZonalFile(GCSFile):
     def discard(self):
         """Discard is not applicable for Zonal and RCU buckets. Log a warning instead."""
         logger.warning(
-            "Discard is not applicable for Zonal and RCU buckets. \
-            Data is uploaded via streaming and cannot be cancelled."
+            "Discard is not applicable for Zonal and RCU buckets. "
+            "Data is uploaded via streaming and cannot be cancelled."
         )
 
     def _initiate_upload(self):
