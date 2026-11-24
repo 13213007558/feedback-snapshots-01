@@ -89,7 +89,7 @@ class MemmappingExecutor(_ReusablePoolExecutor):
 
         return _executor
 
-    def terminate(self, kill_workers=False):
+    def terminate(self, kill_workers=False, context_id=None):
         self.shutdown(kill_workers=kill_workers)
 
         # When workers are killed in a brutal manner, they cannot execute the
@@ -102,7 +102,9 @@ class MemmappingExecutor(_ReusablePoolExecutor):
         # with allow_non_empty=True but if we can't, it will be clean up later
         # on by the resource_tracker.
         self._temp_folder_manager._clean_temporary_resources(
-            force=kill_workers, allow_non_empty=True
+            context_id=context_id,
+            force=kill_workers,
+            allow_non_empty=True,
         )
 
     @property

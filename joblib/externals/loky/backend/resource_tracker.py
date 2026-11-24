@@ -394,6 +394,11 @@ def main(fd, verbose=0):
                         pass
                     # loky: refcount functionality with logging
                     elif cmd == 'MAYBE_UNLINK':
+                        if name not in cache[rtype]:
+                            # The owning context can force-revoke a resource
+                            # before a live worker's finalizer sends its
+                            # decrement. That late message is a no-op.
+                            continue
                         cache[rtype][name] -= 1
                         if verbose:
                             util.debug(
@@ -402,7 +407,7 @@ def main(fd, verbose=0):
                                 f'(current {cache[rtype][name]})'
                             )
 
-                        if cache[rtype][name] == 0:
+                        if cache[rtype][name] <= 0:
                             del cache[rtype][name]
                             try:
                                 if verbose:

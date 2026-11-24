@@ -587,6 +587,7 @@ class TemporaryResourcesManager(object):
         self._temp_folder_root = temp_folder_root
         self._use_shared_mem = None
         self._cached_temp_folders = dict()
+        self._maybe_unlink_sent = dict()
         self._id = uuid4().hex
         self._finalizers = {}
         if context_id is None:
@@ -680,18 +681,25 @@ class TemporaryResourcesManager(object):
                 # Registered upfront but only created on the first dump
                 self._forget_temp_folder(context_id, temp_folder)
             else:
+                cleanup_refs_sent = self._maybe_unlink_sent.setdefault(
+                    context_id, set()
+                )
                 for filename in os.listdir(temp_folder):
+                    filename = os.path.join(temp_folder, filename)
                     if force:
                         # Some workers have failed and the ref counted might
                         # be off. The workers should have shut down by this
                         # time so forcefully clean up the files.
-                        resource_tracker.unregister(
-                            os.path.join(temp_folder, filename), "file"
-                        )
-                    else:
-                        resource_tracker.maybe_unlink(
-                            os.path.join(temp_folder, filename), "file"
-                        )
+                        if filename not in cleanup_refs_sent:
+                            cleanup_refs_sent.add(filename)
+                            resource_tracker.unregister(filename, "file")
+                    elif filename not in cleanup_refs_sent:
+                        # Cleanup can be retried if a worker still holds the
+                        # folder. The parent's reference must only be dropped
+                        # once, otherwise a later worker finalizer can make
+                        # the tracker refcount negative.
+                        cleanup_refs_sent.add(filename)
+                        resource_tracker.maybe_unlink(filename, "file")
 
                 # When forcing clean-up, try to delete the folder even if some
                 # files are still in it. Otherwise, try to delete the folder
@@ -713,6 +721,7 @@ class TemporaryResourcesManager(object):
     def _forget_temp_folder(self, context_id, temp_folder):
         """Drop a context's folder from the manager and the resource_tracker"""
         self._cached_temp_folders.pop(context_id, None)
+        self._maybe_unlink_sent.pop(context_id, None)
         resource_tracker.unregister(temp_folder, "folder")
 
         # Also cancel the finalizers  that gets triggered at gc.

@@ -730,6 +730,170 @@ def test_parallel_isolated_temp_folders(backend):
 
 @with_numpy
 @with_multiprocessing
+@skipif(sys.platform == "win32", reason="POSIX modes and open-file checks")
+def test_interleaved_jobs_do_not_clean_each_others_memmaps(tmp_path):
+    pytest.importorskip("psutil")
+
+    # Run the scenario in a subprocess so resource-tracker refcount errors are
+    # observed exactly as an application would see them on stderr.
+    cmd = """if 1:
+        import os
+        import stat
+        import sys
+        import time
+        from pathlib import Path
+
+        import numpy as np
+        import psutil
+        from joblib import Parallel, delayed
+        from joblib._memmapping_reducer import (
+            FILE_PERMISSIONS,
+            FOLDER_PERMISSIONS,
+            _get_backing_memmap,
+        )
+
+        root = Path({root!r})
+        ready_b = root / "b.ready"
+        proceed_b = root / "b.proceed"
+        ready_a = root / "a.ready"
+        proceed_a = root / "a.proceed"
+
+
+        def hold_array(arr, ready_path, proceed_path, fail):
+            memmap = _get_backing_memmap(arr)
+            Path(ready_path).write_text(f"{{os.getpid()}}\\n{{memmap.filename}}")
+            deadline = time.time() + 30
+            while not os.path.exists(proceed_path):
+                if time.time() > deadline:
+                    raise RuntimeError("timed out waiting for proceed file")
+                time.sleep(0.01)
+
+            checksum = int(np.asarray(arr).sum())
+            if fail:
+                raise RuntimeError("intentional failure while holding memmap")
+            return checksum
+
+
+        def read_ready(path):
+            pid, filename = Path(path).read_text().splitlines()
+            return int(pid), filename
+
+
+        def has_open_file(pid, filename):
+            real_filename = os.path.realpath(filename)
+            return any(
+                os.path.realpath(open_file.path) == real_filename
+                for open_file in psutil.Process(pid).open_files()
+            )
+
+
+        def wait_until(predicate, message):
+            for _ in range(200):
+                if predicate():
+                    return
+                time.sleep(0.05)
+            raise AssertionError(message)
+
+
+        temp_root = root / "joblib-tmp"
+        temp_root.mkdir()
+        b_array = np.arange(64, dtype=np.int64)
+        a_array = np.arange(32, dtype=np.int64) + 1000
+
+        b_parallel = Parallel(
+            n_jobs=2,
+            backend="loky",
+            return_as="generator",
+            max_nbytes=1,
+            temp_folder=str(temp_root),
+        )
+        b_results = b_parallel(
+            delayed(hold_array)(
+                b_array, str(ready_b), str(proceed_b), False
+            )
+            for _ in range(1)
+        )
+        wait_until(ready_b.exists, "B worker did not map its array")
+        b_pid, b_filename = read_ready(ready_b)
+        b_folder = os.path.dirname(b_filename)
+
+        assert stat.S_IMODE(os.stat(b_filename).st_mode) == FILE_PERMISSIONS
+        assert stat.S_IMODE(os.stat(b_folder).st_mode) == FOLDER_PERMISSIONS
+        wait_until(
+            lambda: has_open_file(b_pid, b_filename),
+            "B worker was not holding the mapped file",
+        )
+
+        a_parallel = Parallel(
+            n_jobs=2,
+            backend="loky",
+            return_as="generator",
+            max_nbytes=1,
+            temp_folder=str(temp_root),
+        )
+        a_results = a_parallel(
+            delayed(hold_array)(
+                a_array, str(ready_a), str(proceed_a), True
+            )
+            for _ in range(1)
+        )
+        wait_until(ready_a.exists, "A worker did not map its array")
+        a_pid, a_filename = read_ready(ready_a)
+        a_folder = os.path.dirname(a_filename)
+        assert a_parallel._backend._workers is b_parallel._backend._workers
+        assert a_folder != b_folder
+        assert stat.S_IMODE(os.stat(a_filename).st_mode) == FILE_PERMISSIONS
+
+        proceed_a.touch()
+        try:
+            next(a_results)
+        except Exception as exc:
+            assert "intentional failure" in str(exc)
+        else:
+            raise AssertionError("failing job did not raise")
+
+        wait_until(
+            lambda: not os.path.exists(a_filename),
+            "failed job's memmap file was not cleaned up",
+        )
+        wait_until(
+            lambda: not os.path.exists(a_folder),
+            "failed job's context folder was not cleaned up",
+        )
+
+        # The other job's mapping and real worker file descriptor must survive
+        # the failed job's cleanup.
+        assert os.path.exists(b_filename)
+        assert os.path.exists(b_folder)
+        assert has_open_file(b_pid, b_filename)
+
+        proceed_b.touch()
+        assert next(b_results) == int(b_array.sum())
+        wait_until(
+            lambda: not os.path.exists(b_folder),
+            "successful job's context folder leaked after completion",
+        )
+        print("INTERLEAVED_MEMMAP_CLEANUP_OK")
+    """.format(root=str(tmp_path))
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.path.dirname(__file__)
+    process = subprocess.Popen(
+        [sys.executable, "-c", cmd],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+    )
+    out, err = process.communicate(timeout=120)
+    out = out.decode()
+    err = err.decode()
+    assert process.returncode == 0, err + "\n" + out
+    assert err == "", err
+    assert "INTERLEAVED_MEMMAP_CLEANUP_OK" in out
+
+
+@with_numpy
+@with_multiprocessing
 @parametrize("backend", ["multiprocessing", "loky"])
 def test_managed_backend_reuse_temp_folder(backend):
     # Test that calls to a managed parallel object reuse the same memmaps.

@@ -1737,6 +1737,7 @@ class Parallel(Logger):
         # to also include KeyboardInterrupt
         except BaseException:
             self._exception = True
+            self._abort_for_task_error = True
             self._abort()
             raise
         finally:
@@ -1978,6 +1979,9 @@ class Parallel(Logger):
         self._aborting = False
         # Set to True after abortion is complete
         self._aborted = False
+        # Task failures can be scoped to this Parallel call. Generator
+        # finalization keeps the historical executor-wide abort behavior.
+        self._abort_for_task_error = False
 
     def __call__(self, iterable):
         """Main function to dispatch parallel tasks."""

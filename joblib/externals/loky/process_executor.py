@@ -523,6 +523,11 @@ def _process_worker(
         except BaseException as e:
             exc = _ExceptionWithTraceback(e)
             result_queue.put(_ResultItem(call_item.work_id, exception=exc))
+            # The wrapper retains the exception traceback, whose frame keeps
+            # task arguments (and their memmaps) alive until the next call.
+            # The serialized result is already on the queue, so release it now
+            # to let the memmap finalizers run before context cleanup retries.
+            del exc
         else:
             _sendback_result(result_queue, call_item.work_id, result=r)
             del r

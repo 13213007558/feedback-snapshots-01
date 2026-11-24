@@ -839,8 +839,41 @@ class LokyBackend(AutoBatchingMixin, ParallelBackendBase):
         self.reset_batch_stats()
 
     def abort_everything(self, ensure_ready=True):
-        """Shutdown the workers and restart a new one with the same parameters"""
-        self._workers.terminate(kill_workers=True)
+        """Abort this call's tasks, preserving shared contexts when active."""
+        context_id = self.parallel._id if self.parallel is not None else None
+        manager = getattr(self._workers, "_temp_folder_manager", None)
+        preserve_shared_executor = getattr(
+            self.parallel, "_abort_for_task_error", False
+        )
+        other_context_is_active = (
+            preserve_shared_executor
+            and manager is not None
+            and any(
+                active_context_id != context_id
+                for active_context_id in list(manager._cached_temp_folders)
+            )
+        )
+
+        if other_context_is_active:
+            # The reusable executor and its worker processes are shared with
+            # another Parallel call. Shutting them down would abort that call
+            # and force-delete its temporary memmaps. Cancel only the futures
+            # owned by this call and scope cleanup to its context folder.
+            for job_tracker in list(getattr(self.parallel, "_jobs", ())):
+                future = getattr(job_tracker, "job", None)
+                cancel = getattr(future, "cancel", None)
+                if callable(cancel):
+                    cancel()
+
+            if context_id is not None:
+                manager._clean_temporary_resources(
+                    context_id=context_id,
+                    force=True,
+                    allow_non_empty=True,
+                )
+        else:
+            self._workers.terminate(kill_workers=True, context_id=context_id)
+
         self._workers = None
 
         if ensure_ready:

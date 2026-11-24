@@ -12,6 +12,11 @@ In Development
   array views passed to ``Parallel`` workers.
   https://github.com/joblib/joblib/pull/1872
 
+- Scope loky temporary-memmap abort cleanup to the failing ``Parallel``
+  context so an interleaved job reusing the executor keeps its mapped files
+  and can continue. Make reference-count cleanup retry-safe and tolerate a
+  late worker finalizer after forced context revocation.
+
 - Fix the memory order of contiguous memmap views passed to and returned from
   ``Parallel`` workers, preserving values and shared writes after transposing
   or reshaping the backing mapping.
