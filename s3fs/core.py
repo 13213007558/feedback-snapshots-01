@@ -681,7 +681,11 @@ class S3FileSystem(AsyncFileSystem):
             self.cache_regions = cache_regions
             if self.cache_regions:
                 s3creator = S3BucketRegionCache(
-                    self.session, config=conf, **init_kwargs, **client_kwargs
+                    self.session,
+                    requester_pays=self.requester_pays,
+                    config=conf,
+                    **init_kwargs,
+                    **client_kwargs,
                 )
                 self._s3 = await s3creator.get_client()
             else:

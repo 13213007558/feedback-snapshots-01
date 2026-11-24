@@ -19,13 +19,17 @@ class S3BucketRegionCache:
     # See https://github.com/aio-libs/aiobotocore/issues/866
     # for details.
 
-    def __init__(self, session, **client_kwargs):
+    def __init__(self, session, requester_pays=False, **client_kwargs):
         self._session = session
         self._stack = AsyncExitStack()
         self._client = None
         self._client_kwargs = client_kwargs
         self._buckets = {}
         self._regions = {}
+        # HeadBucket cannot carry the Requester Pays billing commitment, so the
+        # cache has to remember the authorization context it was created with and
+        # reproduce it on a request that does (ListObjectsV2).
+        self.requester_pays = requester_pays
 
     async def get_bucket_client(self, bucket_name=None):
         if bucket_name in self._buckets:
@@ -35,11 +39,7 @@ class S3BucketRegionCache:
         if bucket_name is None:
             return general_client
 
-        try:
-            response = await general_client.head_bucket(Bucket=bucket_name)
-        except ClientError as e:
-            logger.debug("RC: HEAD_BUCKET call for %r has failed", bucket_name)
-            response = e.response
+        response = await self._head_bucket(general_client, bucket_name)
 
         region = (
             response["ResponseMetadata"]
@@ -68,6 +68,24 @@ class S3BucketRegionCache:
 
         client = self._buckets[bucket_name] = self._regions[region]
         return client
+
+    async def _head_bucket(self, client, bucket_name):
+        try:
+            return await client.head_bucket(Bucket=bucket_name)
+        except ClientError as e:
+            logger.debug("RC: HEAD_BUCKET call for %r has failed", bucket_name)
+
+            # A Requester Pays bucket answers an uncommitted HeadBucket with an
+            # AccessDenied billing-admission error. HeadBucket cannot carry the
+            # RequestPayer header, so repeat the discovery with ListObjectsV2,
+            # which both carries the fee commitment and returns the region. The
+            # denial is deliberately propagated, rather than swallowed, when the
+            # caller is not willing to pay.
+            if self.requester_pays:
+                return await client.list_objects_v2(
+                    Bucket=bucket_name, MaxKeys=1, RequestPayer="requester"
+                )
+            return e.response
 
     async def get_client(self):
         if not self._client:
