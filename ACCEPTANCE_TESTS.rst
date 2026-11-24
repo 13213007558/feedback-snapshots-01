@@ -181,3 +181,16 @@ Cross-Bucket
 ~~~~~~~~~~~~
 * [ ] Copy single nonmultipart object across sigv4 regions
 * [ ] Copy single multipart object across sigv4 regions
+
+
+Delete Tests
+------------
+
+Delegation
+~~~~~~~~~~
+* [x] Delete an exact version pinned by an authorization
+* [x] Create a delete marker without naming a version, as pinned by an authorization
+* [x] Reject a request whose target conflicts with the authorization before enqueueing
+* [x] Refuse a delete whose authorization was revoked while it waited for a free thread (``request_sent=False``)
+* [x] Report an ambiguous outcome for a delete whose request was sent before cancellation or a hung connection (``request_sent=True``)
+* [x] Keep the pinned version in the exception and attempt record after an ambiguous outcome

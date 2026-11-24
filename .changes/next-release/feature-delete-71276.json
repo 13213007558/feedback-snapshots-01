@@ -1,0 +1,5 @@
+{
+  "category": "``s3``",
+  "description": "Add optional delegated approvals to ``TransferManager.delete``. A ``DeleteAuthorization`` pins the target to an exact ``VersionId`` or to creating a delete marker, and is revalidated immediately before the request is sent. A delete revoked (or expired) while queued is refused as ``DeleteRevokedError`` / ``DeleteExpiredError`` (``request_sent=False``); a request already on the wire that then fails, hangs, or is cancelled reports ``DeleteOutcomeUnknownError`` (``request_sent=True``) with the pinned target. ``DeleteAttempt`` records are exposed on the authorization for auditing.",
+  "type": "feature"
+}

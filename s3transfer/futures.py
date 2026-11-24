@@ -196,6 +196,11 @@ class TransferCoordinator:
         self._associated_futures_lock = threading.Lock()
         self._done_callbacks_lock = threading.Lock()
         self._failure_cleanups_lock = threading.Lock()
+        # An optional callable that may substitute the exception recorded when
+        # this transfer is cancelled. It lets a transfer that has already
+        # dispatched a request report an ambiguous outcome instead of a plain
+        # cancellation.
+        self._cancel_exception_factory = None
 
     def __repr__(self):
         return f'{self.__class__.__name__}(transfer_id={self.transfer_id})'
@@ -251,9 +256,26 @@ class TransferCoordinator:
         on the final task.
         """
         with self._lock:
+            # If the transfer was cancelled because the outcome is genuinely
+            # unknown, a late success must not override that: the caller has
+            # already been told not to trust the target as untouched.
+            if self._cancel_exception_factory is not None and (
+                self._status == 'cancelled'
+            ):
+                return
             self._exception = None
             self._result = result
             self._status = 'success'
+
+    def set_cancel_exception_factory(self, factory):
+        """Install a callable that may rewrite the cancellation exception.
+
+        ``factory`` receives the default cancellation exception and returns
+        the exception to record. This is used by transfers that must report a
+        distinct outcome when cancellation happens after a request was sent.
+        """
+        with self._lock:
+            self._cancel_exception_factory = factory
 
     def set_exception(self, exception, override=False):
         """Set an exception for the TransferFuture
@@ -297,7 +319,18 @@ class TransferCoordinator:
             if not self.done():
                 should_announce_done = False
                 logger.debug('%s cancel(%s) called', self, msg)
-                self._exception = exc_type(msg)
+                exception = exc_type(msg)
+                if self._cancel_exception_factory is not None:
+                    # A transfer that already dispatched a request cannot
+                    # claim the target is untouched; let it substitute an
+                    # ambiguous-outcome exception and, when the outcome is
+                    # genuinely unknown, unblock result() immediately.
+                    exception, announce_now = self._cancel_exception_factory(
+                        exception
+                    )
+                    if announce_now:
+                        should_announce_done = True
+                self._exception = exception
                 if self._status == 'not-started':
                     should_announce_done = True
                 self._status = 'cancelled'

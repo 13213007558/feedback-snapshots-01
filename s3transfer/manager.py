@@ -23,7 +23,10 @@ from s3transfer.constants import (
     MB,
 )
 from s3transfer.copies import CopySubmissionTask
-from s3transfer.delete import DeleteSubmissionTask
+from s3transfer.delete import (
+    DeleteAttempt,
+    DeleteSubmissionTask,
+)
 from s3transfer.download import DownloadSubmissionTask
 from s3transfer.exceptions import CancelledError, FatalError
 from s3transfer.futures import (
@@ -496,7 +499,14 @@ class TransferManager:
         )
         return self._submit_transfer(call_args, CopySubmissionTask)
 
-    def delete(self, bucket, key, extra_args=None, subscribers=None):
+    def delete(
+        self,
+        bucket,
+        key,
+        extra_args=None,
+        subscribers=None,
+        authorization=None,
+    ):
         """Delete an S3 object.
 
         :type bucket: str
@@ -514,6 +524,18 @@ class TransferManager:
             process of the transfer request.  Note that the ``on_progress``
             callback is not invoked during object deletion.
 
+        :type authorization: s3transfer.delete.DeleteAuthorization
+        :param authorization: An optional delegated approval for this
+            deletion. When provided, the approval fixes the target (an exact
+            ``VersionId`` or the creation of a delete marker) and is checked
+            again immediately before the request is sent. If it is revoked
+            while the task waits for a free thread, nothing is sent and the
+            future fails with ``DeleteRevokedError``. If the request was
+            already sent and the connection then hangs or the future is
+            cancelled, the future fails with ``DeleteOutcomeUnknownError``
+            carrying the exact pinned target. Callers that pass an approval
+            must not also request a different version via ``extra_args``.
+
         :rtype: s3transfer.futures.TransferFuture
         :return: Transfer future representing the deletion.
 
@@ -524,11 +546,27 @@ class TransferManager:
             subscribers = []
         self._validate_all_known_args(extra_args, self.ALLOWED_DELETE_ARGS)
         self._validate_if_bucket_supported(bucket)
+        delete_attempt = None
+        if authorization is not None:
+            authorization.check_target(extra_args.get('VersionId'))
+            # A delegated delete must target exactly what was approved, so the
+            # wire parameters come from the approval rather than from a
+            # separately mutable extra_args entry.
+            extra_args = {
+                arg: value
+                for arg, value in extra_args.items()
+                if arg != 'VersionId'
+            }
+            delete_attempt = DeleteAttempt(
+                authorization, bucket=bucket, key=key
+            )
         call_args = CallArgs(
             bucket=bucket,
             key=key,
             extra_args=extra_args,
             subscribers=subscribers,
+            authorization=authorization,
+            delete_attempt=delete_attempt,
         )
         return self._submit_transfer(call_args, DeleteSubmissionTask)
 
