@@ -1275,15 +1275,98 @@ def test_zonal_file_commit_not_writable_warning(
 
 
 def test_zonal_file_discard(extended_gcsfs, zonal_write_mocks, file_path):
-    """Test that discard on a ZonalFile logs a warning."""
-    with mock.patch("gcsfs.zonal_file.logger") as mock_logger:
-        with extended_gcsfs.open(file_path, "wb") as f:
-            f.discard()
-        mock_logger.warning.assert_called_once()
-        assert (
-            "Discard is not applicable for Zonal and RCU buckets"
-            in mock_logger.warning.call_args[0][0]
+    """A discarded write is cleaned up on close without publishing a new version."""
+    if not zonal_write_mocks:
+        pytest.skip("Request assertions require the mocked writer.")
+    aaow = zonal_write_mocks["aaow"]
+    with extended_gcsfs.open(file_path, "wb", autocommit=False) as f:
+        f.write(test_data)
+        # Revoke the write authorization before the background fragment is
+        # confirmed (no flush yet), then let the context exit.
+        f.discard()
+        assert f.discarded is True
+        # Neither an explicit commit ...
+        with mock.patch("gcsfs.zonal_file.logger") as mock_logger:
+            f.commit()
+        mock_logger.warning.assert_called_once_with(
+            "This file has been discarded. Ignoring commit call."
         )
+    # ... nor the context-exit close may publish a new version.
+    aaow.finalize.assert_not_awaited()
+    aaow.flush.assert_not_awaited()
+    aaow.close.assert_awaited_once_with(finalize_on_close=False)
+    assert f.finalized is False
+    assert f.discarded is True
+    # Readers approved before the revocation still get the old generation.
+    info = fsspec.asyn.sync(extended_gcsfs.loop, extended_gcsfs._info, file_path)
+    assert info["generation"] == "12345"
+
+
+def test_zonal_file_discard_noop_states(extended_gcsfs, zonal_write_mocks, file_path):
+    """Discard is a no-op on read-mode, finalized or already discarded files."""
+    if not zonal_write_mocks:
+        pytest.skip("Request assertions require the mocked writer.")
+    with extended_gcsfs.open(file_path, "wb") as f:
+        f.discard()
+        with mock.patch("gcsfs.zonal_file.logger") as mock_logger:
+            f.discard()
+        mock_logger.warning.assert_called_once_with(
+            "This file has already been discarded. Ignoring discard call."
+        )
+    zonal_write_mocks["aaow"].finalize.assert_not_awaited()
+
+    with extended_gcsfs.open(file_path, "wb") as f:
+        f.commit()
+        with mock.patch("gcsfs.zonal_file.logger") as mock_logger:
+            f.discard()
+        mock_logger.warning.assert_called_once_with(
+            "This file has already been finalized. Ignoring discard call."
+        )
+        assert f.discarded is False
+
+
+def test_zonal_file_commit_protection_states(
+    extended_gcsfs, zonal_write_mocks, file_path
+):
+    """autocommit=False distinguishes partial content, publish and cleanup."""
+    if not zonal_write_mocks:
+        pytest.skip("Request assertions require the mocked writer.")
+    aaow = zonal_write_mocks["aaow"]
+
+    # Partial content: closing flushes but never finalizes.
+    with extended_gcsfs.open(file_path, "wb", autocommit=False) as f:
+        assert f.finalize_on_close is False
+        f.write(test_data)
+    aaow.flush.assert_awaited_once()
+    aaow.finalize.assert_not_awaited()
+    aaow.close.assert_awaited_once_with(finalize_on_close=False)
+    assert f.finalized is False
+
+    # Formal publish: only an explicit commit finalizes.
+    aaow.reset_mock()
+    with extended_gcsfs.open(file_path, "wb", autocommit=False) as f:
+        f.write(test_data)
+        f.commit()
+    aaow.finalize.assert_awaited_once()
+    assert f.finalized is True
+
+
+@pytest.mark.parametrize(
+    "zonal_write_mocks",
+    [layouts.STANDARD_RCU, layouts.HIERARCHICAL_RCU],
+    indirect=True,
+)
+def test_zonal_file_commit_protection_overrides_rcu_finalize_default(
+    extended_gcsfs, zonal_write_mocks, file_path
+):
+    """autocommit=False wins over the RCU finalize_on_close=True default."""
+    if not zonal_write_mocks:
+        pytest.skip("Unit test for commit protection with mocks.")
+    with extended_gcsfs.open(file_path, "wb", autocommit=False) as f:
+        assert f.finalize_on_close is False
+        f.write(test_data)
+    zonal_write_mocks["aaow"].finalize.assert_not_awaited()
+    zonal_write_mocks["aaow"].close.assert_awaited_once_with(finalize_on_close=False)
 
 
 def test_zonal_file_not_implemented_methods(

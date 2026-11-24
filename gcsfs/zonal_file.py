@@ -66,6 +66,10 @@ class ZonalFile(GCSFile):
         `False`, exiting a `with` block or closing the file will not
         automatically finalize it; to finalize the write, `.commit()` must be
         called explicitly or `finalize_on_close` must be set to `True`.
+        With `autocommit=False` (commit protection), closing never publishes a
+        new version, regardless of `finalize_on_close`: partial content stays
+        unfinalized until `.commit()` finalizes it, and `.discard()` revokes
+        the write, after which neither `.commit()` nor closing publishes.
         On Zonal and RCU buckets an overwrite replaces the existing object as
         soon as the writer opens, so a failed append, flush or commit leaves
         the partially written object in its place, unfinalized. An exception
@@ -98,10 +102,15 @@ class ZonalFile(GCSFile):
                 )
             else:
                 finalize_on_close = False
+        if not autocommit:
+            # Commit protection: only an explicit commit() publishes the
+            # object; closing the file never finalizes it.
+            finalize_on_close = False
         self.aaow = None
         self.mrd_pool = None
         self.finalize_on_close = finalize_on_close
         self.finalized = False
+        self.discarded = False
         self.mode = mode
         self.flush_interval_bytes = flush_interval_bytes
         self.gcsfs = gcsfs
@@ -419,6 +428,9 @@ class ZonalFile(GCSFile):
         if not self.writable():  # No-op
             logger.warning("File not in write mode. Ignoring commit call.")
             return
+        if self.discarded:  # No-op
+            logger.warning("This file has been discarded. Ignoring commit call.")
+            return
         if self.finalized:  # No-op
             logger.warning(
                 "This file has already been finalized. Ignoring commit call."
@@ -446,11 +458,32 @@ class ZonalFile(GCSFile):
         self.forced = True
 
     def discard(self):
-        """Discard is not applicable for Zonal and RCU buckets. Log a warning instead."""
-        logger.warning(
-            "Discard is not applicable for Zonal and RCU buckets. \
-            Data is uploaded via streaming and cannot be cancelled."
-        )
+        """Revoke this write without publishing a new version.
+
+        Fragments already streamed to the server are cleaned up when the file
+        closes, but neither commit() nor closing the file finalizes the
+        object, so readers keep seeing the previously published generation.
+        """
+        if self.closed:
+            return
+        if not self.writable():  # No-op
+            logger.warning("File not in write mode. Ignoring discard call.")
+            return
+        if self.finalized:  # No-op
+            logger.warning(
+                "This file has already been finalized. Ignoring discard call."
+            )
+            return
+        if self.discarded:  # No-op
+            logger.warning(
+                "This file has already been discarded. Ignoring discard call."
+            )
+            return
+        self.discarded = True
+        # Close-only from here: no closing flush and no finalize on close,
+        # but _close_impl still tears down the open writer stream.
+        self.finalize_on_close = False
+        self.forced = True
 
     def _initiate_upload(self):
         """Initiates the upload for Zonal and RCU buckets using gRPC."""

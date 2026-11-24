@@ -96,10 +96,10 @@ The table below highlights how core filesystem and file-level operations change 
      - Buffers data locally. ``flush`` streams the buffered chunks to the AAOW stream for persistence. The default flush interval is 16 MiB (compared to 5 MiB in regional buckets). Note that ``flush`` is more expensive for Rapid buckets as the gRPC stream must update ``persisted_size``.
    * - **discard**
      - Cancels an in-progress HTTP multi-upload and cleans up.
-     - **Not applicable.** Logs a warning since streaming data cannot be canceled.
+     - Revokes the write without publishing a new version. Already streamed fragments are cleaned up when the file closes, but neither ``.commit()`` nor closing finalizes the object, so readers keep seeing the previously published generation.
    * - **close**
      - Finalizes the file upload to GCS.
-     - Closes streams but leaves the object unfinalized (appendable) by default. Use ``finalize_on_close=True`` when opening file or use ``.commit()`` to finalize. Note that ``autocommit`` does not work for Rapid buckets.
+     - Closes streams but leaves the object unfinalized (appendable) by default. Use ``finalize_on_close=True`` when opening file or use ``.commit()`` to finalize. With ``autocommit=False`` (commit protection), closing never publishes a new version: partial content stays unfinalized until ``.commit()`` finalizes it, and ``.discard()`` revokes the write.
    * - **mv**
      - Object-level copy-and-delete logic.
      - Uses native, atomic ``rename_folder`` API for folders. All directory semantics described in the :doc:`HNS documentation <hns_buckets>` also apply for Rapid.
@@ -208,9 +208,9 @@ When working with Rapid Storage in ``gcsfs``, keep the following GCS limitations
 1. **HNS Requirement:** You cannot use Rapid Storage without a Hierarchical Namespace. All directory semantics described in the :doc:`HNS documentation <hns_buckets>` apply here (e.g., real folder resources, strict ``mkdir`` behavior).
 2. **Append Semantics:** In a standard flat GCS bucket, appending to a file is typically a costly operation requiring a full object download and rewrite. Rapid Storage supports **native appends**. When you open a file in append mode (``ab``), ``gcsfs`` natively appends to the object and the object's size grows in real-time.
 3. **Single Writer:** Appendable objects can only have one active writer at a time. If a new write stream is established for an object, the original stream is interrupted and will return an error from Cloud Storage.
-4. **Finalization and Autocommit:** Once an object is finalized (e.g., the write stream is closed), you can no longer append to it. To take advantage of **native appends**, gcsfs keeps the object unfinalized by default. The ``autocommit`` argument will not work for Rapid buckets. If you want to finalize the object upon closing, you must specify ``finalize_on_close=True`` when opening the file.
+4. **Finalization and Autocommit:** Once an object is finalized (e.g., the write stream is closed), you can no longer append to it. To take advantage of **native appends**, gcsfs keeps the object unfinalized by default. If you want to finalize the object upon closing, you must specify ``finalize_on_close=True`` when opening the file. With ``autocommit=False`` (commit protection), closing never finalizes the object, regardless of ``finalize_on_close``: only an explicit ``.commit()`` publishes a new version, and ``.discard()`` revokes the write so that neither ``.commit()`` nor closing publishes.
 5. **Metadata and Object Size:** When fetching metadata, the object size might be stale for objects that are unfinalized and still being appended to. Additionally, setting ``contentType``, ``metadata``, ``fixed_key_metadata``, and ``kmsKeyName`` is not supported during upload to Rapid buckets.
-6. **Transactions:** ``transaction`` feature is not supported in Rapid buckets since it relies on ``discard()`` method which is not supported for Rapid buckets.
+6. **Transactions:** On Rapid buckets, a rolled-back ``transaction`` calls ``discard()``, which revokes the write without publishing a new version; fragments already streamed are cleaned up when the file closes.
 7. **Write Buffering:** The flush interval is 16 MiB for writes in Rapid buckets, compared to 5 MiB in regional buckets. Calling ``flush`` is also more expensive in Rapid buckets because the gRPC stream must update the ``persisted_size``.
 8. **Incompatibilities:** Rapid buckets currently do not support certain standard GCS features, full list is here: https://docs.cloud.google.com/storage/docs/rapid/rapid-bucket#incompatibilities
 
