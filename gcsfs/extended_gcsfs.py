@@ -32,6 +32,7 @@ from google.cloud.storage.asyncio.async_multi_range_downloader import (
 from gcsfs import __version__ as version
 from gcsfs import zb_hns_utils
 from gcsfs._dircache import HnsDirCacheUpdater
+from gcsfs.folder_move import FolderMoveRegistry
 from gcsfs.concurrency import split_range
 from gcsfs.core import (
     GCSFile,
@@ -257,6 +258,11 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         """
         self.fast_lro_polling = fast_lro_polling
         self.rcu_rapid_write = _parse_bool_flag(rcu_rapid_write, "rcu_rapid_write")
+        # Tracks submitted HNS folder renames by their server-side operation
+        # name so a client that disconnected or hit a polling timeout can
+        # re-attach and confirm the real server state instead of assuming the
+        # permission handover already happened.
+        self.folder_moves = FolderMoveRegistry()
         valid_keys = DEFAULT_RETRY_CONFIG.keys()
         self.retry_config = {
             k[6:]: v
@@ -1366,6 +1372,119 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                 "retrying."
             ) from e
 
+    def _record_rename_failure(self, handle, operation, exc):
+        """Marks a tracked rename failed only for a definite terminal error.
+
+        Timeouts, cancellations and transport errors leave the handle pending:
+        none of them prove what the server did, so the handover must not be
+        inferred. Only an operation that is already ``done`` with an error
+        settles the move as failed.
+        """
+        op = getattr(operation, "operation", None)
+        terminal_error = (
+            op is not None
+            and getattr(op, "done", False)
+            and getattr(op, "HasField", lambda _: False)("error")
+        )
+        if terminal_error:
+            handle.mark_failed(exc)
+
+    async def _rebuild_folder_operation(self, operation_name):
+        """Rebuilds an ``AsyncOperation`` handle for a previously submitted LRO.
+
+        A disconnected or timed-out client only retains the operation name; the
+        Storage Control transport's long-running operations client re-attaches
+        to it by name so polling can resume against the live server state.
+        """
+        from google.api_core import operation_async
+        from google.longrunning import operations_pb2
+        from google.protobuf import empty_pb2
+
+        client = await self._get_control_plane_client()
+        operations_client = client.transport.operations_client
+
+        async def _refresh(*, retry=None, **_kwargs):
+            request = operations_pb2.GetOperationRequest(name=operation_name)
+            return await operations_client.get_operation(request, retry=retry)
+
+        async def _cancel(*_args, **_kwargs):
+            request = operations_pb2.CancelOperationRequest(name=operation_name)
+            await operations_client.cancel_operation(request)
+
+        initial = operations_pb2.Operation(name=operation_name)
+        return operation_async.AsyncOperation(
+            initial,
+            _refresh,
+            _cancel,
+            result_type=empty_pb2.Empty,
+        )
+
+    async def _resume_folder_move(
+        self,
+        operation_name,
+        *,
+        source=None,
+        destination=None,
+        request_id=None,
+        poll_timeout=_HNS_RENAME_FOLDER_LRO_TIMEOUT,
+    ):
+        """Re-attaches to a submitted folder rename and confirms its real state.
+
+        This is the safe path after the original ``mv`` returned an operation
+        id and the client disconnected, or after a polling timeout. It never
+        guesses: it re-queries the server and only swaps visibility/dircache on
+        a confirmed success. A status check that fails to reach the server
+        propagates the error and leaves the move pending so the caller can retry.
+
+        Args:
+            operation_name: Server-side LRO name (the long-operation number).
+            source: Stripped source path. Only used to register a move that this
+                filesystem instance did not itself submit; otherwise the stored
+                handle supplies it.
+            destination: Stripped destination path, same caveat as ``source``.
+            request_id: Original idempotency token, same caveat.
+            poll_timeout: Overall wait bound for the resumed poll.
+
+        Returns:
+            dict: A snapshot of the move handle after reconciliation.
+        """
+        try:
+            handle = self.folder_moves.get(operation_name)
+        except KeyError:
+            if source is None or destination is None:
+                raise KeyError(
+                    f"No tracked folder move for operation {operation_name!r}; "
+                    "pass source and destination to resume an operation owned by "
+                    "another client/process."
+                )
+            handle = self.folder_moves.register(
+                operation_name,
+                self._strip_protocol(source).rstrip("/"),
+                self._strip_protocol(destination).rstrip("/"),
+                request_id or operation_name,
+            )
+
+        if handle.is_terminal:
+            # Already reconciled; do not re-issue a dircache swap or a poll.
+            return handle.snapshot()
+
+        operation = await self._rebuild_folder_operation(operation_name)
+        # Re-raise typed operation errors and transient/timeout errors without
+        # settling the move; only a clean completion reaches the success branch.
+        await poll_lro(operation, timeout=poll_timeout)
+        handle.mark_succeeded()
+        self._update_dircache_after_rename(handle.source, handle.destination)
+        return handle.snapshot()
+
+    async def _folder_move_status(self, operation_name):
+        """Returns the tracked state of a folder move without mutating anything.
+
+        A ``pending`` result means the permission handover has not happened and
+        the source path remains authoritative. Use
+        :meth:`_resume_folder_move` to actively re-query the server.
+        """
+        return self.folder_moves.get(operation_name).snapshot()
+
     async def _mv(self, path1, path2, **kwargs):
         """
         Move a file or directory. Overrides the parent `_mv` to provide an
@@ -1440,6 +1559,15 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                     timeout=STORAGE_CONTROL_RPC_TIMEOUT,
                 )
                 rename_submitted = True
+                destination_path = f"{bucket2}/{destination_folder_id.rstrip('/')}"
+                # Register before waiting so the operation id survives a
+                # disconnect or a polling timeout and can be resumed later.
+                handle = self.folder_moves.register(
+                    operation.operation.name or request.request_id,
+                    self._strip_protocol(path1).rstrip("/"),
+                    self._strip_protocol(destination_path).rstrip("/"),
+                    request.request_id,
+                )
                 try:
                     if self.fast_lro_polling:
                         await self._wait_for_folder_rename(
@@ -1451,12 +1579,17 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
                         )
                     else:
                         await unwrap_operation_result(operation)
-                    self._update_dircache_after_rename(
-                        path1, f"{bucket2}/{destination_folder_id.rstrip('/')}"
-                    )
+                    # Only a confirmed server success flips ownership and lets
+                    # the targeted dircache swap run. RenameFolder returns an
+                    # Empty payload, so the handle only records the outcome.
+                    handle.mark_succeeded()
+                    self._update_dircache_after_rename(path1, destination_path)
                 except BaseException as e:
                     # The rename may still be running or may already have
-                    # finished, so cached listings can't be trusted.
+                    # finished, so cached listings can't be trusted. A timeout
+                    # or cancellation leaves the handle pending for later
+                    # confirmation; a definite operation error marks it failed.
+                    self._record_rename_failure(handle, operation, e)
                     self.invalidate_cache(path1)
                     self.invalidate_cache(path2)
                     logger.warning(
@@ -2873,6 +3006,15 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
 # Wrap ExtendedGcsFileSystem's own sync/async overrides (e.g. `mv`, `rm`, `_cat_file`, `_find`)
 # so they propagate caller framework telemetry; inherited GCSFileSystem methods are already wrapped.
 mirror_gcs_methods(ExtendedGcsFileSystem)
+
+# These are gcsfs-specific (not fsspec standard) methods, so mirror_gcs_methods
+# does not generate their sync forms; bind them explicitly.
+ExtendedGcsFileSystem.resume_folder_move = asyn.sync_wrapper(
+    ExtendedGcsFileSystem._resume_folder_move
+)
+ExtendedGcsFileSystem.folder_move_status = asyn.sync_wrapper(
+    ExtendedGcsFileSystem._folder_move_status
+)
 
 
 async def upload_chunk(fs, location, data, offset, size, content_type):
