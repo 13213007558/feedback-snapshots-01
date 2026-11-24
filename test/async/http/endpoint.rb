@@ -7,6 +7,9 @@
 
 require "async/http/endpoint"
 
+require "openssl"
+require "sus/fixtures/openssl/valid_certificate_context"
+
 describe Async::HTTP::Endpoint do
 	it "should fail to parse relative url" do
 		expect do
@@ -200,5 +203,79 @@ describe Async::HTTP::Endpoint.parse("http://www.google.com/search") do
 		other = Async::HTTP::Endpoint.parse("http://www.google.com/search?q=ruby")
 		expect(subject).not.to be == other
 		expect(subject).not.to be(:eql?, other)
+	end
+end
+
+describe Async::HTTP::Endpoint do
+	with "#connection_identity" do
+		include Sus::Fixtures::OpenSSL::ValidCertificateContext
+		
+		it "is equal for endpoints with the same approved configuration" do
+			first = subject.parse("https://example.com", alpn_protocols: ["h2", "http/1.1"])
+			second = subject.parse("https://example.com", alpn_protocols: ["h2", "http/1.1"])
+			
+			expect(first.connection_identity).to be == second.connection_identity
+		end
+		
+		it "changes when the approved ALPN offer changes" do
+			endpoint = subject.parse("https://example.com", alpn_protocols: ["http/1.1"])
+			identity = endpoint.connection_identity
+			
+			endpoint.update(alpn_protocols: ["h2"])
+			
+			expect(endpoint.connection_identity).not.to be == identity
+		end
+		
+		it "changes when the approved certificate on the SSL context changes in place" do
+			original_certificate = certificate
+			replacement_key = OpenSSL::PKey::RSA.new(2048)
+			replacement_certificate = ::OpenSSL::X509::Certificate.new.tap do |replacement|
+				replacement.subject = certificate_name
+				replacement.issuer = certificate_authority_certificate.subject
+				replacement.public_key = replacement_key.public_key
+				replacement.serial = 3
+				replacement.version = 2
+				replacement.not_before = Time.now - 10
+				replacement.not_after = Time.now + 3600
+				replacement.sign(certificate_authority_key, ::OpenSSL::Digest::SHA256.new)
+			end
+			
+			context = OpenSSL::SSL::SSLContext.new
+			context.set_params(verify_mode: OpenSSL::SSL::VERIFY_NONE)
+			context.cert = original_certificate
+			context.key = key
+			
+			endpoint = subject.parse("https://example.com", ssl_context: context)
+			identity = endpoint.connection_identity
+			
+			# Rotate the approved certificate in place, without replacing the endpoint or context:
+			context.cert = replacement_certificate
+			context.key = replacement_key
+			
+			expect(endpoint.connection_identity).not.to be == identity
+		end
+		
+		it "changes when the protocol changes" do
+			endpoint = subject.parse("https://example.com")
+			identity = endpoint.connection_identity
+			
+			endpoint.update(protocol: Async::HTTP::Protocol::HTTP2)
+			
+			expect(endpoint.connection_identity).not.to be == identity
+			expect(endpoint.protocol).to be == Async::HTTP::Protocol::HTTP2
+		end
+		
+		it "does not expose certificate material" do
+			context = OpenSSL::SSL::SSLContext.new
+			context.set_params(verify_mode: OpenSSL::SSL::VERIFY_NONE)
+			context.cert = certificate
+			context.key = key
+			
+			endpoint = subject.parse("https://example.com", ssl_context: context)
+			rendered = endpoint.connection_identity.to_s
+			
+			expect(rendered).not.to be(:include?, "PRIVATE KEY")
+			expect(rendered).not.to be(:include?, "BEGIN CERTIFICATE")
+		end
 	end
 end

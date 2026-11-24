@@ -1,5 +1,11 @@
 # Releases
 
+## v0.106.0
+
+  - `Async::HTTP::Endpoint#connection_identity` describes the approved TLS certificate material, verification policy, protocol and ALPN offer used to establish connections.
+  - `Async::HTTP::Client` rotates its connection pool when that identity changes, so requests never reuse a connection established with a different certificate or protocol. Connections from the previous pool remain available to in-flight responses and are closed once those responses are released.
+  - Added `Async::HTTP::Endpoint#update` for applying an approved TLS or protocol change in place.
+
 ## v0.105.0
 
   - Respond with `400 Bad Request` for any `Protocol::HTTP::BadRequest` raised while parsing HTTP/1 or HTTP/2 requests, include the exception class name without reflecting request data, and avoid reporting them as unhandled server errors.

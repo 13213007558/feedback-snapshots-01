@@ -127,6 +127,37 @@ end
 
 The block form of ruby:`Async::HTTP::Internet` performs this cleanup automatically. When using ruby:`Async::HTTP::Client`, close the response explicitly with an `ensure` block. Holding an unread response while waiting for another request can exhaust an HTTP/1 pool and make the second request wait indefinitely.
 
+## Rotating Approved TLS Configuration
+
+A ruby:`Async::HTTP::Endpoint` describes the approved TLS configuration for an origin: the certificate material, the verification policy, the negotiated protocol and the ALPN offer. ruby:`Async::HTTP::Endpoint#connection_identity` derives a comparable identity from those values, so it changes when the approved configuration changes, including when an `OpenSSL::SSL::SSLContext` is updated in place.
+
+ruby:`Async::HTTP::Client` checks this identity before each request. When it changes — for example, a new certificate is published and the protocol moves from HTTP/1 to HTTP/2 — the client rotates to a new pool. Requests issued after the change use connections created with the new identity; they never reuse a connection established with the previous certificate or protocol.
+
+Connections from the retired pool remain usable by responses which are already in progress. The client closes them once those responses are released, so in-flight streams are allowed to drain instead of being aborted. Explicitly closing the client also waits for retired pools before closing their connections.
+
+~~~ ruby
+require "async/http"
+
+endpoint = Async::HTTP::Endpoint.parse("https://service.example.com")
+
+Sync do
+	Async::HTTP::Client.open(endpoint) do |client|
+		# Uses the first approved configuration:
+		response = client.get("/status")
+		response.read
+		
+		# Publish a new approved certificate/protocol combination. The endpoint is updated in place:
+		endpoint.update(ssl_context: new_approved_context, protocol: Async::HTTP::Protocol::HTTP2)
+		
+		# The next request uses a new connection with the updated certificate and ALPN offer:
+		response = client.get("/status")
+		response.read
+	end
+end
+~~~
+
+The same rotation applies when the endpoint is replaced with ruby:`Async::HTTP::Client#endpoint=`. Keep a client alive for repeated requests to the same origin so that same-configuration requests can continue to reuse connections.
+
 ## Pool Life Cycle
 
 Connection pools are bound to the event loop in which they are used. Their internal maintenance task is transient, so it does not keep the event loop alive and closes the pool when the event loop exits.

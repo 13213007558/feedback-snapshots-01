@@ -15,6 +15,8 @@ require "io/endpoint/ssl_endpoint"
 require_relative "protocol/http"
 require_relative "protocol/https"
 
+require "digest"
+require "openssl"
 require "uri"
 
 module Async
@@ -80,8 +82,11 @@ module Async
 				@url = url
 				
 				if endpoint
+					# Remember the original endpoint so that `#update` can rebuild the TLS wrapper against the same underlying transport:
+					@underlying_endpoint = endpoint
 					@endpoint = self.build_endpoint(endpoint)
 				else
+					@underlying_endpoint = nil
 					@endpoint = nil
 				end
 			end
@@ -212,6 +217,41 @@ module Async
 				@options[:tls_configuration]
 			end
 			
+			# A content-derived identity for connections to this endpoint.
+			#
+			# The identity describes the approved certificate material, verification policy, negotiated protocols and ALPN offer. It is deliberately derived from the current values of the options rather than from object identity, because an approved TLS configuration may be updated in place (for example, by replacing the certificate on an `OpenSSL::SSL::SSLContext`). Connections created for one identity must not be reused for another, and the client uses this value to select the appropriate connection pool.
+			#
+			# Only digests of certificate and key material are included, never the material itself.
+			#
+			# @returns [Array] A frozen, comparable identity.
+			def connection_identity
+				[
+					scheme,
+					hostname,
+					port,
+					protocol_identity,
+					tls_identity,
+				].freeze
+			end
+
+			# @returns [Array] The approved certificate material, verification policy and ALPN offer used when establishing a connection.
+			def tls_identity
+				tls_connection_identity
+			end
+			
+			# Apply an update to the endpoint's options, such as a new approved TLS configuration or ALPN protocol list.
+			#
+			# The resolved underlying endpoint is rebuilt so that subsequent connections use the updated configuration. Existing connections are not modified; use {Client#refresh_pool!} (or simply make another request, which refreshes automatically) to rotate the connection pool when {#connection_identity} changes.
+			#
+			# @parameter options [Hash] The options to merge into the current options.
+			# @returns [Endpoint] This endpoint.
+			def update(**options)
+				@options = @options.merge(options).freeze
+				@endpoint = nil
+				
+				return self
+			end
+			
 			# Build a suitable endpoint, optionally wrapping in TLS for secure connections.
 			# @parameter endpoint [IO::Endpoint::Generic | Nil] An optional underlying endpoint to wrap.
 			# @returns [IO::Endpoint::Generic] The constructed endpoint.
@@ -233,12 +273,13 @@ module Async
 			
 			# @returns [IO::Endpoint::Generic] The resolved endpoint, built on demand.
 			def endpoint
-				@endpoint ||= build_endpoint
+				@endpoint ||= build_endpoint(@underlying_endpoint)
 			end
 			
 			# Set the underlying endpoint, wrapping it as needed.
 			# @parameter endpoint [IO::Endpoint::Generic] The endpoint to assign.
 			def endpoint=(endpoint)
+				@underlying_endpoint = endpoint
 				@endpoint = build_endpoint(endpoint)
 			end
 			
@@ -279,6 +320,101 @@ module Async
 			end
 			
 			protected
+			
+			# @returns [Array] The identity of the protocol used to create connections.
+			def protocol_identity
+				protocol = self.protocol
+				
+				if protocol.respond_to?(:protocol)
+					# Configured protocols delegate to an underlying protocol, and some expose their own configuration:
+					[protocol.class, protocol.protocol, protocol.respond_to?(:options) ? protocol.options : nil]
+				else
+					[protocol]
+				end
+			end
+			
+			# @returns [Array] The identity of the TLS material and negotiation used to create connections.
+			def tls_connection_identity
+				return freeze_identity unless secure?
+				
+				[
+					ssl_context_identity,
+					tls_configuration_identity,
+					alpn_identity,
+					ssl_verify_mode,
+				].freeze
+			end
+			
+			def freeze_identity
+				[:insecure].freeze
+			end
+			
+			def alpn_identity
+				protocols = self.alpn_protocols
+				protocols&.map{|name| name.to_s.dup.freeze}&.freeze
+			end
+			
+			def tls_configuration_identity
+				if configuration = self.tls_configuration
+					[
+						trust_store_identity(configuration.trust_store),
+						certificate_chain_identity(configuration.certificate_chain),
+						digest_identity(configuration.private_key),
+						configuration.verification,
+					].freeze
+				end
+			end
+			
+			def trust_store_identity(trust_store)
+				if trust_store
+					[
+						trust_store.certificates.map{|certificate| digest_identity(certificate)},
+						trust_store.system_certificates?,
+					].freeze
+				end
+			end
+			
+			def ssl_context_identity
+				context = @options[:ssl_context]
+				
+				if context
+					[
+						context.verify_mode,
+						context.verify_hostname,
+						context.alpn_protocols&.map{|name| name.to_s.dup.freeze}&.freeze,
+						certificate_chain_identity(context.extra_chain_cert),
+						digest_identity(context.cert),
+						digest_identity(context.key),
+						cert_store_identity(context.cert_store),
+					].freeze
+				else
+					[:default, self.ssl_verify_mode].freeze
+				end
+			end
+			
+			def cert_store_identity(cert_store)
+				# An `OpenSSL::X509::Store` does not expose its certificates for enumeration, and its `inspect` includes verification state which changes as handshakes complete. Use the store's stable object identity instead: replacing the store is observed, while a store shared by several approved configurations remains a shared reference.
+				cert_store ? [cert_store.class, cert_store.object_id] : nil
+			end
+			
+			def certificate_chain_identity(chain)
+				chain&.map{|certificate| digest_identity(certificate)}&.freeze
+			end
+			
+			def digest_identity(material)
+				case material
+				when nil
+					nil
+				when String
+					Digest::SHA256.hexdigest(material)
+				else
+					if material.respond_to?(:to_der)
+						Digest::SHA256.hexdigest(material.to_der)
+					else
+						Digest::SHA256.hexdigest(material.to_s)
+					end
+				end
+			end
 			
 			def tcp_options
 				options = @options.dup
