@@ -65,7 +65,7 @@ end
 
 This is really useful if you have complex conditions which require `joins`. A couple of caveats:
 
-- You cannot use this with multiple `can` definitions that match the same action and model since it is not possible to combine them. An exception will be raised when that is the case.
+- You cannot combine this with another rule that uses a raw SQL string or array of SQL fragments for the same action and model, since those cannot be reduced to a queryable relation. An exception is raised when that is the case. A scope can still be combined with hash conditions and with other scopes; see [Fetching records](./fetching_records.md).
 - If you use this with `cannot`, the scope needs to be the inverse since it's passed directly through. For example, if you don't want someone to read discontinued products the scope will need to fetch non discontinued ones:
 
 ```ruby

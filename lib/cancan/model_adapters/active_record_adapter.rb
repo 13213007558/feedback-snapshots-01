@@ -131,8 +131,12 @@ module CanCan
       end
 
       def database_records
-        if override_scope
-          merge_override_scope
+        if scope_rules?
+          if single_scope_rule?
+            merge_override_scope
+          else
+            ScopeMerger.new(@model_class, @compressed_rules).merge
+          end
         elsif @model_class.respond_to?(:where) && @model_class.respond_to?(:joins)
           build_relation(where_conditions)
         else
@@ -203,26 +207,25 @@ module CanCan
       # so the conditions it dropped, like the one of an association like `category.articles`, are applied again.
       # The conditions the scope removes with `unscope`, like the ones of a default scope, stay removed.
       def merge_override_scope
-        merged = @model_class.where(nil).merge(override_scope)
+        merged = @model_class.where(nil).merge(sole_scope)
         base = @model_class.where(nil)
-        base = base.unscope(*override_scope.unscope_values) if override_scope.unscope_values.any?
+        base = base.unscope(*sole_scope.unscope_values) if sole_scope.unscope_values.any?
         dropped = base.where_clause.send(:predicates) - merged.where_clause.send(:predicates)
         dropped.inject(merged) { |relation, predicate| relation.where(predicate) }
       end
 
-      def override_scope
-        conditions = @compressed_rules.map(&:conditions).compact
-        return unless conditions.any? { |c| c.is_a?(ActiveRecord::Relation) }
-        return conditions.first if conditions.size == 1
-
-        raise_override_scope_error
+      def scope_rules?
+        @compressed_rules.any? { |rule| rule.conditions.is_a?(ActiveRecord::Relation) }
       end
 
-      def raise_override_scope_error
-        rule_found = @compressed_rules.detect { |rule| rule.conditions.is_a?(ActiveRecord::Relation) }
-        raise Error,
-              'Unable to merge an Active Record scope with other conditions. ' \
-              "Instead use a hash or SQL for #{rule_found.actions.first} #{rule_found.subjects.first} ability."
+      # A single scope rule, with no other condition to combine, keeps using the historical `merge` path.
+      def single_scope_rule?
+        non_empty_conditions = @compressed_rules.reject { |rule| rule.conditions.is_a?(Hash) && rule.conditions.empty? }
+        non_empty_conditions.size == 1 && non_empty_conditions.first.conditions.is_a?(ActiveRecord::Relation)
+      end
+
+      def sole_scope
+        @compressed_rules.detect { |rule| rule.conditions.is_a?(ActiveRecord::Relation) }.conditions
       end
 
       # Returns the merged sql and whether it is a flat chain of OR conditions.

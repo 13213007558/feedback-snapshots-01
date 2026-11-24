@@ -72,6 +72,28 @@ Even if the default behaviour will suffice at the beginning, larger databases or
 This might result in a slow fetching of records. This is why it is possible to use different strategies to generate the SQL.
 You will see that in one of the last chapters: [SQL strategies](./sql_strategies.md)
 
+## Combining a scope with hash conditions
+
+A rule can use an already filtered Active Record relation instead of a hash of conditions. This is handy when a coverage domain is built with `joins`, `group` or other query clauses that cannot be expressed as a flat hash.
+
+```ruby
+# departments a user belongs to, expressed as a relation on projects
+can :read, Project, Project.joins(:department).where(departments: { active: true })
+# explicit, additional grants and restrictions on top of that domain
+can :read, Project, priority: 2
+cannot :read, Project, archived: true
+```
+
+CanCanCan keeps the combination queryable. Every rule is reduced to the set of its primary keys and the sets are combined with set algebra:
+
+```text
+(scope rules OR hash `can` rules) AND NOT hash `cannot` rules
+```
+
+The result stays an Active Record relation, so ordering, scopes and pagination can still be chained onto it. Plain hash conditions, including conditions that filter through associations, keep working exactly as before.
+
+A scope cannot be combined with a raw SQL condition (a string or an array of SQL fragments), because the fragment has no relation that can be reduced to a set of keys. In that case `accessible_by` raises a `CanCan::Error`; rewrite the rule as a hash or move the SQL into a relation.
+
 ## Blocks
 
 We haven't spoken about block abilities yet, but the SQL generation will not be possible if you have even a single rule that is defined using just a block.

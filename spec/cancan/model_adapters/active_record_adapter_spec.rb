@@ -362,9 +362,22 @@ RSpec.describe CanCan::ModelAdapters::ActiveRecordAdapter do
         expect(PublicArticle.accessible_by(@ability)).to match_array([article1, article2])
       end
 
-      it 'raises an exception when trying to merge scope with other conditions' do
+      it 'merges a scope with hash conditions instead of raising' do
         @ability.can :read, Article, published: true
         @ability.can :read, Article, Article.where(secret: true)
+        published_and_not_secret = Article.create!(published: true, secret: false)
+        secret_and_not_published = Article.create!(published: false, secret: true)
+        both = Article.create!(published: true, secret: true)
+        Article.create!(published: false, secret: false)
+
+        expect(Article.accessible_by(@ability)).to match_array(
+          [published_and_not_secret, secret_and_not_published, both]
+        )
+      end
+
+      it 'raises an exception when trying to merge a scope with raw SQL conditions' do
+        @ability.can :read, Article, ['secret = ?', true]
+        @ability.can :read, Article, Article.where(published: true)
         expect { Article.accessible_by(@ability) }
           .to raise_error(CanCan::Error,
                           'Unable to merge an Active Record scope with other conditions. ' \
