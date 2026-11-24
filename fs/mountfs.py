@@ -123,6 +123,84 @@ class MountFS(FS):
         self.mounts.append((_path, fs))
         self.default_fs.makedirs(_path, recreate=True)
 
+    def unmount(self, path, close=True):
+        # type: (Text, bool) -> FS
+        """Remove a filesystem mounted at ``path``.
+
+        Note that this only removes the *mapping* between the mount path
+        and its filesystem. Any handles already opened through the mount
+        keep working, because they hold a direct reference to the
+        underlying filesystem. Set ``close`` to `False` if you need to
+        drain those handles yourself before closing the old filesystem.
+
+        Arguments:
+            path (str): The mount path to remove.
+            close (bool): If `True` (the default), the detached
+                filesystem is closed once it has been removed from the
+                mount table.
+
+        Returns:
+            FS: the filesystem that was mounted at ``path``.
+
+        Raises:
+            ~fs.mountfs.MountError: if nothing is mounted at ``path``.
+
+        """
+        _path = forcedir(abspath(normpath(path)))
+        for index, (mount_path, fs) in enumerate(self.mounts):
+            if mount_path == _path:
+                del self.mounts[index]
+                placeholder = _path.rstrip("/")
+                if self.default_fs.isdir(placeholder) and not \
+                        self.default_fs.listdir(placeholder):
+                    self.default_fs.removedir(placeholder)
+                if close:
+                    fs.close()
+                return fs
+        raise MountError("no filesystem mounted on {}".format(path))
+
+    def remount(self, path, fs):
+        # type: (Text, Union[FS, Text]) -> FS
+        """Atomically replace the filesystem mounted at ``path``.
+
+        The mount table is updated in place, so paths that fall under
+        other mounts are unaffected. The previous filesystem is
+        returned *open*: existing read handles keep reading from it
+        under their original authorization until the caller closes it,
+        while every new request resolves to ``fs``. Nothing is written
+        to the new filesystem as a side effect of the switch.
+
+        Arguments:
+            path (str): The mount path to replace.
+            fs (FS or str): The new filesystem to mount (instance or
+                FS URL).
+
+        Returns:
+            FS: the filesystem previously mounted at ``path``, still
+            open so in-flight handles can finish.
+
+        Raises:
+            ~fs.mountfs.MountError: if nothing is mounted at ``path``.
+
+        """
+        if isinstance(fs, text_type):
+            from .opener import open_fs
+
+            fs = open_fs(fs)
+
+        if not isinstance(fs, FS):
+            raise TypeError("fs argument must be an FS object or a FS URL")
+
+        if fs is self:
+            raise ValueError("Unable to mount self")
+
+        _path = forcedir(abspath(normpath(path)))
+        for index, (mount_path, old_fs) in enumerate(self.mounts):
+            if mount_path == _path:
+                self.mounts[index] = (_path, fs)
+                return old_fs
+        raise MountError("no filesystem mounted on {}".format(path))
+
     def close(self):
         # type: () -> None
         # Explicitly closes children if requested

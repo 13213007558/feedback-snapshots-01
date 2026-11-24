@@ -43,6 +43,23 @@ Now both filesystems may be accessed with the same path structure::
     print(combined_fs.gettext('/config/defaults.cfg'))
     read_jpg(combined_fs.open('/resources/images/logo.jpg', 'rb')
 
+Replacing a Mount
+-----------------
+
+A single mount can be replaced without touching the others with
+``remount``. The previous filesystem is returned *open* rather than
+closed: handles that were opened before the switch keep working against
+the old filesystem, while every new request resolves to the replacement.
+This lets an in-flight read or copy finish under its original
+authorization instead of having its writes leak into the new space::
+
+    old_fs = combined_fs.remount('config', new_config_fs)
+    # ... drain existing handles against old_fs ...
+    old_fs.close()
+
+Use ``unmount`` to remove a mount entirely, keeping the detached
+filesystem open with ``close=False`` when you need to drain it first.
+
 .. autoclass:: fs.mountfs.MountFS
    :members:
 
