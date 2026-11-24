@@ -181,6 +181,28 @@ links no CUDA itself; allocating device memory stays the application's job.
 Set `S3RDMA_DEVICE` to pin a particular HCA on a multi-NIC host; otherwise
 the first usable device is selected.
 
+### Failure boundary
+
+Opting in never makes an operation RDMA-only. If RDMA is unavailable on the
+node, or a transfer fails before it starts, the same request is retried over
+HTTPS with the same credentials and signing configuration. A failure after the
+transfer started is raised instead, so a partial read or a possibly committed
+upload is never mistaken for "try again":
+
+* `RDMANotStarted` — nothing was sent and the SDK already fell back to HTTPS.
+* `RDMAPartialTransfer` — some bytes moved. For a download into `into=`, its
+  `bytes_transferred` bytes at the start of the buffer are valid and the
+  remainder is untouched. Do not transparently retry.
+* `RDMACommitUnknown` — an upload may already be committed by the server.
+  `etag`/`checksum` carry any acknowledgement that was observed; reconcile
+  (for example with `stat_object`) instead of uploading again as a fresh
+  overwrite.
+
+A raw `int` pointer (e.g. a GPU buffer) cannot fall back to HTTPS, because the
+CPU cannot read or write device memory to build or fill an HTTP body; those
+operations raise `RDMAFallbackUnavailable` when RDMA cannot run with a host
+buffer instead.
+
 See `examples/put_object_rdma.py` and `examples/get_object_rdma.py`.
 
 ## More References

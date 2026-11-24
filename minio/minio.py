@@ -81,6 +81,11 @@ from .models import (AbortMultipartUploadResponse, Checksum,
                      SelectObjectResponse, SSEConfig, StatObjectResponse,
                      Tagging, Tags, UploadPartCopyResponse, UploadPartResponse,
                      VersioningConfig, parse_list_objects)
+# ``rdma`` is imported lazily on first use (see ``Minio._rdma``) so the SDK
+# stays pure-Python when RDMA is not enabled; the failure types are the only
+# part needed here for the dispatch decision.
+from .rdma import (RDMAError, RDMAFallbackUnavailable, RDMANotAvailable,
+                   RDMANotStarted, RDMATransferError)
 from .signer import presign_v4, sign_v4_s3
 from .sse import Sse, SseCustomerKey
 from .xml import ET, Element, SubElement, getbytes, marshal, unmarshal
@@ -151,6 +156,21 @@ class Minio:
                 (PUT) or ``into`` (GET). Requires ``libminiocpp.so`` to be
                 loadable at runtime. When False, RDMA arguments are ignored
                 and the HTTP path is used unconditionally.
+
+                Opting in never makes the operation RDMA-only. If RDMA is
+                unavailable or a transfer fails before it starts, the same
+                request is retried over HTTPS with the same credentials. A
+                failure after the transfer started is raised instead of being
+                retried, so callers can tell the three cases apart:
+
+                * :class:`~minio.rdma.RDMANotStarted` -- nothing was sent;
+                  the SDK already fell back to HTTPS.
+                * :class:`~minio.rdma.RDMAPartialTransfer` -- some bytes
+                  moved; for a get, ``bytes_transferred`` is the valid prefix
+                  of ``into`` and the remaining bytes are untouched.
+                * :class:`~minio.rdma.RDMACommitUnknown` -- a put may already
+                  be committed; reconcile (e.g. with ``stat_object``) rather
+                  than uploading again.
 
         Notes:
             The `Minio` object is thread-safe when used with the Python
@@ -262,6 +282,104 @@ class Minio:
             self._http.clear()
         if getattr(self, "_rdma_client", None) is not None:
             self._rdma_client.close()
+
+    @staticmethod
+    def _rdma_fallback_stream(
+            data: Union[int, memoryview, bytes, bytearray],
+            length: int,
+    ) -> BytesIO:
+        """Adapt an RDMA buffer to a readable stream for the HTTPS fallback.
+
+        Only used when the RDMA transfer never started, so no byte has left
+        the process yet and the buffer is still the caller's original data.
+        The snapshot is taken once, up front, so the HTTP upload signs and
+        sends exactly the bytes the caller passed.
+
+        A raw int pointer is rejected: it may name device memory (the README
+        documents GPU pointers passed this way), and the CPU cannot read that
+        to build an HTTP body.
+        """
+        if isinstance(data, int):
+            raise RDMAFallbackUnavailable(
+                "RDMA upload did not start, and HTTPS cannot fall back for a "
+                "raw RDMA pointer because it may name device memory; pass a "
+                "host buffer (bytearray or writable memoryview) to allow the "
+                "fallback.")
+        if isinstance(data, memoryview):
+            payload = data.tobytes()
+        else:
+            # bytes or bytearray; copy so a later caller mutation cannot
+            # change what gets uploaded after the request is prepared.
+            payload = bytes(data)
+        if len(payload) < length:
+            raise ValueError(
+                f"length {length} exceeds buffer size {len(payload)}")
+        return BytesIO(payload[:length])
+
+    @staticmethod
+    def _check_rdma_fallback_buffer(
+            into: Union[memoryview, bytearray, int],
+    ) -> None:
+        """Reject an ``into=`` target the HTTPS fallback cannot fill safely.
+
+        The fallback only runs when nothing was written. A raw int pointer may
+        name device memory (the README documents GPU pointers passed this
+        way), and the CPU cannot write an HTTP body into it.
+        """
+        if isinstance(into, int):
+            raise RDMAFallbackUnavailable(
+                "RDMA download did not start, and HTTPS cannot fall back for "
+                "a raw RDMA pointer because it may name device memory; pass "
+                "a host buffer (bytearray or writable memoryview) to allow "
+                "the fallback.")
+
+    @staticmethod
+    def _check_rdma_get_target(into: Union[memoryview, bytearray, int]) -> int:
+        """Validate an ``into=`` RDMA get target and return its length.
+
+        The caller's buffer is written in place, so it must be writable and
+        contiguous. ``bytes`` and read-only memoryviews are rejected here
+        rather than silently written into a copy the caller never sees. A raw
+        int pointer has no inferable length; ``length=`` must accompany it.
+        """
+        if isinstance(into, int):
+            if isinstance(into, bool) or into <= 0:
+                raise ValueError(
+                    "raw RDMA pointer must be a positive address, not bool")
+            return 0
+        if isinstance(into, memoryview):
+            if not into.contiguous:
+                raise ValueError("memoryview must be contiguous for RDMA")
+            if into.readonly:
+                raise ValueError(
+                    "read-only memoryview cannot be used as an RDMA get "
+                    "target; pass a writable buffer")
+            return into.nbytes
+        if isinstance(into, bytearray):
+            return len(into)
+        raise TypeError(
+            f"unsupported buffer type for RDMA get target: "
+            f"{type(into).__name__}; pass bytearray, writable memoryview, "
+            f"or a raw int pointer"
+        )
+
+    @staticmethod
+    def _fill_rdma_buffer(
+            into: Union[memoryview, bytearray],
+            data: bytes,
+            length: int,
+    ) -> int:
+        """Copy HTTP response bytes into the caller's RDMA ``into=`` buffer.
+
+        Used only on the not-started fallback path, where the buffer is still
+        untouched. Returns the number of bytes written, matching the RDMA
+        path's return value. Raw pointers are rejected before this point (see
+        ``_check_rdma_fallback_buffer``), so no device memory is touched here.
+        """
+        target = into.cast("B") if isinstance(into, memoryview) else into
+        count = min(len(data), length)
+        target[:count] = data[:count]
+        return count
 
     @staticmethod
     def _get_part_info(object_size: int, part_size: int) -> tuple[int, int]:
@@ -2922,10 +3040,24 @@ class Minio:
             extra_query_params (Optional[HTTPQueryDict], default=None):
                 Extra query parameters for advanced usage.
 
+            into (Optional[Union[memoryview, bytearray, int]], default=None):
+                Pre-allocated writable buffer to receive the object data. When
+                set, the data is written in place and the call returns the
+                number of bytes transferred instead of a
+                :class:`~minio.models.GetObjectResponse`. The buffer must be
+                contiguous and writable; ``bytes`` and read-only memoryviews
+                are rejected. With ``enable_rdma=True`` this selects the RDMA
+                download path; a not-started RDMA failure transparently
+                falls back to HTTPS and fills the same buffer. A partial RDMA
+                failure raises :class:`~minio.rdma.RDMAPartialTransfer`; its
+                ``bytes_transferred`` bytes at the start of the buffer are
+                valid and the remainder is untouched.
+
         Returns:
-            GetObjectResponse:
-                An :class:`minio.models.GetObjectResponse` object containing
-                the object data.
+            Union[GetObjectResponse, int]:
+                A :class:`minio.models.GetObjectResponse` object containing
+                the object data, or the number of bytes written when ``into``
+                is given.
 
         Example:
             >>> # Get data of an object
@@ -2976,20 +3108,51 @@ class Minio:
 
         # RDMA dispatch — write directly into the caller's into= buffer and
         # return the byte count.
+        #
+        # Failure boundary: only a transfer that was explicitly NOT_STARTED
+        # (or one that never got a library/device to begin with) may fall back
+        # to HTTPS; the buffer is still untouched in those cases, so the HTTP
+        # path fills it instead and the same return contract applies. Once
+        # bytes may have been written into the caller's buffer, or the server
+        # may already have answered, the error is surfaced as-is so the caller
+        # decides what to do. Falling back after a partial read would hand
+        # back a buffer that mixes RDMA and HTTP data with no way to tell
+        # where one ends.
+        into_buffer = False
+        buf_len = 0
         if self._rdma_enabled and into is not None:
-            buf_len = (
-                length if length is not None
-                else (len(into) if hasattr(into, "__len__") else 0)
-            )
+            into_buffer = True
+            target_len = self._check_rdma_get_target(into)
+            buf_len = length if length is not None else target_len
             if not isinstance(buf_len, int) or buf_len <= 0:
                 raise ValueError(
                     "length must be provided (or into must be a sized buffer)")
-            return self._rdma().get(bucket_name, object_name, into, buf_len)
+            if target_len and buf_len > target_len:
+                raise ValueError(
+                    f"length {buf_len} exceeds buffer size {target_len}")
+            try:
+                return self._rdma().get(bucket_name, object_name, into,
+                                        buf_len)
+            except RDMATransferError as exc:
+                if not isinstance(exc, RDMANotStarted):
+                    # Bytes may already be in the caller's buffer or the
+                    # outcome is unknown; surface it rather than hiding it
+                    # behind an HTTP read.
+                    raise
+                # Nothing was written; the HTTP path can fill the buffer.
+                self._check_rdma_fallback_buffer(into)
+            except RDMAError:
+                # No local RDMA device, or client setup failed before any
+                # transfer: nothing started, so HTTPS with the same
+                # credentials is still valid.
+                self._check_rdma_fallback_buffer(into)
 
         headers = self._gen_read_headers(
             ssec=ssec,
             offset=offset,
-            length=length,
+            # An into= read copies the same window the RDMA path would, so
+            # the HTTP fallback must not return more than the buffer holds.
+            length=buf_len if into_buffer else length,
             match_etag=match_etag,
             not_match_etag=not_match_etag,
             modified_since=modified_since,
@@ -3011,6 +3174,18 @@ class Minio:
             extra_headers=extra_headers,
             extra_query_params=extra_query_params,
         )
+        if into_buffer:
+            # Same contract as the RDMA path: bytes go into the caller's
+            # buffer, the return value is the byte count, and the response is
+            # released before returning. Read at most what the buffer holds so
+            # a large object cannot balloon memory on the fallback path.
+            try:
+                data = response.read(buf_len) or b""
+            finally:
+                response.release_conn()
+            return self._fill_rdma_buffer(
+                cast(Union[memoryview, bytearray], into), data, buf_len,
+            )
         return GetObjectResponse(
             response=response,
             bucket_name=bucket_name,
@@ -3936,17 +4111,43 @@ class Minio:
         # RDMA dispatch — only when the SDK was opted in AND the caller passed
         # a contiguous buffer object (memoryview / bytes / bytearray / raw int
         # pointer). A streaming BinaryIO falls through to the HTTP path.
+        #
+        # Failure boundary: only a transfer that was explicitly NOT_STARTED
+        # may fall back to HTTPS, and then with the caller's original data and
+        # headers — the same request, just over HTTP. A started upload is
+        # never re-issued as a fresh overwrite: once bytes may have reached the
+        # server the outcome is unknown, and a blind retry here could replace
+        # an object the server already committed. ``RDMACommitUnknown`` keeps
+        # any acknowledgement the native call observed so the caller can
+        # reconcile instead.
         if self._rdma_enabled and isinstance(
                 data, (int, memoryview, bytes, bytearray)) and length > 0:
-            _nbytes, etag, _checksum = self._rdma().put(
-                bucket_name, object_name, data, length)
-            return ObjectWriteResponse(
-                headers=HTTPHeaderDict({"etag": etag}),
-                bucket_name=bucket_name,
-                region=region or "",
-                object_name=object_name,
-                etag=etag,
-            )
+            rdma_data: Optional[BinaryIO] = None
+            try:
+                _nbytes, etag, _checksum = self._rdma().put(
+                    bucket_name, object_name, data, length)
+            except RDMANotStarted:
+                # Nothing was sent; hand the HTTP path a snapshot of the
+                # caller's buffer so the upload proceeds normally.
+                rdma_data = self._rdma_fallback_stream(data, length)
+            except RDMANotAvailable:
+                # No local RDMA device; use HTTPS as configured.
+                rdma_data = self._rdma_fallback_stream(data, length)
+            except RDMATransferError:
+                raise  # Started and failed; do not re-upload blindly.
+            except RDMAError:
+                # Client setup failed before any transfer: nothing started,
+                # so HTTPS with the same credentials is still valid.
+                rdma_data = self._rdma_fallback_stream(data, length)
+            else:
+                return ObjectWriteResponse(
+                    headers=HTTPHeaderDict({"etag": etag}),
+                    bucket_name=bucket_name,
+                    region=region or "",
+                    object_name=object_name,
+                    etag=etag,
+                )
+            data = cast(BinaryIO, rdma_data)
 
         part_size, part_count = self._get_part_info(length, part_size)
         if progress:

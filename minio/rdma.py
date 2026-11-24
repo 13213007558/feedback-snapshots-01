@@ -16,16 +16,117 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.util
+import enum
 import os
 from typing import Optional, Union
 
 
-class RDMANotAvailable(RuntimeError):
-    """libminiocpp.so could not be loaded."""
-
-
 class RDMAError(RuntimeError):
     """libminiocpp.so returned an error from a put/get call."""
+
+
+class RDMANotAvailable(RDMAError):
+    """RDMA cannot be used on this host (library or device unavailable)."""
+
+
+class RDMAStatus(enum.IntEnum):
+    """Outcome of a failed ``miniocpp_put_object``/``get_object`` call.
+
+    The native call reports a negative byte count on failure and fills the
+    trailing ``miniocpp_xfer_result`` out-parameter. The status is what makes
+    the failure boundary explicit:
+
+    ``NOT_STARTED``
+        No byte was handed to the transport. Nothing reached the server, so
+        the caller may retry the same operation over HTTPS with the same
+        credentials and signing configuration.
+
+    ``PARTIAL``
+        The transfer began and some bytes moved. For a get, the leading
+        ``bytes_transferred`` bytes of the caller's buffer are valid and the
+        rest must be treated as untouched. The operation must not be
+        transparently retried.
+
+    ``COMMIT_UNKNOWN``
+        All (or an unknown part of) the data may have reached the server and
+        an acknowledgement may already exist. The outcome of a put is
+        unknown: the caller must reconcile instead of issuing the upload
+        again as if it were a fresh overwrite.
+    """
+
+    NOT_STARTED = 0
+    PARTIAL = 1
+    COMMIT_UNKNOWN = 2
+
+
+class RDMATransferError(RDMAError):
+    """Base class for a failed transfer with an explicit outcome boundary."""
+
+    def __init__(self, message: str, *, bytes_transferred: int = 0):
+        self.bytes_transferred = bytes_transferred
+        super().__init__(message)
+
+
+class RDMANotStarted(RDMATransferError):
+    """The transfer did not start; retrying over HTTPS is safe."""
+
+
+class RDMAFallbackUnavailable(RDMATransferError):
+    """The transfer did not start, but HTTPS cannot stand in for it.
+
+    Raised when the caller passed a raw int pointer, which may name device
+    memory: nothing was sent, yet the CPU cannot read or write that memory to
+    carry the same operation over HTTP. Pass a host buffer to enable the
+    fallback.
+    """
+
+
+class RDMAPartialTransfer(RDMATransferError):
+    """The transfer started and stopped partway through.
+
+    For a get, ``bytes_transferred`` is the length of the valid prefix of the
+    caller-supplied buffer. For a put, it is the number of bytes the transport
+    accepted before the failure. Never retry this as a fresh operation.
+    """
+
+
+class RDMAOutcomeUnknown(RDMATransferError):
+    """The native call failed without a trustworthy transfer outcome."""
+
+
+class RDMACommitUnknown(RDMAOutcomeUnknown):
+    """A started put may already have been committed by the server.
+
+    ``etag``/``checksum`` preserve any server acknowledgement the native call
+    observed before it failed. Use them to reconcile (for example with
+    ``stat_object``) instead of uploading the object again.
+    """
+
+    def __init__(
+            self,
+            message: str,
+            *,
+            bytes_transferred: int = 0,
+            etag: Optional[str] = None,
+            checksum: Optional[str] = None,
+    ):
+        self.etag = etag
+        self.checksum = checksum
+        super().__init__(message, bytes_transferred=bytes_transferred)
+
+
+class _TransferResult(ctypes.Structure):
+    """Trailing out-parameter of the native put/get calls.
+
+    ``status`` is one of :class:`RDMAStatus` and ``bytes_transferred`` is the
+    number of bytes that moved before the failure. On success the return value
+    is authoritative and this struct is ignored.
+    """
+
+    _fields_ = [
+        ("status", ctypes.c_int),
+        ("bytes_transferred", ctypes.c_size_t),
+    ]
 
 
 # Largest transfer a single RDMA descriptor can describe: the
@@ -75,14 +176,20 @@ def _load() -> ctypes.CDLL:
     lib.miniocpp_client_free.argtypes = [void_p]
     lib.miniocpp_client_free.restype = None
 
+    # The trailing _TransferResult out-parameter carries the failure boundary
+    # (NOT_STARTED / PARTIAL / COMMIT_UNKNOWN). Libraries predating it simply
+    # leave the sentinel we pre-fill in place, which is reported as an unknown
+    # outcome -- never as "safe to retry".
     lib.miniocpp_put_object.argtypes = [
         void_p, c_char_p, c_char_p, void_p, c_size_t,
         void_p, void_p, char_buf64, char_buf64,
+        ctypes.POINTER(_TransferResult),
     ]
     lib.miniocpp_put_object.restype = c_ssize_t
 
     lib.miniocpp_get_object.argtypes = [
         void_p, c_char_p, c_char_p, void_p, c_size_t, void_p, void_p,
+        ctypes.POINTER(_TransferResult),
     ]
     lib.miniocpp_get_object.restype = c_ssize_t
 
@@ -134,6 +241,67 @@ def _last_error(lib: ctypes.CDLL) -> str:
     """Return the thread-local last error string from libminiocpp."""
     msg = lib.miniocpp_last_error()
     return msg.decode() if msg else "unknown error"
+
+
+def _new_transfer_result() -> _TransferResult:
+    """Return an out-parameter pre-filled with the "no outcome" sentinel.
+
+    A library that fills the struct overwrites the sentinel; one that does not
+    (older libminiocpp) leaves it in place, so a failure without a reported
+    boundary is treated as an unknown outcome rather than "safe to retry".
+    """
+    # ctypes Structure fields are initialized through its constructor.
+    return _TransferResult(status=-1, bytes_transferred=0)
+
+
+def _transfer_failure(
+    operation: str,
+    detail: str,
+    result: _TransferResult,
+    *,
+    etag: str = "",
+    checksum: str = "",
+) -> RDMATransferError:
+    """Map a native failure onto the typed transfer-outcome boundary."""
+    try:
+        status = RDMAStatus(result.status)
+    except ValueError:
+        return RDMAOutcomeUnknown(
+            f"RDMA {operation} failed without a reported outcome: {detail}",
+            bytes_transferred=int(result.bytes_transferred),
+        )
+
+    moved = int(result.bytes_transferred)
+    if status is RDMAStatus.NOT_STARTED:
+        if moved:
+            return RDMAOutcomeUnknown(
+                f"RDMA {operation} reported no start but "
+                f"{moved} bytes moved: {detail}",
+                bytes_transferred=moved,
+            )
+        return RDMANotStarted(
+            f"RDMA {operation} did not start: {detail}"
+        )
+    if status is RDMAStatus.PARTIAL:
+        return RDMAPartialTransfer(
+            f"RDMA {operation} transferred {moved} bytes before failing; "
+            f"do not retry as a fresh operation: {detail}",
+            bytes_transferred=moved,
+        )
+    if operation == "put":
+        return RDMACommitUnknown(
+            f"RDMA put outcome is unknown; the server may already have "
+            f"committed the object, reconcile before retrying: {detail}",
+            bytes_transferred=moved,
+            etag=etag or None,
+            checksum=checksum or None,
+        )
+    return RDMAOutcomeUnknown(
+        f"RDMA {operation} failed after {moved} bytes with an unknown "
+        f"outcome; treat the already-written prefix as valid and the rest "
+        f"as untouched: {detail}",
+        bytes_transferred=moved,
+    )
 
 
 def _buffer_pointer(
@@ -215,8 +383,9 @@ class RDMAClient:
 
     def close(self) -> None:
         """Release the underlying miniocpp_client* handle."""
-        if self._handle:
-            self._lib.miniocpp_client_free(self._handle)
+        handle = getattr(self, "_handle", None)
+        if handle:
+            self._lib.miniocpp_client_free(handle)
             self._handle = None
 
     def __del__(self):
@@ -248,13 +417,20 @@ class RDMAClient:
             )
         etag = (ctypes.c_char * 64)()
         checksum = (ctypes.c_char * 64)()
+        result = _new_transfer_result()
         nbytes = self._lib.miniocpp_put_object(
             self._handle, bucket.encode(), obj.encode(),
-            ctypes.c_void_p(ptr), size, None, None, etag, checksum,
+            ctypes.c_void_p(ptr), size, None, None, etag, checksum, result,
         )
         del owner
         if nbytes < 0:
-            raise RDMAError(f"RDMA put: {_last_error(self._lib)}")
+            raise _transfer_failure(
+                "put",
+                _last_error(self._lib),
+                result,
+                etag=etag.value.decode(errors="replace").replace('"', ""),
+                checksum=checksum.value.decode(errors="replace"),
+            )
         return (
             int(nbytes),
             etag.value.decode(errors="replace").replace('"', ""),
@@ -282,11 +458,12 @@ class RDMAClient:
                 f"describe; split into parts of at most that many "
                 f"bytes (multipart upload / ranged read)"
             )
+        result = _new_transfer_result()
         nbytes = self._lib.miniocpp_get_object(
             self._handle, bucket.encode(), obj.encode(),
-            ctypes.c_void_p(ptr), size, None, None,
+            ctypes.c_void_p(ptr), size, None, None, result,
         )
         del owner
         if nbytes < 0:
-            raise RDMAError(f"RDMA get: {_last_error(self._lib)}")
+            raise _transfer_failure("get", _last_error(self._lib), result)
         return int(nbytes)
