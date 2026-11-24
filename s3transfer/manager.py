@@ -66,6 +66,8 @@ class TransferConfig:
         max_in_memory_upload_chunks=10,
         max_in_memory_download_chunks=10,
         max_bandwidth=None,
+        restrict_downloads=False,
+        download_file_mode=0o600,
     ):
         """Configurations for the transfer manager
 
@@ -137,6 +139,20 @@ class TransferConfig:
         :param max_bandwidth: The maximum bandwidth that will be consumed
             in uploading and downloading file content. The value is in terms of
             bytes per second.
+
+        :param restrict_downloads: When True, downloads to a filename create
+            their temporary file with owner-only permissions (``0o600`` by
+            default) from the instant the file is visible, and atomically
+            rename it into place. This prevents other principals on a shared
+            directory from reading an in-progress archive. If the final
+            filename already exists, its existing permission bits are
+            preserved. Caller-supplied file objects are never chmod'ed; the
+            caller remains responsible for their permissions.
+
+        :param download_file_mode: The permission bits used for newly created
+            download files when ``restrict_downloads`` is True. Defaults to
+            ``0o600``. Ignored for an already-existing destination (whose
+            permissions are preserved) and for caller-supplied file objects.
         """
         self.multipart_threshold = multipart_threshold
         self.multipart_chunksize = multipart_chunksize
@@ -150,10 +166,14 @@ class TransferConfig:
         self.max_in_memory_upload_chunks = max_in_memory_upload_chunks
         self.max_in_memory_download_chunks = max_in_memory_download_chunks
         self.max_bandwidth = max_bandwidth
+        self.restrict_downloads = restrict_downloads
+        self.download_file_mode = download_file_mode
         self._validate_attrs_are_nonzero()
 
     def _validate_attrs_are_nonzero(self):
         for attr, attr_val in self.__dict__.items():
+            if isinstance(attr_val, bool):
+                continue
             if (
                 attr_val is not None
                 and attr_val is not self.UNSET_DEFAULT
@@ -374,7 +394,10 @@ class TransferManager:
         :type fileobj: str or seekable file-like object
         :param fileobj: The name of a file to download or a seekable file-like
             object to download. It is recommended to use a filename because
-            file-like objects may result in higher memory usage.
+            file-like objects may result in higher memory usage. When a
+            file-like object is supplied, s3transfer writes into it at the
+            appropriate offsets but does not close it or change its
+            permissions; the caller retains ownership of its access level.
 
         :type extra_args: dict
         :param extra_args: Extra arguments that may be passed to the

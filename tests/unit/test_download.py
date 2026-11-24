@@ -11,9 +11,12 @@
 # ANY KIND, either express or implied. See the License for the specific
 # language governing permissions and limitations under the License.
 import copy
+import glob
 import os
 import shutil
+import stat
 import tempfile
+import threading
 from io import BytesIO
 from types import SimpleNamespace
 
@@ -49,6 +52,7 @@ from tests import (
     RecordingExecutor,
     StreamWithError,
     mock,
+    skip_if_windows,
     unittest,
 )
 
@@ -570,6 +574,84 @@ class TestDownloadSubmissionTask(BaseSubmissionTaskTest):
         # Make sure no tag to limit that task specifically was not associated
         # to that task submission.
         self.assert_tag_for_get_object(IN_MEMORY_DOWNLOAD_TAG)
+
+    def enable_restricted_downloads(self, file_mode=0o600):
+        self.config.restrict_downloads = True
+        self.config.download_file_mode = file_mode
+
+    def temp_file_artifacts(self):
+        return glob.glob(self.filename + '.*')
+
+    def assert_file_permission_mode(self, filename, expected):
+        actual = stat.S_IMODE(os.stat(filename).st_mode)
+        self.assertEqual(actual, expected)
+
+    @skip_if_windows('POSIX file permission bits are required')
+    def test_restricted_download_sets_final_file_private(self):
+        self.enable_restricted_downloads()
+        self.add_head_object_response()
+        self.add_get_responses()
+
+        self.submission_task = self.get_download_submission_task()
+        self.wait_and_assert_completed_successfully(self.submission_task)
+
+        self.assert_file_permission_mode(self.filename, 0o600)
+        self.assertEqual(self.temp_file_artifacts(), [])
+
+    @skip_if_windows('POSIX file permission bits are required')
+    def test_restricted_ranged_download_keeps_part_temp_private(self):
+        self.configure_for_ranged_get()
+        self.enable_restricted_downloads()
+        self.add_head_object_response()
+        self.add_get_responses()
+
+        self.submission_task = self.get_download_submission_task()
+        self.wait_and_assert_completed_successfully(self.submission_task)
+
+        # Every ranged part writes into the same restricted temporary file and
+        # the atomically delivered final object stays owner-only.
+        with open(self.filename, 'rb') as f:
+            self.assertEqual(f.read(), self.content)
+        self.assert_file_permission_mode(self.filename, 0o600)
+        self.assertEqual(self.temp_file_artifacts(), [])
+
+    @skip_if_windows('POSIX file permission bits are required')
+    def test_restricted_download_preserves_existing_final_mode(self):
+        with open(self.filename, 'wb') as f:
+            f.write(b'pre-existing')
+        os.chmod(self.filename, 0o640)
+
+        self.enable_restricted_downloads()
+        self.add_head_object_response()
+        self.add_get_responses()
+
+        self.submission_task = self.get_download_submission_task()
+        self.wait_and_assert_completed_successfully(self.submission_task)
+
+        with open(self.filename, 'rb') as f:
+            self.assertEqual(f.read(), self.content)
+        self.assert_file_permission_mode(self.filename, 0o640)
+        self.assertEqual(self.temp_file_artifacts(), [])
+
+    @skip_if_windows('POSIX file permission bits are required')
+    def test_restricted_download_does_not_chmod_caller_fileobj(self):
+        caller_filename = self.filename + '.caller'
+        with open(caller_filename, 'wb') as f:
+            f.write(b'x')
+        os.chmod(caller_filename, 0o640)
+
+        self.enable_restricted_downloads()
+        self.add_head_object_response()
+        self.add_get_responses()
+
+        with open(caller_filename, 'r+b') as f:
+            self.use_fileobj_in_call_args(f)
+            self.submission_task = self.get_download_submission_task()
+            self.wait_and_assert_completed_successfully(self.submission_task)
+            # s3transfer does not close or chmod the caller-owned object even
+            # when restricted downloads are enabled.
+            self.assertFalse(f.closed)
+            self.assert_file_permission_mode(caller_filename, 0o640)
 
 
 class TestGetObjectTask(BaseTaskTest):
@@ -1117,3 +1199,456 @@ def test_first_chunk_callback_when_transfer_done_submits_final_task(
     first_chunk_callback.transfer_coordinator.submit.assert_called_once_with(
         first_chunk_callback.io_executor, first_chunk_callback.final_task
     )
+
+
+class OneShotGate:
+    """Blocks a worker once until the test reaches and releases a checkpoint."""
+
+    def __init__(self, name, timeout=10):
+        self.name = name
+        self.timeout = timeout
+        self.reached = threading.Event()
+        self._release = threading.Event()
+        self._lock = threading.Lock()
+        self._hit = False
+
+    def hit(self):
+        with self._lock:
+            if self._hit:
+                return
+            self._hit = True
+            self.reached.set()
+        if not self._release.wait(self.timeout):
+            raise AssertionError(f'timed out waiting to release {self.name}')
+
+    def wait_reached(self):
+        if not self.reached.wait(self.timeout):
+            raise AssertionError(f'timed out waiting for {self.name}')
+
+    def release(self):
+        self._release.set()
+
+    def release_if_blocked(self):
+        self._release.set()
+
+
+class PausableFile:
+    """File wrapper that pauses once after the first successful write."""
+
+    def __init__(self, raw, osutil):
+        self._raw = raw
+        self._osutil = osutil
+        self._write_seen = False
+
+    def write(self, data):
+        result = self._raw.write(data)
+        self._raw.flush()
+        if not self._write_seen:
+            self._write_seen = True
+            if self._osutil.fail_during_write:
+                # Pause at the failure instant (bytes are already durable and
+                # the mode must still be the restrictive/final one), then let
+                # the failure propagate so cleanup is exercised.
+                self._osutil.failure_gate.hit()
+                raise OSError('simulated write failure')
+            self._osutil.write_gate.hit()
+        return result
+
+    def __getattr__(self, item):
+        return getattr(self._raw, item)
+
+
+class StagePausingOSUtils(OSUtils):
+    """Test double that pauses once at create/write/failure/rename."""
+
+    def __init__(self, fail_during_write=False):
+        super().__init__()
+        self.fail_during_write = fail_during_write
+        self.create_gate = OneShotGate('create')
+        self.write_gate = OneShotGate('write')
+        self.failure_gate = OneShotGate('failure')
+        self.rename_gate = OneShotGate('rename')
+        self.opened = []
+        self.renamed = []
+
+    def open_restricted(self, filename, mode='wb', file_mode=None):
+        raw = super().open_restricted(filename, mode, file_mode)
+        self.opened.append(filename)
+        paused = PausableFile(raw, self)
+        self.create_gate.hit()
+        return paused
+
+    def rename_file(self, current_filename, new_filename):
+        self.rename_gate.hit()
+        self.renamed.append((current_filename, new_filename))
+        return super().rename_file(current_filename, new_filename)
+
+    def release_all(self):
+        for gate in (
+            self.create_gate,
+            self.write_gate,
+            self.failure_gate,
+            self.rename_gate,
+        ):
+            gate.release_if_blocked()
+
+
+@skip_if_windows('POSIX file permission bits are required')
+class TestRestrictedDownloadPermissions(BaseTaskTest):
+    def setUp(self):
+        super().setUp()
+        self.tempdir = tempfile.mkdtemp()
+        self.final_filename = os.path.join(self.tempdir, 'archive.bin')
+        self.io_executor = BoundedExecutor(1000, 1)
+
+    def tearDown(self):
+        self.io_executor.shutdown()
+        shutil.rmtree(self.tempdir, ignore_errors=True)
+        super().tearDown()
+
+    def get_manager(self, osutil=None, file_mode=0o600):
+        if osutil is None:
+            osutil = OSUtils()
+        return DownloadFilenameOutputManager(
+            osutil,
+            self.transfer_coordinator,
+            io_executor=self.io_executor,
+            file_mode=file_mode,
+        )
+
+    def get_future(self):
+        return self.get_transfer_future(CallArgs(fileobj=self.final_filename))
+
+    def temp_artifacts(self):
+        return sorted(glob.glob(self.final_filename + '.*'))
+
+    def assert_file_mode(self, filename, expected):
+        actual = stat.S_IMODE(os.stat(filename).st_mode)
+        self.assertEqual(actual, expected)
+
+    def test_restricted_temp_is_born_private_and_renamed_atomically(self):
+        osutil = OSUtils()
+        manager = self.get_manager(osutil)
+        fileobj = manager.get_fileobj_for_io_writes(self.get_future())
+        temp_filename = manager._temp_filename
+
+        IOWriteTask(
+            self.transfer_coordinator,
+            main_kwargs={
+                'fileobj': fileobj,
+                'data': b'secret archive contents',
+                'offset': 0,
+            },
+        )()
+
+        # While still a temporary artifact it already carries the final,
+        # owner-only restriction even though it has been written.
+        self.assertTrue(os.path.exists(temp_filename))
+        self.assert_file_mode(temp_filename, 0o600)
+        self.assertFalse(os.path.exists(self.final_filename))
+
+        IORenameFileTask(
+            self.transfer_coordinator,
+            main_kwargs={
+                'fileobj': fileobj,
+                'final_filename': self.final_filename,
+                'osutil': osutil,
+            },
+        )()
+
+        self.assertTrue(os.path.exists(self.final_filename))
+        self.assert_file_mode(self.final_filename, 0o600)
+        self.assertFalse(os.path.exists(temp_filename))
+        with open(self.final_filename, 'rb') as f:
+            self.assertEqual(f.read(), b'secret archive contents')
+
+    def test_existing_destination_permissions_are_preserved(self):
+        with open(self.final_filename, 'wb') as f:
+            f.write(b'pre-existing')
+        os.chmod(self.final_filename, 0o640)
+
+        manager = self.get_manager(file_mode=0o600)
+        fileobj = manager.get_fileobj_for_io_writes(self.get_future())
+        # The requested mode is resolved to the existing destination mode.
+        self.assertEqual(manager._file_mode, 0o640)
+        temp_filename = manager._temp_filename
+
+        IOWriteTask(
+            self.transfer_coordinator,
+            main_kwargs={
+                'fileobj': fileobj,
+                'data': b'fresh contents',
+                'offset': 0,
+            },
+        )()
+        self.assert_file_mode(temp_filename, 0o640)
+
+        IORenameFileTask(
+            self.transfer_coordinator,
+            main_kwargs={
+                'fileobj': fileobj,
+                'final_filename': self.final_filename,
+                'osutil': manager._osutil,
+            },
+        )()
+
+        # The replacement keeps the established convention and is atomic.
+        self.assert_file_mode(self.final_filename, 0o640)
+        self.assertEqual(self.temp_artifacts(), [])
+        with open(self.final_filename, 'rb') as f:
+            self.assertEqual(f.read(), b'fresh contents')
+
+    def test_double_pauses_at_create_write_and_rename(self):
+        osutil = StagePausingOSUtils()
+        manager = self.get_manager(osutil)
+        errors = []
+        worker = threading.Thread(
+            target=self._run_create_write_rename,
+            args=(manager, osutil, errors),
+        )
+        worker.start()
+        try:
+            # Creation checkpoint: exactly one local temp file, private.
+            osutil.create_gate.wait_reached()
+            temps = self.temp_artifacts()
+            self.assertEqual(len(temps), 1, temps)
+            self.assert_file_mode(temps[0], 0o600)
+            self.assertFalse(os.path.exists(self.final_filename))
+            osutil.create_gate.release()
+
+            # Write checkpoint: bytes are present, mode is still private.
+            osutil.write_gate.wait_reached()
+            temps = self.temp_artifacts()
+            self.assertEqual(len(temps), 1, temps)
+            self.assert_file_mode(temps[0], 0o600)
+            with open(temps[0], 'rb') as f:
+                self.assertEqual(f.read(), b'secret-archive')
+            osutil.write_gate.release()
+
+            # Rename checkpoint: still only the private temp is visible and
+            # no final/public copy has appeared yet.
+            osutil.rename_gate.wait_reached()
+            temps = self.temp_artifacts()
+            self.assertEqual(len(temps), 1, temps)
+            self.assert_file_mode(temps[0], 0o600)
+            self.assertFalse(os.path.exists(self.final_filename))
+            osutil.rename_gate.release()
+
+            worker.join(10)
+            self.assertFalse(worker.is_alive(), 'worker did not finish')
+        finally:
+            osutil.release_all()
+            worker.join(2)
+
+        self.assertEqual(errors, [])
+        self.assertTrue(os.path.exists(self.final_filename))
+        self.assert_file_mode(self.final_filename, 0o600)
+        self.assertEqual(self.temp_artifacts(), [])
+
+    def _run_create_write_rename(self, manager, osutil, errors):
+        try:
+            fileobj = manager.get_fileobj_for_io_writes(self.get_future())
+            IOWriteTask(
+                self.transfer_coordinator,
+                main_kwargs={
+                    'fileobj': fileobj,
+                    'data': b'secret-archive',
+                    'offset': 0,
+                },
+            )()
+            IORenameFileTask(
+                self.transfer_coordinator,
+                main_kwargs={
+                    'fileobj': fileobj,
+                    'final_filename': self.final_filename,
+                    'osutil': osutil,
+                },
+            )()
+        except BaseException as exc:  # pragma: no cover - surfaced in test
+            errors.append(exc)
+
+    def test_double_pauses_at_failure_and_cleanup_removes_only_temp(self):
+        osutil = StagePausingOSUtils(fail_during_write=True)
+        manager = self.get_manager(osutil)
+        fileobj = manager.get_fileobj_for_io_writes(self.get_future())
+
+        task = IOWriteTask(
+            self.transfer_coordinator,
+            main_kwargs={
+                'fileobj': fileobj,
+                'data': b'secret-archive',
+                'offset': 0,
+            },
+        )
+        worker = threading.Thread(target=task)
+        worker.start()
+        try:
+            osutil.create_gate.wait_reached()
+            self.assertEqual(len(self.temp_artifacts()), 1)
+            osutil.create_gate.release()
+
+            # Failure checkpoint: the partial temp is still restricted.
+            osutil.failure_gate.wait_reached()
+            temps = self.temp_artifacts()
+            self.assertEqual(len(temps), 1, temps)
+            self.assert_file_mode(temps[0], 0o600)
+            self.assertFalse(os.path.exists(self.final_filename))
+            osutil.failure_gate.release()
+
+            worker.join(10)
+            self.assertFalse(worker.is_alive(), 'worker did not finish')
+        finally:
+            osutil.release_all()
+            worker.join(2)
+
+        # The task captured the failure; announcing done runs the scoped
+        # failure cleanups (close + remove the temp this transfer created).
+        self.assertEqual(self.transfer_coordinator.status, 'failed')
+        self.transfer_coordinator.announce_done()
+        self.assertEqual(self.temp_artifacts(), [])
+        self.assertFalse(os.path.exists(self.final_filename))
+
+    def test_cancel_before_creation_cleans_up_without_deleting_target(self):
+        # An existing destination must never be removed by cleanup.
+        with open(self.final_filename, 'wb') as f:
+            f.write(b'keep me')
+        os.chmod(self.final_filename, 0o644)
+
+        manager = self.get_manager(file_mode=0o600)
+        manager.get_fileobj_for_io_writes(self.get_future())
+        temp_filename = manager._temp_filename
+        # No temporary file has actually been created yet.
+        self.assertFalse(os.path.exists(temp_filename))
+
+        self.transfer_coordinator.cancel()
+        self.transfer_coordinator.announce_done()
+
+        # Cleanup is a safe no-op for the never-created temp and the existing
+        # target survives with its original permissions.
+        self.assertFalse(os.path.exists(temp_filename))
+        self.assertTrue(os.path.exists(self.final_filename))
+        self.assert_file_mode(self.final_filename, 0o644)
+        with open(self.final_filename, 'rb') as f:
+            self.assertEqual(f.read(), b'keep me')
+
+    def test_cancel_after_write_removes_created_temp(self):
+        manager = self.get_manager()
+        fileobj = manager.get_fileobj_for_io_writes(self.get_future())
+        temp_filename = manager._temp_filename
+
+        IOWriteTask(
+            self.transfer_coordinator,
+            main_kwargs={
+                'fileobj': fileobj,
+                'data': b'partial bytes',
+                'offset': 0,
+            },
+        )()
+        self.assertTrue(os.path.exists(temp_filename))
+        self.assert_file_mode(temp_filename, 0o600)
+
+        self.transfer_coordinator.cancel()
+        self.transfer_coordinator.announce_done()
+
+        # Cancellation reaps exactly the temp this transfer created; no final
+        # file is ever published.
+        self.assertFalse(os.path.exists(temp_filename))
+        self.assertEqual(self.temp_artifacts(), [])
+        self.assertFalse(os.path.exists(self.final_filename))
+
+    def test_retried_writes_reuse_a_single_temp_artifact(self):
+        osutil = OSUtils()
+        manager = self.get_manager(osutil)
+        fileobj = manager.get_fileobj_for_io_writes(self.get_future())
+
+        def write(data, offset):
+            IOWriteTask(
+                self.transfer_coordinator,
+                main_kwargs={
+                    'fileobj': fileobj,
+                    'data': data,
+                    'offset': offset,
+                },
+            )()
+
+        # The first attempt writes a prefix into one temp artifact.
+        write(b'part-', 0)
+        self.assertEqual(len(self.temp_artifacts()), 1)
+        self.assert_file_mode(self.temp_artifacts()[0], 0o600)
+
+        # A retry rewinds and re-streams the whole object into the SAME temp;
+        # it must not allocate an additional file to clean up.
+        write(b'full-content', 0)
+        self.assertEqual(len(self.temp_artifacts()), 1)
+
+        IORenameFileTask(
+            self.transfer_coordinator,
+            main_kwargs={
+                'fileobj': fileobj,
+                'final_filename': self.final_filename,
+                'osutil': osutil,
+            },
+        )()
+        self.assertEqual(self.temp_artifacts(), [])
+        self.assert_file_mode(self.final_filename, 0o600)
+        with open(self.final_filename, 'rb') as f:
+            self.assertEqual(f.read(), b'full-content')
+
+
+@skip_if_windows('POSIX file permission bits are required')
+class TestCallerFileObjectOwnership(BaseTaskTest):
+    def setUp(self):
+        super().setUp()
+        self.tempdir = tempfile.mkdtemp()
+        self.caller_filename = os.path.join(self.tempdir, 'caller-file')
+        self.io_executor = BoundedExecutor(1000, 1)
+
+    def tearDown(self):
+        self.io_executor.shutdown()
+        shutil.rmtree(self.tempdir, ignore_errors=True)
+        super().tearDown()
+
+    def test_caller_seekable_file_keeps_mode_and_ownership(self):
+        with open(self.caller_filename, 'wb') as f:
+            f.write(b'original')
+        os.chmod(self.caller_filename, 0o640)
+
+        caller_fileobj = open(self.caller_filename, 'r+b')
+        try:
+            manager = DownloadSeekableOutputManager(
+                OSUtils(),
+                self.transfer_coordinator,
+                io_executor=self.io_executor,
+            )
+            future = self.get_transfer_future(CallArgs(fileobj=caller_fileobj))
+
+            returned = manager.get_fileobj_for_io_writes(future)
+            self.assertIs(returned, caller_fileobj)
+
+            IOWriteTask(
+                self.transfer_coordinator,
+                main_kwargs={
+                    'fileobj': caller_fileobj,
+                    'data': b'overwritten',
+                    'offset': 0,
+                },
+            )()
+
+            final_task = manager.get_final_io_task()
+            self.assertIsInstance(final_task, CompleteDownloadNOOPTask)
+            final_task()
+
+            # s3transfer neither closes nor chmods a caller-owned object.
+            self.assertFalse(caller_fileobj.closed)
+            actual_mode = stat.S_IMODE(os.stat(self.caller_filename).st_mode)
+            self.assertEqual(actual_mode, 0o640)
+            caller_fileobj.flush()
+            caller_fileobj.seek(0)
+            self.assertEqual(caller_fileobj.read(), b'overwritten')
+        finally:
+            caller_fileobj.close()
+
+        # The ownership/mode remains the caller's after they close it too.
+        self.assertEqual(
+            stat.S_IMODE(os.stat(self.caller_filename).st_mode), 0o640
+        )

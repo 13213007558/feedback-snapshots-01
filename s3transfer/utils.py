@@ -258,6 +258,10 @@ class CountCallbackInvoker:
 class OSUtils:
     _MAX_FILENAME_LEN = 255
 
+    # Permission bits used for newly created files when restricted downloads
+    # are enabled. The owner can read/write; group and others have no access.
+    RESTRICTED_FILE_MODE = 0o600
+
     def get_file_size(self, filename):
         return os.path.getsize(filename)
 
@@ -285,6 +289,83 @@ class OSUtils:
 
     def open(self, filename, mode):
         return open(filename, mode)
+
+    def get_file_mode(self, filename):
+        """Return the permission bits of a file.
+
+        :returns: The lower 12 permission bits (e.g. ``0o600``) or ``None``
+            if the file cannot be stat'ed (for example because it does not
+            exist yet).
+        """
+        try:
+            return stat.S_IMODE(os.stat(filename).st_mode)
+        except OSError:
+            return None
+
+    def set_file_mode(self, filename, file_mode):
+        """Set the permission bits of an existing file."""
+        os.chmod(filename, file_mode)
+
+    def open_restricted(self, filename, mode='wb', file_mode=None):
+        """Open a file, creating it with the exact permission bits up front.
+
+        Unlike calling :func:`open` and then ``chmod``-ing the result, the
+        directory entry is created with ``file_mode`` (and the descriptor is
+        fchmod'ed to the exact bits before it is returned). This ensures no
+        other local principal can ever observe the file with broader
+        permissions, which matters for archives written into a directory
+        shared by multiple services.
+
+        :type filename: str
+        :param filename: The file to open/create.
+
+        :type mode: str
+        :param mode: The usual :func:`open` mode string. Only the modes used
+            for download temporary files (``wb`` and related write modes) are
+            needed.
+
+        :type file_mode: int
+        :param file_mode: The permission bits to create the file with.
+            Defaults to :attr:`RESTRICTED_FILE_MODE`.
+
+        :returns: A regular Python file object.
+        """
+        if file_mode is None:
+            file_mode = self.RESTRICTED_FILE_MODE
+        flags = self._open_flags_for_mode(mode)
+        fd = os.open(filename, flags, file_mode)
+        try:
+            # Make the requested bits authoritative regardless of umask.
+            if hasattr(os, 'fchmod'):
+                os.fchmod(fd, file_mode)
+            else:
+                self.set_file_mode(filename, file_mode)
+            return os.fdopen(fd, mode)
+        except BaseException:
+            # os.fdopen only takes ownership of the descriptor on success.
+            os.close(fd)
+            raise
+
+    def _open_flags_for_mode(self, mode):
+        if 'r' in mode and '+' in mode:
+            flags = os.O_RDWR
+        elif 'r' in mode:
+            flags = os.O_RDONLY
+        elif ('w' in mode or 'x' in mode) and '+' in mode:
+            flags = os.O_RDWR | os.O_CREAT | os.O_TRUNC
+        elif 'w' in mode or 'x' in mode:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        elif 'a' in mode and '+' in mode:
+            flags = os.O_RDWR | os.O_CREAT | os.O_APPEND
+        elif 'a' in mode:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+        else:
+            flags = os.O_RDONLY | os.O_CREAT
+        if 'x' in mode and hasattr(os, 'O_EXCL'):
+            flags |= os.O_EXCL
+        # Write binary downloads without Windows CR/LF translation.
+        flags |= getattr(os, 'O_BINARY', 0)
+        return flags
 
     def remove_file(self, filename):
         """Remove a file, noop if file does not exist."""

@@ -143,9 +143,17 @@ class DownloadOutputManager:
         raise NotImplementedError('must implement get_final_io_task()')
 
     def _get_fileobj_from_filename(self, filename):
-        f = DeferredOpenFile(
-            filename, mode='wb', open_function=self._osutil.open
-        )
+        file_mode = getattr(self, '_file_mode', None)
+        if file_mode is None:
+            open_function = self._osutil.open
+        else:
+
+            def open_function(filename, mode):
+                # Create the file with its final permission bits atomically so
+                # that the temporary artifact is never briefly world-readable.
+                return self._osutil.open_restricted(filename, mode, file_mode)
+
+        f = DeferredOpenFile(filename, mode='wb', open_function=open_function)
         # Make sure the file gets closed and we remove the temporary file
         # if anything goes wrong during the process.
         self._transfer_coordinator.add_failure_cleanup(f.close)
@@ -153,22 +161,57 @@ class DownloadOutputManager:
 
 
 class DownloadFilenameOutputManager(DownloadOutputManager):
-    def __init__(self, osutil, transfer_coordinator, io_executor):
+    def __init__(
+        self,
+        osutil,
+        transfer_coordinator,
+        io_executor,
+        file_mode=None,
+        file_permissions=None,
+    ):
         super().__init__(osutil, transfer_coordinator, io_executor)
         self._final_filename = None
         self._temp_filename = None
         self._temp_fileobj = None
+        # When set to an integer mode, managed temporary/final files are
+        # created with restricted permissions. ``file_permissions`` is an
+        # alias for the same value.
+        self._file_mode = (
+            file_mode if file_mode is not None else file_permissions
+        )
 
     @classmethod
     def is_compatible(cls, download_target, osutil):
         return isinstance(download_target, str)
 
+    def enable_restricted_permissions(self, file_mode=None):
+        """Turn on restricted file permissions for this download.
+
+        Newly created files use ``file_mode`` (default
+        :attr:`OSUtils.RESTRICTED_FILE_MODE`). If the final destination
+        already exists, its existing permission bits are preserved instead.
+        """
+        if file_mode is None:
+            file_mode = self._osutil.RESTRICTED_FILE_MODE
+        self._file_mode = file_mode
+
     def get_fileobj_for_io_writes(self, transfer_future):
         fileobj = transfer_future.meta.call_args.fileobj
         self._final_filename = fileobj
+        if self._file_mode is not None:
+            self._preserve_existing_file_mode()
         self._temp_filename = self._osutil.get_temp_filename(fileobj)
         self._temp_fileobj = self._get_temp_fileobj()
         return self._temp_fileobj
+
+    def _preserve_existing_file_mode(self):
+        # An already-present destination keeps its established permission
+        # convention. The temporary file is born with those same bits so the
+        # atomic rename never introduces a differently (and more broadly)
+        # permissioned replacement.
+        existing_mode = self._osutil.get_file_mode(self._final_filename)
+        if existing_mode is not None:
+            self._file_mode = existing_mode
 
     def get_final_io_task(self):
         # A task to rename the file from the temporary file to its final
@@ -352,9 +395,20 @@ class DownloadSubmissionTask(SubmissionTask):
         :param bandwidth_limiter: The bandwidth limiter to use when
             downloading streams
         """
-        download_output_manager = self._get_download_output_manager_cls(
+        download_output_manager_cls = self._get_download_output_manager_cls(
             transfer_future, osutil
-        )(osutil, self._transfer_coordinator, io_executor)
+        )
+        download_output_manager = download_output_manager_cls(
+            osutil, self._transfer_coordinator, io_executor
+        )
+        # Restricted permissions only apply to s3transfer-managed filenames.
+        # Caller-supplied file objects keep their existing ownership/mode.
+        if getattr(config, 'restrict_downloads', False) and isinstance(
+            download_output_manager, DownloadFilenameOutputManager
+        ):
+            download_output_manager.enable_restricted_permissions(
+                getattr(config, 'download_file_mode', None)
+            )
 
         # Skip the HEAD request only when the caller has explicitly opted out
         # of response checksum validation. Otherwise we need the HEAD to
