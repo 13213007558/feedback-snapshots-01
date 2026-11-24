@@ -5,6 +5,7 @@ import os
 import subprocess
 from copy import deepcopy
 
+import anyio
 import botocore.compat
 import dateutil.parser
 from botocore import UNSIGNED
@@ -361,9 +362,26 @@ class AioRefreshableCredentials(RefreshableCredentials):
     def _create_lock(self):
         return asyncio.Lock()
 
+    def _create_refresh_event(self):
+        # anyio.Event behaves identically on the asyncio backend and lets the
+        # anyio/trio subclass reuse the same refresh coordination logic.
+        return anyio.Event()
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self._init_refresh_coordination()
+
+    def _init_refresh_coordination(self):
         self._refresh_lock = self._create_lock()
+        # State for the single in-flight refresh. The refresh itself is owned
+        # by this credentials object and runs in a shielded task, so cancelling
+        # one waiting caller can never tear down a refresh that other callers
+        # are still waiting on. The lock only serializes attempt startup and is
+        # released before awaiting; ``_refresh_event`` is signalled when the
+        # attempt finishes and ``_refresh_error`` carries its failure.
+        self._refresh_event = self._create_refresh_event()
+        self._refresh_error = None
+        self._refresh_in_flight = False
 
     async def get_account_id(self):
         await self._refresh()
@@ -435,26 +453,97 @@ class AioRefreshableCredentials(RefreshableCredentials):
         if not self.refresh_needed(self._advisory_refresh_timeout):
             return
 
-        # By this point we need a refresh but its not critical
-        if not self._refresh_lock.locked():
-            async with self._refresh_lock:
-                if not self.refresh_needed(self._advisory_refresh_timeout):
-                    return
-                is_mandatory_refresh = self.refresh_needed(
-                    self._mandatory_refresh_timeout
-                )
-                await self._protected_refresh(
-                    is_mandatory=is_mandatory_refresh
-                )
+        # A detached, object-owned attempt may already be running. This is
+        # checked first so every entry path -- including a mandatory caller that
+        # blocked on the lock and re-entered -- joins the in-flight attempt
+        # instead of starting a duplicate. An advisory-only caller does not
+        # wait and keeps the credentials it already holds.
+        if self._refresh_in_flight:
+            if not self.refresh_needed(self._mandatory_refresh_timeout):
                 return
-        elif self.refresh_needed(self._mandatory_refresh_timeout):
-            # If we're here, we absolutely need a refresh and the
-            # lock is held so wait for it
-            async with self._refresh_lock:
-                # Might have refreshed by now
-                if not self.refresh_needed(self._mandatory_refresh_timeout):
-                    return
-                await self._protected_refresh(is_mandatory=True)
+            await self._await_in_flight_refresh()
+            return
+
+        # The lock only serializes attempt startup and is released as soon as
+        # the detached attempt is spawned, never held while awaiting it. So a
+        # caller that finds the lock busy blocks on the lock itself rather
+        # than guessing at a completion event that may not exist yet, then
+        # re-runs the full decision now that the holder has finished spawning.
+        if self._refresh_lock.locked():
+            if not self.refresh_needed(self._mandatory_refresh_timeout):
+                # An attempt is starting and we only wanted an advisory
+                # refresh: keep using the credentials we already hold.
+                return
+            await self._refresh_lock.acquire()
+            self._refresh_lock.release()
+            # The recursion is bounded to at most one extra frame: on re-entry
+            # the lock is free and the in-flight check above joins the attempt.
+            await self._refresh()
+            return
+
+        async with self._refresh_lock:
+            if not self.refresh_needed(self._advisory_refresh_timeout):
+                return
+
+            is_mandatory_refresh = self.refresh_needed(
+                self._mandatory_refresh_timeout
+            )
+            # Start the detached, object-owned attempt, then release the lock
+            # by leaving this block before waiting. If this caller is
+            # cancelled while waiting, the attempt keeps running and the lock
+            # is already free for surviving callers.
+            await self._start_refresh(is_mandatory_refresh)
+
+        await self._await_in_flight_refresh()
+
+    async def _start_refresh(self, is_mandatory):
+        """Kick off a single, object-owned refresh attempt.
+
+        The attempt is deliberately detached from the calling task's
+        cancellation scope (see ``_spawn_refresh``): cancelling the API call
+        that happened to start the refresh must not abort work that other,
+        still-running API calls are waiting on. Any state left by a previous
+        attempt is reset before the new one begins.
+        """
+        self._refresh_in_flight = True
+        self._refresh_error = None
+        self._refresh_event = self._create_refresh_event()
+        await self._spawn_refresh(
+            self._run_refresh, is_mandatory
+        )
+
+    async def _run_refresh(self, is_mandatory):
+        try:
+            await self._protected_refresh(is_mandatory=is_mandatory)
+        except BaseException as exc:
+            # Capture rather than propagate: every waiter observes the same
+            # outcome through the completion event. A waiter's own cancellation
+            # never reaches this shielded task, so the only exceptions here are
+            # genuine refresh failures (including mandatory re-raises).
+            self._refresh_error = exc
+        finally:
+            self._refresh_in_flight = False
+            self._refresh_event.set()
+
+    async def _await_in_flight_refresh(self):
+        # Bind to the current attempt's event. A retry after a transient
+        # failure installs a fresh event and a fresh error slot; re-checking
+        # ``_refresh_in_flight`` after each wake-up keeps us tied to the latest
+        # attempt instead of observing a stale result.
+        while self._refresh_in_flight:
+            event = self._refresh_event
+            await event.wait()
+        if self._refresh_error is not None:
+            raise self._refresh_error
+
+    async def _spawn_refresh(self, func, *args):
+        # asyncio backend: run the refresh as a task shielded from cancellation
+        # of the caller. The task keeps running to completion in the
+        # background even if its starter is cancelled.
+        async def _shielded():
+            await asyncio.shield(func(*args))
+
+        asyncio.create_task(_shielded())
 
     async def _protected_refresh(self, is_mandatory):
         try:
@@ -479,20 +568,43 @@ class AioRefreshableCredentials(RefreshableCredentials):
             return
         try:
             self._set_from_data(metadata)
+            # Verify the freshly retrieved material before it is ever
+            # published. The new expiry is only staged at this point, so check
+            # the staged value rather than ``_expiry_time`` (which still holds
+            # the previous generation's expiry until publish). Rejecting the
+            # material here leaves the previously accepted snapshot and its
+            # expiry untouched, so a later signature can never observe
+            # credentials already known to be invalid.
+            if self._staged_credentials_are_expired():
+                msg = (
+                    "Credentials were refreshed, but the "
+                    "refreshed credentials are still expired."
+                )
+                logger.warning(msg)
+                raise RuntimeError(msg)
             self._publish_refresh()
         finally:
             self._staged_expiry_time = None
-        if self._is_expired():
-            msg = (
-                "Credentials were refreshed, but the "
-                "refreshed credentials are still expired."
+
+    def _staged_credentials_are_expired(self):
+        return (
+            total_seconds(
+                self._staged_expiry_time - self._time_fetcher()
             )
-            logger.warning(msg)
-            raise RuntimeError(msg)
+            < 0
+        )
 
     async def get_frozen_credentials(self):
         await self._refresh()
         return self._frozen_credentials
+
+    async def aclose(self):
+        # Release any backend-specific refresh resources. Neither backend owns
+        # a resource that outlives a refresh attempt today (the asyncio backend
+        # uses short-lived shielded tasks and the anyio backend shields in line),
+        # so this is a no-op kept as a stable lifecycle hook for subclasses and
+        # callers that create refreshable credentials directly.
+        return
 
 
 class AioDeferredRefreshableCredentials(
@@ -507,16 +619,44 @@ class AioDeferredRefreshableCredentials(
         self._expiry_time = None
         self._staged_expiry_time = None
         self._time_fetcher = time_fetcher
-        self._refresh_lock = self._create_lock()
         self.method = method
         self._frozen_credentials = None
+        self._init_refresh_coordination()
 
 
 class AnyioRefreshableCredentials(AioRefreshableCredentials):
     def _create_lock(self):
-        import anyio
-
         return anyio.Lock()
+
+    def _create_refresh_event(self):
+        return anyio.Event()
+
+    async def _spawn_refresh(self, func, *args):
+        # anyio runs on either asyncio or trio.
+        #
+        # On the asyncio backend a plain ``asyncio.create_task`` wrapped in an
+        # anyio shielded cancel scope is a true background task: it is not a
+        # child of the caller's anyio task group, so cancelling the caller
+        # neither cancels the refresh nor waits for it.
+        #
+        # Trio has no detached-task primitive and anyio 4.x exposes no handle
+        # on the current nursery, so there the refresh is awaited directly but
+        # inside a shielded cancel scope. A cancellation delivered to the owner
+        # is parked at that shield until the refresh finishes, so the attempt
+        # still runs to completion and every surviving waiter observes its
+        # result through the completion event.
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            with anyio.CancelScope(shield=True):
+                await func(*args)
+            return
+
+        async def _run():
+            with anyio.CancelScope(shield=True):
+                await func(*args)
+
+        asyncio.create_task(_run())
 
 
 class AnyioDeferredRefreshableCredentials(
