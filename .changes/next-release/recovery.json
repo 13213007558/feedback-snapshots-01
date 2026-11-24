@@ -1,0 +1,5 @@
+{
+  "category": "MultipartUploadRecovery",
+  "description": "Add a journal driven recovery entry point that reconciles the job's own multipart uploads after a restart, aborting only uploads with a matching ownership credential and escalating expired or ambiguous records for manual review.",
+  "type": "feature"
+}
