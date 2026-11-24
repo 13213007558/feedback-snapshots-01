@@ -12,6 +12,8 @@ require "protocol/http/body/completable"
 require "protocol/http/error"
 require "protocol/http/methods"
 
+require_relative "error"
+require_relative "body/sent"
 require_relative "protocol"
 
 module Async
@@ -94,46 +96,65 @@ module Async
 				@pool.close
 			end
 			
-			# Send a request to the remote server, with automatic retries for idempotent requests.
+			# Send a request to the remote server, with automatic retries for requests that have not started transmitting.
+			#
+			# The request body is wrapped so its send state is tracked. A failure before any body data leaves the client means the remote endpoint never saw the request, so it is retried automatically - even for non-idempotent methods such as `POST`. Once the body has started transmitting, a transport failure is ambiguous (the request may already be processing) and is surfaced as an {AmbiguousError} instead of being silently retried, letting the application decide whether resending is safe. Read-only requests with no body continue to be retried under the existing idempotency rules.
 			# @parameter request [Protocol::HTTP::Request] The request to send.
 			# @returns [Protocol::HTTP::Response] The response from the server.
 			def call(request)
 				request.scheme ||= self.scheme
 				request.authority ||= self.authority
-				
+
+				# Track whether the request body has started transmitting so retries never duplicate a partially-sent upload:
+				body = Body::Sent.wrap(request)
+
 				attempt = 0
-				
+
 				# We may retry the request if it is possible to do so. https://tools.ietf.org/html/draft-nottingham-httpbis-retry-01 is a good guide for how retrying requests should work.
 				begin
 					attempt += 1
-					
+
 					# As we cache pool, it's possible these pool go bad (e.g. closed by remote host). In this case, we need to try again. It's up to the caller to impose a timeout on this. If this is the last attempt, we force a new connection.
 					connection = @pool.acquire
-					
+
 					response = make_response(request, connection, attempt)
-					
+
 					# This signals that the ensure block below should not try to release the connection, because it's bound into the response which will be returned:
 					connection = nil
 					return response
-				rescue ::Protocol::HTTP::RefusedError
+				rescue ::Protocol::HTTP::RefusedError => error
 					# This is a specific case where the request was not processed by the server. So, we can resend even non-idempotent requests.
 					if connection
 						@pool.release(connection)
 						connection = nil
 					end
-					
-					if attempt < @retries and request.rewind!
+
+					# The request was refused before any of it was transmitted, so the body has not been consumed and can be replayed as-is - even a non-rewindable, single-use stream is still untouched.
+					if attempt < @retries
 						retry
 					else
 						raise
 					end
-				rescue ::Protocol::HTTP::RemoteError, SocketError, IOError, EOFError, Errno::ECONNRESET, Errno::EPIPE
+				rescue ::Protocol::HTTP::RemoteError, SocketError, IOError, EOFError, Errno::ECONNRESET, Errno::EPIPE => error
 					if connection
 						@pool.release(connection)
 						connection = nil
 					end
-					
-					if attempt < @retries and request.retry!
+
+					# Once part of an upload body has been transmitted, the remote endpoint may already be processing the request. Retrying automatically risks a duplicate submission, so this is a terminal, distinguishable failure instead.
+					if body&.sent?
+						raise AmbiguousError.new(cause: error)
+					end
+
+					if body.nil?
+						# Requests without an upload body keep the established method-based idempotency rules (e.g. read-only requests are retried, a bare `POST` is not).
+						can_retry = request.retry!
+					else
+						# The upload has not started transmitting, so the remote endpoint could not have processed it. It is safe to replay regardless of the HTTP method, as long as the body can be rewound. A non-rewindable, single-use data stream cannot be sent twice, so its original error is raised instead.
+						can_retry = request.rewind!
+					end
+
+					if attempt < @retries and can_retry
 						retry
 					else
 						raise
