@@ -22,6 +22,7 @@ from s3transfer.constants import (
     KB,
     MB,
 )
+from s3transfer.contracts import CrossAccountCopyContract
 from s3transfer.copies import CopySubmissionTask
 from s3transfer.delete import DeleteSubmissionTask
 from s3transfer.download import DownloadSubmissionTask
@@ -239,7 +240,15 @@ class TransferManager:
         ),
     }
 
-    def __init__(self, client, config=None, osutil=None, executor_cls=None):
+    def __init__(
+        self,
+        client,
+        config=None,
+        osutil=None,
+        executor_cls=None,
+        contract=None,
+        copy_contract=None,
+    ):
         """A transfer manager interface for Amazon S3
 
         :param client: Client to be used by the manager
@@ -252,6 +261,13 @@ class TransferManager:
             manager. By default, concurrent.futures.ThreadPoolExecutor is used.
         """
         self._client = client
+        if contract is not None and copy_contract is not None:
+            raise TypeError(
+                'Pass either contract=... or copy_contract=..., not both'
+            )
+        self._default_copy_contract = CrossAccountCopyContract.coerce(
+            contract or copy_contract
+        )
         self._config = config
         if config is None:
             self._config = TransferConfig()
@@ -416,6 +432,8 @@ class TransferManager:
         extra_args=None,
         subscribers=None,
         source_client=None,
+        contract=None,
+        **contract_kwargs,
     ):
         """Copies a file in S3
 
@@ -448,11 +466,20 @@ class TransferManager:
             If no client is provided, the transfer manager's client is used
             as the client for the source object.
 
+        :type contract: s3transfer.contracts.CrossAccountCopyContract
+        :param contract: Optional stage-scoped source/destination encryption
+            and audit contract for cross-account encrypted copies.
+
         :rtype: s3transfer.futures.TransferFuture
         :returns: Transfer future representing the copy
         """
+        contract = self._coerce_copy_contract(contract, contract_kwargs)
+        if contract is None:
+            contract = self._default_copy_contract
         if extra_args is None:
             extra_args = {}
+        if contract is not None:
+            extra_args = contract.prepare_copy_extra_args(extra_args)
         if subscribers is None:
             subscribers = []
         if source_client is None:
@@ -493,6 +520,7 @@ class TransferManager:
             extra_args=extra_args,
             subscribers=subscribers,
             source_client=source_client,
+            contract=contract,
         )
         return self._submit_transfer(call_args, CopySubmissionTask)
 
@@ -531,6 +559,64 @@ class TransferManager:
             subscribers=subscribers,
         )
         return self._submit_transfer(call_args, DeleteSubmissionTask)
+
+    def _coerce_copy_contract(self, contract, contract_kwargs):
+        contract_aliases = (
+            'copy_contract',
+            'cross_account_contract',
+            'encryption_contract',
+        )
+        for alias in contract_aliases:
+            aliased_contract = contract_kwargs.pop(alias, None)
+            if aliased_contract is not None:
+                if contract is not None:
+                    raise TypeError(
+                        'copy() received multiple copy contract arguments'
+                    )
+                contract = aliased_contract
+
+        known_contract_kwargs = {
+            'source',
+            'destination',
+            'source_config',
+            'destination_config',
+            'source_settings',
+            'destination_settings',
+            'source_extra_args',
+            'destination_extra_args',
+            'source_profile',
+            'destination_profile',
+            'source_encryption',
+            'destination_encryption',
+            'source_encryption_settings',
+            'destination_encryption_settings',
+            'audit',
+            'audit_log',
+            'recorder',
+            'ledger',
+            'strict',
+            'source_attempts',
+            'part_attempts',
+            'max_part_attempts',
+            'part_max_attempts',
+            'max_attempts',
+            'retry_timeouts',
+            'sleeper',
+        }
+        unknown = set(contract_kwargs) - known_contract_kwargs
+        if unknown:
+            unexpected = next(iter(unknown))
+            raise TypeError(
+                f"copy() got an unexpected keyword argument {unexpected!r}"
+            )
+        if contract is None and contract_kwargs:
+            contract = CrossAccountCopyContract(**contract_kwargs)
+        elif contract is not None and contract_kwargs:
+            raise TypeError(
+                'copy() accepts either contract=... or contract keyword '
+                'arguments, not both'
+            )
+        return CrossAccountCopyContract.coerce(contract)
 
     def _validate_if_bucket_supported(self, bucket):
         # s3 high level operations don't support some resources

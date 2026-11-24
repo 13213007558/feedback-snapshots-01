@@ -16,6 +16,11 @@ from urllib.parse import parse_qsl
 
 from botocore.exceptions import ClientError
 
+from s3transfer.contracts import (
+    CrossAccountCopyContract as CrossAccountCopyContract,
+)
+from s3transfer.contracts import EncryptionConfig as EncryptionConfig
+from s3transfer.contracts import EncryptionProfile as EncryptionProfile
 from s3transfer.exceptions import S3CopyFailedError
 from s3transfer.tasks import (
     CompleteMultipartUploadTask,
@@ -131,6 +136,12 @@ class CopySubmissionTask(SubmissionTask):
         """
         preserved_metadata = {}
         call_args = transfer_future.meta.call_args
+        contract = getattr(call_args, 'contract', None)
+        if contract is not None:
+            client = contract.destination_client(client)
+            call_args.source_client = contract.source_client(
+                call_args.source_client
+            )
         source_version_id = None
         if isinstance(call_args.copy_source, dict):
             source_version_id = call_args.copy_source.get('VersionId')

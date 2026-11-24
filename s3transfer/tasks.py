@@ -13,6 +13,7 @@
 import copy
 import logging
 
+from s3transfer.contracts import redact_for_log
 from s3transfer.utils import get_callbacks
 
 try:
@@ -102,6 +103,7 @@ class Task:
         main_kwargs_to_display = self._get_kwargs_with_params_to_include(
             self._main_kwargs, params_to_display
         )
+        main_kwargs_to_display = redact_for_log(main_kwargs_to_display)
         return f'{self.__class__.__name__}(transfer_id={self._transfer_coordinator.transfer_id}, {main_kwargs_to_display})'
 
     @property
@@ -159,6 +161,7 @@ class Task:
         kwargs_to_display = self._get_kwargs_with_params_to_exclude(
             kwargs, params_to_exclude
         )
+        kwargs_to_display = redact_for_log(kwargs_to_display)
         # Log what is about to be executed.
         logger.debug(f"Executing task {self} with kwargs {kwargs_to_display}")
 

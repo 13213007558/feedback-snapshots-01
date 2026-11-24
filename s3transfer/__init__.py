@@ -142,6 +142,24 @@ from botocore.vendored.requests.packages.urllib3.exceptions import (
 )
 
 import s3transfer.compat
+from s3transfer.contracts import AuditRecord as AuditRecord
+from s3transfer.contracts import ContractAuditLog as ContractAuditLog
+from s3transfer.contracts import ContractStageError as ContractStageError
+from s3transfer.contracts import (
+    ContractStageTimeoutError as ContractStageTimeoutError,
+)
+from s3transfer.contracts import CopyContract as CopyContract
+from s3transfer.contracts import (
+    CrossAccountCopyContract as CrossAccountCopyContract,
+)
+from s3transfer.contracts import EncryptionConfig as EncryptionConfig
+from s3transfer.contracts import EncryptionProfile as EncryptionProfile
+from s3transfer.contracts import (
+    SyntheticEncryptionConfig as SyntheticEncryptionConfig,
+)
+from s3transfer.contracts import (
+    create_copy_contract as create_copy_contract,
+)
 from s3transfer.exceptions import RetriesExceededError, S3UploadFailedError
 
 __author__ = 'Amazon Web Services'

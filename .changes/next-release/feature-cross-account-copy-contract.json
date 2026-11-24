@@ -1,0 +1,5 @@
+{
+  "category": "Copy",
+  "description": "Add stage-scoped cross-account encryption contracts with redacted copy audit records.",
+  "type": "feature"
+}
