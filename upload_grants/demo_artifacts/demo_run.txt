@@ -1,0 +1,64 @@
+==============================================================================
+MinIO 归档上传授权：最小权限合同 / 两种发放路径核对
+==============================================================================
+合成端点: http://127.0.0.1:9000 (不发起网络请求)
+合成凭据: access_key=AKIAIOSFODNN7EXAMPLE region=us-east-1 (secret 仅参与 HMAC，不落盘)
+本地签名记录: /Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-7558/prepared/FB-20261120-SEC7558-059/workspace/upload_grants/demo_artifacts/signature_records.jsonl
+
+--- 请求 1：获准前缀收紧为单个对象，两种输出对照 ---
+  共同范围对象: customers/huaxin/ledger/2026/q4-vouchers.zip
+  来源审批前缀: customers/huaxin/ledger/
+  有效期: 900s，截止 2026-11-24T16:49:42+00:00
+  [post_form] 签发成功，产物逐项核对与登记范围一致
+    [PASS] bucket: expected='internal-archive' actual='internal-archive'
+    [PASS] target_object: expected='customers/huaxin/ledger/2026/q4-vouchers.zip' actual='customers/huaxin/ledger/2026/q4-vouchers.zip'
+    [PASS] ttl_seconds: expected=900 actual=900
+    [PASS] expires_at: expected='2026-11-24T16:49:42+00:00' actual='2026-11-24T16:49:42+00:00'
+    [PASS] signature_present: expected='64-char hex HMAC-SHA256' actual='d0f4d98919c8eb4f...'
+  [put_url]   签发成功，产物逐项核对与登记范围一致
+    [PASS] bucket: expected='internal-archive' actual='internal-archive'
+    [PASS] target_object: expected='customers/huaxin/ledger/2026/q4-vouchers.zip' actual='customers/huaxin/ledger/2026/q4-vouchers.zip'
+    [PASS] ttl_seconds: expected=900 actual=900
+    [PASS] expires_at: expected='2026-11-24T16:49:42+00:00' actual='2026-11-24T16:49:42+00:00'
+    [PASS] signature_present: expected='64-char hex HMAC-SHA256' actual='aaa59e7c15f13884...'
+    [PASS] cross/same_bucket: form='internal-archive' put='internal-archive'
+    [PASS] cross/same_target_object: form='customers/huaxin/ledger/2026/q4-vouchers.zip' put='customers/huaxin/ledger/2026/q4-vouchers.zip'
+    [PASS] cross/equivalent_ttl_seconds: form=900 put=900
+  PUT URL 实际路径锁定: http://127.0.0.1:9000/internal-archive/customers/huaxin/ledger/2026/q4-vouchers.zip
+
+--- 请求 2：追加只有表单能表达的大小与标签限制 ---
+  共同范围对象: customers/huaxin/ledger/2026/q4-evidence-pack.zip
+  大小区间(字节): [1048576, 2147483648]
+  数据标签: {'classification': 'internal', 'project': 'FB-7558', 'retention-class': 'archive-7y'}
+  [post_form] 签发成功，产物逐项核对与登记范围一致
+    policy(base64) 已签名，解码后条件片段:
+      ['eq', '$x-amz-tagging', 'classification=internal&project=FB-7558&retention-class=archive-7y']
+      ['content-length-range', 1048576, 2147483648]
+    [PASS] bucket: expected='internal-archive' actual='internal-archive'
+    [PASS] target_object: expected='customers/huaxin/ledger/2026/q4-evidence-pack.zip' actual='customers/huaxin/ledger/2026/q4-evidence-pack.zip'
+    [PASS] content_length_range: expected=[1048576, 2147483648] actual=[1048576, 2147483648]
+    [PASS] tags: expected={'classification': 'internal', 'project': 'FB-7558', 'retention-class': 'archive-7y'} actual={'classification': 'internal', 'project': 'FB-7558', 'retention-class': 'archive-7y'}
+    [PASS] x-amz-tagging-condition: expected='classification=internal&project=FB-7558&retention-class=archive-7y' actual='classification=internal&project=FB-7558&retention-class=archive-7y'
+    [PASS] ttl_seconds: expected=600 actual=600
+    [PASS] expires_at: expected='2026-11-24T16:44:42+00:00' actual='2026-11-24T16:44:42+00:00'
+    [PASS] signature_present: expected='64-char hex HMAC-SHA256' actual='4e8b7f223aee4201...'
+  [put_url]   预签 PUT URL（query SigV4） 无法表达 content_length_range、tags；可用发放方式: post_form
+    [缺项] content_length_range — 对象大小区间（content-length-range）
+           原因: 大小区间只能写进 POST policy 的 content-length-range 条件；预签 PUT 不签名 Content-Length 区间，无法限制上传字节数范围。
+           可用于: post_form
+    [缺项] tags — 数据标签（x-amz-tagging 精确条件）
+           原因: minio-py 的预签 PUT 固定 X-Amz-SignedHeaders=host，x-amz-tagging 不会被签名，调用方可以省略或改写标签；标签条件只能由 POST policy 的 eq $x-amz-tagging 强制。
+           可用于: post_form
+    调用结果 status=unexpressible available_methods=['post_form']
+    该次调用未触发 presigned_put_object，记录为 refused。
+
+--- 签名记录审计 ---
+  [PASS] all_issued_artifacts_match_scope {'bad_seqs': []}
+  [PASS] issued_puts_pin_exact_scope_object {'bad_seqs': []}
+  [PASS] no_put_signed_with_form_only_conditions {'bad_seqs': []}
+  REQ-059-02 的 PUT 台账条目: 1 条，其中真正签名发出的 PUT: 0 条
+  唯一的 PUT 条目为 refused：无签名、无 URL、未调用预签方法。
+  JSONL 总记录数: 4
+
+机器可读报告: /Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-7558/prepared/FB-20261120-SEC7558-059/workspace/upload_grants/demo_artifacts/demo_report.json
+结果: 全部核对通过 ✅
