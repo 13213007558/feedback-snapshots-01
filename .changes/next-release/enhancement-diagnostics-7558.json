@@ -1,0 +1,5 @@
+{
+  "type": "enhancement",
+  "category": "diagnostics",
+  "description": "Add restricted per-operation diagnostic tickets that record sanitized request preparation, dispatch and failure facts for incident investigations without retaining credential material or prepared request objects; sink outages are recorded as explicit evidence gaps and do not interrupt the request."
+}

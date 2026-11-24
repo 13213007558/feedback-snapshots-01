@@ -22,6 +22,7 @@ import uuid
 from botocore import parsers
 from botocore.awsrequest import create_request_object
 from botocore.compat import get_current_datetime
+from botocore.diagnostics import get_global_diagnostic_recorder
 from botocore.exceptions import HTTPClientError, InvalidConfigError
 from botocore.history import get_global_history_recorder
 from botocore.hooks import first_non_none_response
@@ -92,6 +93,7 @@ class Endpoint:
         event_emitter,
         response_parser_factory=None,
         http_session=None,
+        diagnostic_recorder=None,
     ):
         self._endpoint_prefix = endpoint_prefix
         self._event_emitter = event_emitter
@@ -103,6 +105,9 @@ class Endpoint:
         self.http_session = http_session
         if self.http_session is None:
             self.http_session = URLLib3Session()
+        if diagnostic_recorder is None:
+            diagnostic_recorder = get_global_diagnostic_recorder()
+        self._diagnostic_recorder = diagnostic_recorder
 
     def __repr__(self):
         return f'{self._endpoint_prefix}({self.host})'
@@ -195,51 +200,67 @@ class Endpoint:
         attempts = 1
         context = request_dict['context']
         self._update_retries_context(context, attempts)
-        request = self.create_request(request_dict, operation_model)
-        success_response, exception = self._get_response(
-            request, operation_model, context
+        service_id = operation_model.service_model.service_id.hyphenize()
+        ticket = self._diagnostic_recorder.open_ticket(
+            operation_name=operation_model.name,
+            service_id=service_id,
         )
-        while self._needs_retry(
-            attempts,
-            operation_model,
-            request_dict,
-            success_response,
-            exception,
-        ):
-            attempts += 1
-            self._update_retries_context(context, attempts, success_response)
-            # If there is a stream associated with the request, we need
-            # to reset it before attempting to send the request again.
-            # This will ensure that we resend the entire contents of the
-            # body.
-            request.reset_stream()
-            # Create a new request when retried (including a new signature).
+        outcome = 'failed'
+        try:
             request = self.create_request(request_dict, operation_model)
+            ticket.record_preparation(request, attempts)
             success_response, exception = self._get_response(
-                request, operation_model, context
+                request, operation_model, context, attempts, ticket
             )
-        if (
-            success_response is not None
-            and 'ResponseMetadata' in success_response[1]
-        ):
-            # We want to share num retries, not num attempts.
-            total_retries = attempts - 1
-            success_response[1]['ResponseMetadata']['RetryAttempts'] = (
-                total_retries
-            )
-        if exception is not None:
-            raise exception
-        else:
+            while self._needs_retry(
+                attempts,
+                operation_model,
+                request_dict,
+                success_response,
+                exception,
+            ):
+                attempts += 1
+                self._update_retries_context(
+                    context, attempts, success_response
+                )
+                # If there is a stream associated with the request, we need
+                # to reset it before attempting to send the request again.
+                # This will ensure that we resend the entire contents of the
+                # body.
+                request.reset_stream()
+                # Create a new request when retried (including a new
+                # signature).
+                request = self.create_request(request_dict, operation_model)
+                ticket.record_preparation(request, attempts)
+                success_response, exception = self._get_response(
+                    request, operation_model, context, attempts, ticket
+                )
+            if (
+                success_response is not None
+                and 'ResponseMetadata' in success_response[1]
+            ):
+                # We want to share num retries, not num attempts.
+                total_retries = attempts - 1
+                success_response[1]['ResponseMetadata']['RetryAttempts'] = (
+                    total_retries
+                )
+            if exception is not None:
+                raise exception
+            outcome = 'succeeded'
             return success_response
+        finally:
+            ticket.close(outcome=outcome, attempts=attempts)
 
-    def _get_response(self, request, operation_model, context):
+    def _get_response(
+        self, request, operation_model, context, attempt, ticket
+    ):
         # This will return a tuple of (success_response, exception)
         # and success_response is itself a tuple of
         # (http_response, parsed_dict).
         # If an exception occurs then the success_response is None.
         # If no exception occurs then exception is None.
         success_response, exception = self._do_get_response(
-            request, operation_model, context
+            request, operation_model, context, attempt, ticket
         )
         kwargs_to_emit = {
             'response_dict': None,
@@ -260,7 +281,9 @@ class Endpoint:
         )
         return success_response, exception
 
-    def _do_get_response(self, request, operation_model, context):
+    def _do_get_response(
+        self, request, operation_model, context, attempt, ticket
+    ):
         try:
             logger.debug("Sending http request: %s", request)
             history_recorder.record(
@@ -279,13 +302,19 @@ class Endpoint:
             http_response = first_non_none_response(responses)
             if http_response is None:
                 http_response = self._send(request)
+                dispatch_source = 'http_session'
+            else:
+                dispatch_source = 'event_emitter'
         except HTTPClientError as e:
+            ticket.record_failure(attempt, e)
             return (None, e)
         except Exception as e:
             logger.debug(
                 "Exception received when sending HTTP request.", exc_info=True
             )
+            ticket.record_failure(attempt, e)
             return (None, e)
+        ticket.record_dispatch(attempt, dispatch_source)
         # This returns the http_response and the parsed_data.
         response_dict = convert_to_response_dict(
             http_response, operation_model
@@ -296,6 +325,8 @@ class Endpoint:
             context,
             operation_model,
         )
+
+        ticket.record_response(attempt, http_response)
 
         http_response_record_dict = response_dict.copy()
         http_response_record_dict['streaming'] = (
