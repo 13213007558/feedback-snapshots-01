@@ -171,11 +171,18 @@ module Async
 					end
 					
 					# Close this response as quickly as possible. If the response body is still active, cancel the HTTP/2 exchange rather than draining it.
+					#
+					# Resetting the stream only terminates this exchange; the connection and any other streams on it are unaffected. If the stream was already closed by the background reader (for example, the response completed concurrently), the reset is skipped and cleanup still proceeds.
 					# @parameter error [Exception | Nil] The error which closed the response.
 					def close(error = nil)
 						if @body && !@stream.closed?
 							code = error ? ::Protocol::HTTP2::Error::INTERNAL_ERROR : ::Protocol::HTTP2::Error::CANCEL
-							@stream.send_reset_stream(code)
+							
+							begin
+								@stream.send_reset_stream(code)
+							rescue ::Protocol::HTTP2::ProtocolError, ::Protocol::HTTP2::StreamError
+								# The stream was closed concurrently, so there is nothing left to cancel.
+							end
 						end
 						
 						super

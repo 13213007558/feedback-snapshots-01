@@ -1,5 +1,9 @@
 # Releases
 
+## v0.106.0
+
+  - Allow a response to be closed after only part of its body has been read, and keep the connection usable where the protocol permits it. HTTP/1 discards the remaining body up to the exact message boundary before returning the connection to the pool, and closes the connection when the boundary cannot be confirmed. HTTP/2 resets only the response's stream, so concurrent streams on the same connection continue unaffected.
+
 ## v0.105.0
 
   - Respond with `400 Bad Request` for any `Protocol::HTTP::BadRequest` raised while parsing HTTP/1 or HTTP/2 requests, include the exception class name without reflecting request data, and avoid reporting them as unhandled server errors.

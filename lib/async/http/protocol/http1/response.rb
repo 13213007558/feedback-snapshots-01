@@ -5,6 +5,9 @@
 # Copyright, 2023, by Josh Huber.
 
 require_relative "../response"
+require_relative "drainable"
+
+require "protocol/http1/body/remainder"
 
 module Async
 	module HTTP
@@ -40,6 +43,11 @@ module Async
 						
 						# Technically, there should never be more than one value for the upgrade header, but we'll just take the first one to avoid complexity.
 						protocol = headers.delete(UPGRADE)&.first
+						
+						# A body with a known boundary (content length or chunked framing) can be safely discarded when the response is closed early. A remainder body (a tunnel, an upgrade, or a close-delimited response) has no such boundary, and closing it already terminates the connection, so it is left untouched.
+						if body and protocol.nil? and !body.is_a?(::Protocol::HTTP1::Body::Remainder)
+							body = Drainable.new(body, connection)
+						end
 						
 						super(version, status, headers, body, protocol)
 					end

@@ -127,6 +127,15 @@ end
 
 The block form of ruby:`Async::HTTP::Internet` performs this cleanup automatically. When using ruby:`Async::HTTP::Client`, close the response explicitly with an `ensure` block. Holding an unread response while waiting for another request can exhaust an HTTP/1 pool and make the second request wait indefinitely.
 
+### Closing a Response Early
+
+Closing a response before its body has been fully read is supported, and it is safe even when the caller only inspects the beginning of the response:
+
+- **HTTP/1** cannot cancel a single exchange independently of the connection. Closing the response discards the remaining body up to its exact boundary (the `content-length` or the chunked terminator) and then returns the connection to the pool. If the boundary cannot be confirmed, for example because the response was close-delimited or the read failed, the connection is closed instead of being reused.
+- **HTTP/2** resets only the stream belonging to the response. The connection stays open, so other streams, including requests that are already in flight, continue to use it.
+
+In both cases a subsequent request either reuses the original connection or transparently opens a new one; a response is never delivered bytes that belong to a response that was abandoned.
+
 ## Pool Life Cycle
 
 Connection pools are bound to the event loop in which they are used. Their internal maintenance task is transient, so it does not keep the event loop alive and closes the pool when the event loop exits.

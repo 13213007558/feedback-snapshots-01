@@ -7,6 +7,6 @@
 module Async
 	# @namespace
 	module HTTP
-		VERSION = "0.105.0"
+		VERSION = "0.106.0"
 	end
 end
