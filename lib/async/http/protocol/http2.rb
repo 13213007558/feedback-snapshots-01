@@ -52,9 +52,9 @@ module Async
 				#
 				# @parameter peer [IO] The peer to communicate with.
 				# @parameter options [Hash] Options to pass to the client instance.
-				def self.client(peer, settings: CLIENT_SETTINGS)
+				def self.client(peer, settings: CLIENT_SETTINGS, **options)
 					stream = ::IO::Stream(peer)
-					client = Client.new(stream)
+					client = Client.new(stream, **options)
 					
 					client.send_connection_preface(settings)
 					client.start_connection

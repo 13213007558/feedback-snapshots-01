@@ -7,6 +7,7 @@
 # Copyright, 2026, by Denis Talakevich.
 
 require_relative "stream"
+require_relative "budget"
 
 require "protocol/http/peer"
 require "async/semaphore"
@@ -26,9 +27,16 @@ module Async
 				CONTENT_LENGTH = "content-length".freeze
 				CONNECTION = "connection".freeze
 				TRAILER = "trailer".freeze
+
 				
 				# Provides shared connection behaviour for HTTP/2 client and server connections.
 				module Connection
+					# The default maximum amount of unconsumed inbound DATA buffered for one connection.
+					DEFAULT_INPUT_BUFFER_LIMIT = 0x400000
+
+					# The default maximum amount of unconsumed inbound DATA buffered for one stream.
+					DEFAULT_STREAM_INPUT_BUFFER_LIMIT = 0x100000
+
 					# Initialize the connection state.
 					def initialize(...)
 						super
@@ -37,6 +45,22 @@ module Async
 						
 						# Writing multiple frames at the same time can cause odd problems if frames are only partially written. So we use a semaphore to ensure frames are written in their entirety.
 						@write_frame_guard = Async::Semaphore.new(1)
+
+						@input_budget = Budget.new(DEFAULT_INPUT_BUFFER_LIMIT)
+						@stream_input_buffer_limit = DEFAULT_STREAM_INPUT_BUFFER_LIMIT
+					end
+
+					# Connection-wide budget for unconsumed inbound request/response data.
+					attr :input_budget
+
+					alias budget input_budget
+
+					# Limit used when creating a budget for each inbound stream.
+					attr_accessor :stream_input_buffer_limit
+
+					# Consume the connection window without returning it immediately. The window is returned when the application reads or discards the corresponding data.
+					def update_local_window(frame)
+						consume_local_window(frame)
 					end
 					
 					# Synchronize write access to the connection.
@@ -97,8 +121,9 @@ module Async
 						end
 						
 						super
+						@input_budget&.close
 					end
-					
+
 					# The connection has finished draining the streams which the remote peer accepted before its graceful GOAWAY.
 					#
 					# The last of those streams can complete on the sending side, in a task other than the background reader - the response arrived first and the request body was still being written. The reader is then parked in a blocking read and will never notice that the connection is closed, so we stop it and let its `ensure` close the connection.

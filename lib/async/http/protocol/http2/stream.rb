@@ -9,6 +9,7 @@ require "protocol/http2/stream"
 
 require_relative "input"
 require_relative "output"
+require_relative "budget"
 
 module Async
 	module HTTP
@@ -27,7 +28,8 @@ module Async
 						# Input buffer, reading request body, or response body (receive_data):
 						@length = nil
 						@input = nil
-						
+						@input_budget = nil
+
 						# The application can close its input before the peer finishes sending. HTTP/2 cannot close only the receiving side of a stream, so incoming data is discarded until local output also finishes. At that point, a no-error reset terminates the remaining wire stream.
 						@input_closed = false
 						
@@ -40,7 +42,26 @@ module Async
 					attr_accessor :pool
 					
 					attr :input
-					
+
+					# Hierarchical budget charged by unconsumed inbound DATA on this stream.
+					def input_budget
+						@input_budget ||= begin
+							connection_budget = @connection&.input_budget
+							limit = @connection&.stream_input_buffer_limit || Connection::DEFAULT_STREAM_INPUT_BUFFER_LIMIT
+
+							if connection_budget
+								Budget.new(limit, parent: connection_budget)
+							else
+								Budget.new(limit)
+							end
+						end
+					end
+
+					attr_writer :input_budget
+
+					alias budget input_budget
+					alias budget= input_budget=
+
 					# Add a header to the stream, validating against HTTP/2 constraints.
 					# @parameter key [String] The header name.
 					# @parameter value [String] The header value.
@@ -107,30 +128,49 @@ module Async
 					# @parameter frame [Protocol::HTTP2::DataFrame] The received data frame.
 					def update_local_window(frame)
 						consume_local_window(frame)
-						
-						# This is done on demand in `Input#read`:
-						# request_window_update
+
+						# Window updates are sent after the application reads the exact bytes, in
+						# `Input#read` -> `#input_consumed`.
 					end
-					
+
+					# Called by {Input#read} with the exact number of bytes removed from the queue.
+					def input_consumed(size)
+						acknowledge_consumed_input(size)
+					end
+
 					# Process an incoming DATA frame and write it to the input body.
 					# @parameter frame [Protocol::HTTP2::DataFrame] The data frame to process.
 					# @returns [String] The unpacked data.
 					def process_data(frame)
 						data = frame.unpack
-						
+
 						if input = @input
 							unless data.empty?
-								input.write(data)
+								@input_budget ||= input_budget
+
+								begin
+									@input_budget.acquire(data.bytesize)
+								rescue Budget::Closed
+									# The stream was reset while the reader was waiting. Discard this frame and return its connection window.
+									discard_input_data(data)
+									return data
+								end
+
+								begin
+									input.write(data)
+								rescue
+									@input_budget.release(data.bytesize)
+									raise
+								end
 							end
-							
+
 							if frame.end_stream?
 								input.close_write
 							end
 						else
-							# The application has closed the input, so discard incoming data while maintaining flow control for the stream.
-							request_window_update
+							discard_input_data(data)
 						end
-						
+
 						return data
 					rescue ::Protocol::HTTP2::ProtocolError
 						raise
@@ -145,12 +185,17 @@ module Async
 						if @input.equal?(input)
 							@input = nil
 							@input_closed = true
-							
+
+							return_unread_input_window(stream_window: true)
+
 							if error
 								send_reset_stream(::Protocol::HTTP2::Error::INTERNAL_ERROR)
 							else
 								close_if_finished
 							end
+						elsif @input_budget && !@input_budget.closed?
+							# The wire stream already detached `@input`, but the application only closed the body now. Return the bytes that were never read.
+							return_unread_input_window(stream_window: true)
 						end
 					end
 					
@@ -216,12 +261,17 @@ module Async
 						end
 						
 						super
-						
+
 						if input = @input
 							@input = nil
 							input.close_write(error)
 						end
-						
+
+						if error
+							# A reset/error discards queued input. Return its connection-level window and budget so other streams continue.
+							return_unread_input_window(stream_window: false)
+						end
+
 						if output = @output
 							@output = nil
 							
@@ -240,7 +290,57 @@ module Async
 					end
 					
 					private
-					
+
+					# Release budget and return both stream and connection windows for consumed bytes.
+					def acknowledge_consumed_input(size)
+						return unless size.positive?
+
+						@input_budget&.release(size)
+						send_stream_window_update(size)
+						send_connection_window_update(size)
+					end
+
+					# Data received after the application stopped reading is discarded immediately, so all flow-control windows are returned immediately too.
+					def discard_input_data(data)
+						size = data.bytesize
+
+						if size.positive?
+							send_stream_window_update(size)
+							send_connection_window_update(size)
+						else
+							request_window_update
+						end
+					end
+
+					# Return windows for bytes removed from the queue by cancellation/closure rather than by `Input#read`.
+					def return_unread_input_window(stream_window:)
+						size = @input_budget&.used.to_i
+
+						if size.positive?
+							send_stream_window_update(size) if stream_window
+							send_connection_window_update(size)
+						end
+					ensure
+						@input_budget&.close
+					end
+
+					def send_stream_window_update(size)
+						return unless size.positive?
+						return if closed?
+
+						send_window_update(size)
+					end
+
+					def send_connection_window_update(size)
+						connection = @connection
+
+						return unless size.positive?
+						return unless connection.respond_to?(:send_window_update)
+						return if connection.respond_to?(:closed?) && connection.closed?
+
+						connection.send_window_update(size)
+					end
+
 					# If both application-facing directions are closed but the peer has not finished, terminate the remaining wire stream without an error.
 					def close_if_finished
 						if @input_closed && @state == :half_closed_local

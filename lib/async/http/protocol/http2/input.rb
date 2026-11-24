@@ -20,13 +20,20 @@ module Async
 						@stream = stream
 						@remaining = length
 					end
-					
+
 					# Read the next chunk of data, requesting window updates as needed.
 					# @returns [String | Nil] The next chunk, or `nil` if the body is complete.
 					def read
 						if chunk = super
-							# If we read a chunk from the stream, we want to extend the window if required so more data will be provided.
-							@stream&.request_window_update
+							stream = @stream
+
+							if stream&.respond_to?(:input_consumed)
+								# Credit the exact bytes removed from this bounded queue.
+								stream.input_consumed(chunk.bytesize)
+							else
+								# Preserve the lightweight test/double interface used by custom streams.
+								stream&.request_window_update
+							end
 						end
 						
 						# We track the expected length and check we got what we were expecting.

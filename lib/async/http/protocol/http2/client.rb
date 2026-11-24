@@ -19,12 +19,18 @@ module Async
 					
 					# Initialize the HTTP/2 client with an IO stream.
 					# @parameter stream [IO::Stream] The underlying stream.
-					def initialize(stream)
+					# @parameter input_budget [Budget | Nil] An optional shared connection budget.
+					# @parameter input_buffer_limit [Integer] The connection-wide inbound buffer budget.
+					# @parameter stream_input_buffer_limit [Integer] The per-stream inbound buffer quota.
+					def initialize(stream, input_budget: nil, budget: nil, connection_budget: nil, input_buffer_limit: Connection::DEFAULT_INPUT_BUFFER_LIMIT, stream_input_buffer_limit: Connection::DEFAULT_STREAM_INPUT_BUFFER_LIMIT)
 						@stream = stream
-						
+
 						framer = ::Protocol::HTTP2::Framer.new(@stream)
-						
+
 						super(framer)
+
+						@input_budget = budget || input_budget || connection_budget || Budget.new(input_buffer_limit)
+						@stream_input_buffer_limit = stream_input_buffer_limit
 					end
 					
 					# Create a new response stream for the next request.
