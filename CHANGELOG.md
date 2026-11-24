@@ -11,6 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `HTTP.nodelay` (and `HTTP::Session#nodelay`) now accepts an optional boolean,
   so `HTTP.nodelay(false)` disables `TCP_NODELAY` for a session. ([#863])
+- The `:caching` feature accepts an optional `access_scope` callable that maps a
+  request to an access scope. Restricted responses are only served to the scope
+  that stored them, public responses remain shareable across callers, and
+  `Vary` variants are cached separately. Conditional revalidation now carries
+  the identity and variant being revalidated, and a 304 whose approval was
+  withdrawn while the request was in flight is returned without refreshing the
+  stored representation. Credentials are never persisted in the cache.
 
 ### Changed
 

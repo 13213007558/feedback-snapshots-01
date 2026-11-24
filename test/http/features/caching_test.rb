@@ -80,6 +80,16 @@ class HTTPFeaturesCachingTest < Minitest::Test
     assert_kind_of HTTP::Feature, caching
   end
 
+  def test_initialize_accepts_an_access_scope
+    scope = ->(request) { request.headers["Authorization"] }
+
+    assert_equal scope, HTTP::Features::Caching.new(access_scope: scope).access_scope
+  end
+
+  def test_access_scope_defaults_to_nil
+    assert_nil HTTP::Features::Caching.new.access_scope
+  end
+
   # -- #around_request --
 
   def test_around_request_yields_original_request_for_non_get_head_requests
@@ -650,7 +660,7 @@ end
 class HTTPFeaturesCachingEntryTest < Minitest::Test
   cover "HTTP::Features::Caching::Entry*"
 
-  def make_entry(headers: {}, stored_at: Time.now)
+  def make_entry(headers: {}, stored_at: Time.now, scope: :public, vary_key: {})
     HTTP::Features::Caching::Entry.new(
       status:        200,
       version:       "1.1",
@@ -658,7 +668,9 @@ class HTTPFeaturesCachingEntryTest < Minitest::Test
       proxy_headers: HTTP::Headers.coerce({}),
       body:          "body",
       request_uri:   HTTP::URI.parse("https://example.com/"),
-      stored_at:     stored_at
+      stored_at:     stored_at,
+      scope:         scope,
+      vary_key:      vary_key
     )
   end
 
@@ -833,6 +845,80 @@ class HTTPFeaturesCachingEntryTest < Minitest::Test
 
     assert_instance_of HTTP::Headers, entry.proxy_headers
   end
+
+  # -- scope and variant helpers --
+
+  def test_defaults_scope_to_public
+    assert_equal :public, make_entry.scope
+  end
+
+  def test_public_entry_is_visible_to_every_scope
+    entry = make_entry
+
+    assert entry.visible_to?(:"user:alice")
+    assert entry.visible_to?(:public)
+  end
+
+  def test_scoped_entry_is_only_visible_to_its_scope
+    entry = HTTP::Features::Caching::Entry.new(
+      status: 200, version: "1.1", headers: HTTP::Headers.coerce({}),
+      proxy_headers: HTTP::Headers.coerce({}), body: "body",
+      request_uri: HTTP::Request.new(verb: :get, uri: "https://e.com/").uri,
+      stored_at: Time.now, scope: :"user:alice"
+    )
+
+    assert entry.visible_to?(:"user:alice")
+    refute entry.visible_to?(:"user:bob")
+    refute entry.visible_to?(:public)
+  end
+
+  def test_variant_matches_request_headers_selected_by_vary
+    entry = make_entry(headers: { "Vary" => "Accept-Language" }, vary_key: { "Accept-Language" => "fr" })
+
+    assert entry.variant_matches?(HTTP::Headers.coerce("Accept-Language" => "fr"))
+    refute entry.variant_matches?(HTTP::Headers.coerce("Accept-Language" => "en"))
+  end
+
+  def test_variant_does_not_match_when_vary_value_is_absent
+    entry = make_entry(headers: { "Vary" => "Accept-Language" }, vary_key: { "Accept-Language" => "fr" })
+
+    refute entry.variant_matches?(HTTP::Headers.coerce({}))
+  end
+
+  def test_summarize_hashes_credentials
+    assert_match(/\Asha256:/, HTTP::Features::Caching::Entry.summarize("Authorization", "Bearer secret"))
+    refute_includes HTTP::Features::Caching::Entry.summarize("Authorization", "Bearer secret"), "secret"
+  end
+
+  def test_summarize_keeps_non_credential_values
+    assert_equal "fr", HTTP::Features::Caching::Entry.summarize("Accept-Language", "fr")
+  end
+
+  def test_summarize_returns_nil_for_missing_headers
+    assert_nil HTTP::Features::Caching::Entry.summarize("Accept-Language", nil)
+  end
+
+  def test_sanitize_headers_removes_credentials
+    headers = HTTP::Headers.coerce(
+      "Authorization" => "Bearer secret",
+      "Set-Cookie"    => "session=secret",
+      "X-Keep"        => "kept"
+    )
+    sanitized = HTTP::Features::Caching::Entry.sanitize_headers(headers)
+
+    assert_nil sanitized["Authorization"]
+    assert_nil sanitized["Set-Cookie"]
+    assert_equal "kept", sanitized["X-Keep"]
+    assert_equal "Bearer secret", headers["Authorization"]
+  end
+
+  def test_revalidate_records_revalidating_identity
+    entry = make_entry
+    entry.revalidate!(etag: '"v2"', scope: :"user:alice")
+
+    assert_equal '"v2"', entry.revalidated_with
+    assert_equal :"user:alice", entry.revalidated_scope
+  end
 end
 
 class HTTPFeaturesCachingInMemoryStoreTest < Minitest::Test
@@ -938,5 +1024,482 @@ class HTTPFeaturesCachingInMemoryStoreTest < Minitest::Test
     same_request = HTTP::Request.new(verb: :get, uri: "https://example.com/resource")
 
     assert_same entry, store.lookup(same_request)
+  end
+
+  # -- scoped variants --
+
+  def scoped_entry(scope:, vary_key: {}, headers: {}, body: "scoped")
+    HTTP::Features::Caching::Entry.new(
+      status:        200,
+      version:       "1.1",
+      headers:       HTTP::Headers.coerce(headers),
+      proxy_headers: HTTP::Headers.coerce({}),
+      body:          body,
+      request_uri:   request.uri,
+      stored_at:     Time.now,
+      scope:         scope,
+      vary_key:      vary_key
+    )
+  end
+
+  def test_lookup_does_not_return_a_scoped_entry_to_another_scope
+    store.store(request, scoped_entry(scope: :"user:alice"))
+
+    assert_nil store.lookup(request, scope: :"user:bob")
+    assert_nil store.lookup(request, scope: :public)
+    refute_nil store.lookup(request, scope: :"user:alice")
+  end
+
+  def test_lookup_prefers_exact_scope_over_public_entry
+    public_entry = entry
+    alice_entry = scoped_entry(scope: :"user:alice", body: "alice")
+    store.store(request, public_entry)
+    store.store(request, alice_entry)
+
+    assert_same alice_entry, store.lookup(request, scope: :"user:alice")
+    assert_same public_entry, store.lookup(request, scope: :"user:bob")
+  end
+
+  def test_lookup_falls_back_to_public_variant
+    public_entry = entry
+    store.store(request, public_entry)
+
+    assert_same public_entry, store.lookup(request, scope: :"user:alice")
+  end
+
+  def test_lookup_distinguishes_variants_by_vary_key
+    vary = { "Vary" => "Accept-Language" }
+    english = scoped_entry(scope: :public, vary_key: { "Accept-Language" => "en" }, headers: vary, body: "en")
+    french = scoped_entry(scope: :public, vary_key: { "Accept-Language" => "fr" }, headers: vary, body: "fr")
+    store.store(request, english)
+    store.store(request, french)
+
+    en_request = HTTP::Request.new(verb: :get, uri: "https://example.com/resource",
+                                  headers: { "Accept-Language" => "en" })
+    fr_request = HTTP::Request.new(verb: :get, uri: "https://example.com/resource",
+                                  headers: { "Accept-Language" => "fr" })
+
+    assert_equal "en", store.lookup(en_request).body
+    assert_equal "fr", store.lookup(fr_request).body
+  end
+
+  def test_store_replaces_same_scope_and_variant
+    first = scoped_entry(scope: :"user:alice", body: "first")
+    second = scoped_entry(scope: :"user:alice", body: "second")
+    store.store(request, first)
+    store.store(request, second)
+
+    assert_same second, store.lookup(request, scope: :"user:alice")
+  end
+end
+
+# A recorded response body stream that yields its bytes once, then EOF
+class RecordedStream
+  def initialize(content)
+    @content = content
+    @read = false
+  end
+
+  def readpartial(*)
+    raise EOFError if @read
+
+    @read = true
+    @content
+  end
+
+  def connection
+    nil
+  end
+end
+
+# A transport double that records every request it is given and replies from
+# a handler. Responses are built exactly as the client's real connection would
+# build them, then wrapped by the client's features.
+class RecordingTransport
+  attr_reader :requests
+
+  def initialize(&handler)
+    @handler = handler
+    @requests = []
+  end
+
+  def respond(request)
+    @requests << request
+    response = @handler.call(request)
+    return response if response.is_a?(HTTP::Response)
+
+    HTTP::Response.new(
+      status:     response.fetch(:status, 200),
+      version:    "1.1",
+      headers:    response.fetch(:headers, {}),
+      connection: RecordedStream.new(response.fetch(:body, "")),
+      request:    request
+    )
+  end
+end
+
+# Client whose single attempt is served by a recording transport while still
+# running the real feature chain (around_request and wrap_response).
+class RecordingClient < HTTP::Client
+  def initialize(transport, **options)
+    super(**options)
+    @transport = transport
+  end
+
+  private
+
+  def perform_exchange(request, options)
+    around_request(request, options) do |req|
+      response = @transport.respond(req)
+      options.features.values.reverse.inject(response) { |res, feature| feature.wrap_response(res) }
+    end
+  end
+end
+
+# Exercises the optional access-scope rule end to end: public and restricted
+# variants of one URL, language variants, and a revalidation whose approval is
+# withdrawn after the request is sent.
+class HTTPFeaturesCachingAccessScopeTest < Minitest::Test
+  cover "HTTP::Features::Caching*"
+
+  URL = "https://api.example.com/article"
+
+  def setup
+    @store = HTTP::Features::Caching::InMemoryStore.new
+    @current_scope = :public
+    @transport = RecordingTransport.new { |request| origin_response(request) }
+    @client = RecordingClient.new(
+      @transport,
+      features: { caching: { store: @store, access_scope: ->(_request) { @current_scope } } }
+    )
+  end
+
+  # The origin varies content by the Authorization identity and the language.
+  def origin_response(request)
+    identity = request.headers["Authorization"]
+    language = request.headers["Accept-Language"]
+    body = identity ? "restricted:#{identity}:#{language || "en"}" : "public:#{language || "en"}"
+
+    {
+      status:  200,
+      headers: {
+        "Cache-Control" => "max-age=60",
+        "ETag"          => %("#{etag_for(identity, language)}"),
+        "Vary"          => "Accept-Language"
+      },
+      body:    body
+    }
+  end
+
+  def etag_for(identity, language)
+    "v1-#{identity || "public"}-#{language || "en"}"
+  end
+
+  def get(headers: {})
+    @client.get(URL, headers: headers)
+  end
+
+  def test_public_and_restricted_variants_do_not_cross_scopes
+    public_first = get
+    assert_equal "public:en", public_first.body.to_s
+
+    @current_scope = :"user:alice"
+    alice_first = get(headers: { "Authorization" => "Bearer alice", "Accept-Language" => "fr" })
+    assert_equal "restricted:Bearer alice:fr", alice_first.body.to_s
+
+    # Each scope hits its own stored variant without contacting the origin.
+    sent_before = @transport.requests.size
+    assert_equal "public:en", get.body.to_s
+    @current_scope = :"user:alice"
+    assert_equal "restricted:Bearer alice:fr",
+                 get(headers: { "Authorization" => "Bearer alice", "Accept-Language" => "fr" }).body.to_s
+    assert_equal sent_before, @transport.requests.size
+  end
+
+  def test_public_content_stays_shareable_across_identities
+    assert_equal "public:en", get.body.to_s
+    sent_before = @transport.requests.size
+
+    @current_scope = :"user:bob"
+    second = get(headers: { "Authorization" => "Bearer bob" })
+
+    assert_equal "public:en", second.body.to_s
+    assert_equal sent_before, @transport.requests.size
+  end
+
+  def test_cache_control_public_is_shared_even_when_it_varies_on_authorization
+    transport = RecordingTransport.new do |request|
+      {
+        status:  200,
+        headers: { "Cache-Control" => "public, max-age=60", "ETag" => '"shared"', "Vary" => "Authorization" },
+        body:    "shared body"
+      }
+    end
+    client = RecordingClient.new(
+      transport,
+      features: { caching: { store: @store, access_scope: ->(_request) { :public } } }
+    )
+
+    first = client.get(URL, headers: { "Authorization" => "Bearer alice" })
+    second = client.get(URL, headers: { "Authorization" => "Bearer bob" })
+
+    assert_equal "shared body", first.body.to_s
+    assert_equal "shared body", second.body.to_s
+    assert_equal 1, transport.requests.size
+  end
+
+  def test_stored_restricted_entry_is_not_a_public_hit_for_another_identity
+    @current_scope = :"user:alice"
+    get(headers: { "Authorization" => "Bearer alice" })
+    stored = @store.lookup(HTTP::Request.new(verb: :get, uri: URL), scope: :"user:alice")
+    refute_nil stored
+
+    # A different identity must not see Alice's cached entry.
+    @current_scope = :"user:mallory"
+    response = get(headers: { "Authorization" => "Bearer mallory" })
+
+    assert_equal "restricted:Bearer mallory:en", response.body.to_s
+    assert_equal 2, @transport.requests.size
+  end
+
+  def test_language_variant_is_selected_from_the_vary_key
+    assert_equal "public:en", get.body.to_s
+    assert_equal "public:fr", get(headers: { "Accept-Language" => "fr" }).body.to_s
+
+    sent_before = @transport.requests.size
+    assert_equal "public:en", get.body.to_s
+    assert_equal "public:fr", get(headers: { "Accept-Language" => "fr" }).body.to_s
+    assert_equal sent_before, @transport.requests.size
+  end
+
+  def test_conditional_request_carries_the_revalidating_identity_and_variant
+    warm_restricted("etag-alice", "alice", "fr")
+    transport_request = revalidate_with("etag-alice", "alice", "fr", return_request: true)
+
+    assert_equal '"etag-alice"', transport_request.headers["If-None-Match"]
+    assert_equal "Bearer alice", transport_request.headers["Authorization"]
+    assert_equal "fr", transport_request.headers["Accept-Language"]
+  end
+
+  def test_custom_store_that_only_accepts_a_request_still_works
+    legacy_store = Class.new do
+      attr_reader :stored
+
+      def initialize
+        @entries = {}
+      end
+
+      def lookup(request)
+        @entries[request.uri.to_s]
+      end
+
+      def store(request, entry)
+        @stored = entry
+        @entries[request.uri.to_s] = entry
+      end
+    end.new
+    transport = RecordingTransport.new do |request|
+      { headers: { "Cache-Control" => "max-age=60" }, body: "legacy" }
+    end
+
+    client = RecordingClient.new(transport, features: { caching: { store: legacy_store } })
+
+    assert_equal "legacy", client.get(URL).body.to_s
+    assert_equal "legacy", client.get(URL).body.to_s
+    assert_equal 1, transport.requests.size
+    assert_equal "legacy", legacy_store.stored.body
+  end
+
+  def test_late_304_after_approval_withdrawal_keeps_old_representation
+    warm_restricted("etag-alice", "alice", "fr")
+    entry = @store.lookup(
+      HTTP::Request.new(verb: :get, uri: URL, headers: { "Accept-Language" => "fr" }),
+      scope: :"user:alice"
+    )
+    old_stored_at = entry.stored_at
+
+    # Switch approval while the conditional request is paused at the origin.
+    before_response = ->(_request) { @current_scope = :"user:bob" }
+    response = revalidate_with("etag-alice", "alice", "fr",
+                               respond_with_304: true, before_response: before_response)
+
+    assert_equal 304, response.status.code
+    assert_equal "", response.body.to_s
+    assert_equal old_stored_at, entry.stored_at
+    assert_nil entry.revalidated_with
+  end
+
+  def test_late_304_discards_headers_that_would_refresh_the_entry
+    warm_restricted("etag-alice", "alice", "fr")
+    entry = @store.lookup(
+      HTTP::Request.new(verb: :get, uri: URL, headers: { "Accept-Language" => "fr" }),
+      scope: :"user:alice"
+    )
+    original_cache_control = entry.headers["Cache-Control"]
+
+    before_response = ->(_request) { @current_scope = :"user:bob" }
+    revalidate_with("etag-alice", "alice", "fr",
+                    respond_with_304: true,
+                    headers:           { "Cache-Control" => "max-age=9999" },
+                    before_response:   before_response)
+
+    assert_equal original_cache_control, entry.headers["Cache-Control"]
+  end
+
+  def test_approved_304_refreshes_entry_and_records_revalidating_identity
+    warm_restricted("etag-alice", "alice", "fr")
+    entry = @store.lookup(
+      HTTP::Request.new(verb: :get, uri: URL, headers: { "Accept-Language" => "fr" }),
+      scope: :"user:alice"
+    )
+    old_stored_at = entry.stored_at
+
+    response = revalidate_with("etag-alice", "alice", "fr", respond_with_304: true)
+
+    assert_equal 200, response.status.code
+    assert_equal "restricted:Bearer alice:fr", response.body.to_s
+    assert_operator entry.stored_at, :>, old_stored_at
+    assert_equal '"etag-alice"', entry.revalidated_with
+    assert_equal :"user:alice", entry.revalidated_scope
+  end
+
+  def test_cache_does_not_persist_credentials
+    @store = HTTP::Features::Caching::InMemoryStore.new
+    transport = RecordingTransport.new do |request|
+      {
+        status:  200,
+        headers: {
+          "Cache-Control" => "max-age=60",
+          "ETag"          => '"v1"',
+          "Vary"          => "Accept-Language, Authorization",
+          "Set-Cookie"    => "session=origin-cookie"
+        },
+        body:    "restricted body"
+      }
+    end
+    client = RecordingClient.new(
+      transport,
+      features: {
+        caching: {
+          store:        @store,
+          access_scope: ->(_request) { "Bearer alice-secret" }
+        }
+      }
+    )
+
+    client.get(URL, headers: { "Authorization" => "Bearer alice-secret", "Cookie" => "session=alice-cookie" })
+
+    entry = @store.instance_variable_get(:@cache).values.flatten.first
+
+    refute_nil entry
+    assert_nil entry.headers["Set-Cookie"]
+    assert_nil entry.headers["Authorization"]
+    assert_nil entry.headers["Cookie"]
+    refute_equal "Bearer alice-secret", entry.vary_key["Authorization"]
+    assert entry.vary_key["Authorization"].start_with?("sha256:")
+    refute_includes entry.inspect, "alice-secret"
+  end
+
+  def test_credential_scope_is_hashed_rather_than_stored_raw
+    @store = HTTP::Features::Caching::InMemoryStore.new
+    transport = RecordingTransport.new { |request| origin_response(request) }
+    client = RecordingClient.new(
+      transport,
+      features: {
+        caching: {
+          store:        @store,
+          access_scope: ->(_request) { "Bearer alice-secret" }
+        }
+      }
+    )
+
+    client.get(URL, headers: { "Authorization" => "Bearer alice-secret" })
+
+    stored_scopes = @store.instance_variable_get(:@cache).values.flatten.map(&:scope)
+
+    assert_equal 1, stored_scopes.size
+    refute_equal "Bearer alice-secret", stored_scopes.first
+    assert stored_scopes.first.start_with?("sha256:")
+  end
+
+  def test_restricted_content_is_not_cached_without_an_access_scope_mapping
+    @store = HTTP::Features::Caching::InMemoryStore.new
+    @current_scope = :"user:alice"
+    transport = RecordingTransport.new do |request|
+      {
+        status:  200,
+        headers: { "Cache-Control" => "max-age=60", "ETag" => '"v1"', "Vary" => "Authorization" },
+        body:    "restricted:#{request.headers["Authorization"]}"
+      }
+    end
+    client = RecordingClient.new(transport, features: { caching: { store: @store } })
+
+    first = client.get(URL, headers: { "Authorization" => "Bearer alice" })
+    second = client.get(URL, headers: { "Authorization" => "Bearer bob" })
+
+    assert_equal "restricted:Bearer alice", first.body.to_s
+    assert_equal "restricted:Bearer bob", second.body.to_s
+    assert_equal 2, transport.requests.size
+  end
+
+  def test_private_content_is_not_stored_under_the_public_scope
+    transport = RecordingTransport.new do |request|
+      {
+        status:  200,
+        headers: { "Cache-Control" => "private, max-age=60", "ETag" => '"v1"' },
+        body:    "private:#{request.headers["Authorization"]}"
+      }
+    end
+    client = RecordingClient.new(
+      transport,
+      features: { caching: { store: @store, access_scope: ->(_request) { :public } } }
+    )
+
+    first = client.get(URL, headers: { "Authorization" => "Bearer alice" })
+    second = client.get(URL, headers: { "Authorization" => "Bearer bob" })
+
+    assert_equal "private:Bearer alice", first.body.to_s
+    assert_equal "private:Bearer bob", second.body.to_s
+    assert_equal 2, transport.requests.size
+  end
+
+  private
+
+  def warm_restricted(etag, identity, language)
+    @current_scope = :"user:#{identity}"
+    # Make the stored entry immediately stale so the next call revalidates.
+    @transport = RecordingTransport.new do |request|
+      origin_response(request).merge(headers: origin_response(request)[:headers].merge("Cache-Control" => "max-age=0",
+                                                                                      "ETag" => %("#{etag}")))
+    end
+    @client = RecordingClient.new(
+      @transport,
+      features: { caching: { store: @store, access_scope: ->(_request) { @current_scope } } }
+    )
+    get(headers: { "Authorization" => "Bearer #{identity}", "Accept-Language" => language })
+  end
+
+  def revalidate_with(etag, identity, language, respond_with_304: false, headers: {}, return_request: false,
+                      before_response: nil)
+    @transport = RecordingTransport.new do |request|
+      if respond_with_304 && request.headers["If-None-Match"] == %("#{etag}")
+        # Simulate the pause between sending the conditional request and the
+        # 304 arriving, so approval can be withdrawn while it is in flight.
+        before_response&.call(request)
+        { status: 304, headers: headers, body: "" }
+      else
+        origin_response(request)
+      end
+    end
+    @client = RecordingClient.new(
+      @transport,
+      features: { caching: { store: @store, access_scope: ->(_request) { @current_scope } } }
+    )
+
+    request_headers = { "Authorization" => "Bearer #{identity}", "Accept-Language" => language }
+    response = @client.get(URL, headers: request_headers)
+    return @transport.requests.last if return_request
+
+    response
   end
 end

@@ -468,6 +468,16 @@ HTTP.digest_auth(user: "admin", pass: "secret").get("https://example.com/protect
 HTTP.use(:caching).get("https://example.com") # caches with in-memory store
 ```
 
+Restricted content can be partitioned by an access scope. Publicly shareable
+responses remain reusable across callers; scoped responses are only served to
+the scope that stored them, and conditional revalidation uses the same
+identity and `Vary` variant as the original request:
+
+```ruby
+scope = ->(request) { request.headers["Authorization"] }
+client = HTTP.use(caching: { access_scope: scope })
+```
+
 ### Pattern matching
 
 ```ruby

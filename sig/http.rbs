@@ -422,20 +422,38 @@ module HTTP
       CACHEABLE_METHODS: Set[Symbol]
 
       attr_reader store: untyped
+      attr_reader access_scope: untyped
 
-      def initialize: (?store: untyped) -> void
+      def initialize: (?store: untyped, ?access_scope: untyped) -> void
       def around_request: (Request request) { (Request) -> Response } -> Response
       def wrap_response: (Response response) -> Response
 
       private
 
-      def revalidate_entry: (Entry entry, Response response, Request request) -> Response
+      def revalidate_entry: (
+        Entry entry,
+        Response response,
+        Request request,
+        Request conditional_request,
+        untyped scope
+      ) -> Response
+      def lookup: (Request request, untyped scope) -> Entry?
       def store_and_freeze_response: (Response response) -> Response
       def build_entry: (Response response, String body_string) -> Entry
       def cacheable_request?: (Request request) -> bool
       def cacheable_response?: (Response response) -> bool
+      def restricted?: (Response response) -> bool
+      def scope_for: (Request request) -> untyped
+      def scope_configured?: () -> bool
+      def persisted_scope: (untyped scope, Request request) -> untyped
+      def credential_scope?: (untyped scope, Request request) -> bool
+      def approved?: (Request conditional_request, Entry entry, untyped scope) -> bool
       def freshness_info?: (Response response, Array[String] directives) -> bool
       def parse_cache_control: (Headers headers) -> Array[String]
+      def vary_key: (Response response) -> Hash[String, String?]
+      def vary_names: (Response response) -> Array[String]
+      def normalize_vary_name: (String name) -> String
+      def shareable?: (Response response) -> bool
       def add_conditional_headers: (Request request, Entry entry) -> Request
       def build_cached_response: (Entry entry, Request request) -> Response
       def now: () -> Time
@@ -443,6 +461,9 @@ module HTTP
       public
 
       class Entry
+        CREDENTIAL_HEADERS: Array[String]
+        SENSITIVE_VARY_HEADERS: Array[String]
+
         attr_reader status: Integer
         attr_reader version: String
         attr_reader headers: Headers
@@ -450,14 +471,36 @@ module HTTP
         attr_reader body: String
         attr_reader request_uri: URI
         attr_reader stored_at: Time
+        attr_reader scope: untyped
+        attr_reader vary_key: Hash[String, String?]
+        attr_reader revalidated_with: String?
+        attr_reader revalidated_scope: untyped
 
-        def initialize: (status: Integer, version: String, headers: Headers, proxy_headers: Headers, body: String, request_uri: URI, stored_at: Time) -> void
+        def initialize: (
+          status: Integer,
+          version: String,
+          headers: Headers,
+          proxy_headers: Headers,
+          body: String,
+          request_uri: URI,
+          stored_at: Time,
+          ?scope: untyped,
+          ?vary_key: Hash[String, String?],
+          ?revalidated_with: String?,
+          ?revalidated_scope: untyped
+        ) -> void
         def fresh?: () -> bool
-        def revalidate!: () -> Time
+        def revalidate!: (?etag: String?, ?scope: untyped) -> Time
         def update_headers!: (Headers response_headers) -> void
+        def visible_to?: (untyped candidate) -> bool
+        def variant_matches?: (Headers request_headers) -> bool
+        def vary_names: () -> Array[String]
+        def self.summarize: (String name, String | Array[String] | nil value) -> String?
+        def self.sanitize_headers: (Headers headers) -> Headers
 
         private
 
+        def normalize_vary_name: (String name) -> String
         def age: () -> Float
         def max_age: () -> Integer?
         def expires_at: () -> Time?
@@ -465,14 +508,15 @@ module HTTP
       end
 
       class InMemoryStore
-        @cache: Hash[String, Entry]
+        @cache: Hash[String, Array[Entry]]
 
         def initialize: () -> void
-        def lookup: (Request request) -> Entry?
-        def store: (Request request, Entry entry) -> Entry
+        def lookup: (Request request, ?scope: untyped) -> Entry?
+        def store: (Request request, Entry entry) -> Array[Entry]
 
         private
 
+        def same_variant?: (Entry left, Entry right) -> bool
         def cache_key: (Request request) -> String
       end
     end
