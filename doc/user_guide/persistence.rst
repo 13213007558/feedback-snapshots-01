@@ -73,6 +73,57 @@ If you must load a joblib file of uncertain provenance, inspect it first with
 a tool such as `fickling <https://github.com/trailofbits/fickling>`_ or
 `skops.io` before loading, then load it only if it is clean.
 
+Restricting loads to an approved allowlist
+------------------------------------------
+
+A production service often needs a hard rule that *only* artifacts it has
+explicitly approved may be deserialized, even though pickle itself remains
+unsafe. :func:`joblib.strict_load`, together with
+:class:`joblib.ApprovedArtifacts`, enforces such an allowlist.
+
+An :class:`~joblib.ApprovedArtifacts` manifest maps absolute file paths to the
+cryptographic digest of their expected content. Build one from the files you
+have reviewed and approved, optionally persisting it as JSON::
+
+  >>> from joblib import ApprovedArtifacts
+  >>> approved = ApprovedArtifacts.from_paths([filename])
+  >>> manifest_path = os.path.join(savedir, 'manifest.json')
+  >>> approved.write_manifest(manifest_path)
+
+The manifest can later be reloaded, possibly on another machine::
+
+  >>> approved = ApprovedArtifacts.from_manifest(manifest_path)
+
+:func:`joblib.strict_load` opens the artifact through a file descriptor,
+streams its full content and compares the digest with the manifest **before
+any unpickling starts**. The same descriptor is reused for memory mapping (via
+``/dev/fd``), so the bytes that were verified and the bytes that are consumed
+cannot diverge if the path is swapped, replaced or unlinked in the meantime::
+
+  >>> from joblib import strict_load
+  >>> strict_load(filename, approved)
+  [('a', [1, 2, 3]), ('b', array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]))]
+
+Both plain and compressed artifacts are supported; for compressed files the
+``mmap_mode`` argument is ignored exactly as with :func:`joblib.load`. Loading
+a path that is absent from the manifest raises
+:class:`joblib.UnapprovedArtifactError`, while a path whose content no longer
+matches its approved digest raises :class:`joblib.ArtifactIntegrityError`.
+Both derive from :class:`joblib.StrictLoadError`.
+
+The same constraint can be applied to a :class:`joblib.Memory` cache by
+passing an allowlist to its constructor; cached results are then read through
+:func:`joblib.strict_load`::
+
+  >>> from joblib import Memory
+  >>> memory = Memory(location=mkdtemp(), approved_artifacts=approved)
+
+.. note::
+
+  An allowlist guarantees integrity against accidental or malicious changes
+  *after* approval; it does not make an already-malicious artifact safe to
+  unpickle. Only approve files whose content you trust.
+
 .. note::
 
   As of Python 3.8 and numpy 1.16, pickle protocol 5 introduced in

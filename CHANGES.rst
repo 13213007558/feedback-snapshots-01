@@ -8,6 +8,14 @@ In Development
    This version changes the way functions defined in jupyter notebook are hashed.
    This invalidates existing cache and will automatically clear them in these cases.
 
+- Add :func:`joblib.strict_load` and the :class:`joblib.ApprovedArtifacts`
+  allowlist to deserialize only pre-approved artifacts. The artifact is hashed
+  and matched against its approved digest through a held-open file descriptor
+  *before* unpickling, and the same descriptor backs memory mapping (via
+  ``/dev/fd``), binding the verified bytes to the bytes consumed. Both plain
+  and compressed artifacts are supported, and :class:`joblib.Memory` accepts
+  the same allowlist through its new ``approved_artifacts`` argument.
+
 - Preserve the values and shared-memory writes of reversed memmap-backed
   array views passed to ``Parallel`` workers.
   https://github.com/joblib/joblib/pull/1872

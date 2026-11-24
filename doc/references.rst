@@ -14,6 +14,7 @@ Classes
    Memory
    Parallel
    parallel_config
+   ApprovedArtifacts
 
 Functions
 ---------
@@ -26,6 +27,7 @@ Functions
    cpu_count
    dump
    load
+   strict_load
    hash
    register_compressor
 

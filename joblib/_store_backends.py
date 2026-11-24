@@ -180,6 +180,9 @@ class StoreBackendMixin(object):
                 print("{0} from {1}".format(msg, full_path))
 
         mmap_mode = None if not hasattr(self, "mmap_mode") else self.mmap_mode
+        # When an allowlist is configured, cached artifacts must pass the same
+        # strict verification before they can be deserialized.
+        approved_artifacts = getattr(self, "approved_artifacts", None)
 
         filename = os.path.join(full_path, "output.pkl")
         if not self._item_exists(filename):
@@ -188,8 +191,14 @@ class StoreBackendMixin(object):
                 "cleared).\nFile %s does not exist" % filename
             )
 
+        if approved_artifacts is not None:
+            item = numpy_pickle.strict_load(
+                filename,
+                approved_artifacts,
+                mmap_mode=mmap_mode,
+            )
         # file-like object cannot be used when mmap_mode is set
-        if mmap_mode is None:
+        elif mmap_mode is None:
             with self._open_item(filename, "rb") as f:
                 item = numpy_pickle.load(f)
         else:
@@ -445,9 +454,19 @@ def _old_split_id(self, call_id):
     return call_id
 
 
-def _reconstructStoreBackend(cls, location, verbose, compress, mmap_mode):
+def _reconstructStoreBackend(
+    cls, location, verbose, compress, mmap_mode, approved_artifacts=None
+):
     obj = cls.__new__(cls)
-    obj.configure(location, verbose, dict(compress=compress, mmap_mode=mmap_mode))
+    obj.configure(
+        location,
+        verbose,
+        dict(
+            compress=compress,
+            mmap_mode=mmap_mode,
+            approved_artifacts=approved_artifacts,
+        ),
+    )
     return obj
 
 
@@ -653,6 +672,11 @@ class FileSystemStoreBackend(StoreBackendBase, StoreBackendMixin):
         self.mmap_mode = mmap_mode
         self.verbose = verbose
 
+        # Optional allowlist enforcing strict loading of cached artifacts.
+        # Stored as-is (an ApprovedArtifacts instance) and ignored by stores
+        # that do not expose it.
+        self.approved_artifacts = backend_options.get("approved_artifacts")
+
     def _split_id(self, call_id):
         if len(call_id) == 0 or not _check_hex(call_id[-1], 32):
             return call_id
@@ -703,5 +727,6 @@ class FileSystemStoreBackend(StoreBackendBase, StoreBackendMixin):
                 self.verbose,
                 self.compress,
                 self.mmap_mode,
+                self.approved_artifacts,
             ),
         )

@@ -42,6 +42,7 @@ from .numpy_pickle_utils import (
     _validate_fileobject_and_memmap,
     _write_fileobject,
 )
+from .security import StrictLoadError
 
 # Register supported compressors
 register_compressor("zlib", ZlibCompressorWrapper())
@@ -760,5 +761,113 @@ def load(filename, mmap_mode=None, ensure_native_byte_order="auto"):
                     filename=filename,
                     mmap_mode=validated_mmap_mode,
                 )
+
+    return obj
+
+
+def strict_load(
+    filename,
+    approved_artifacts,
+    mmap_mode=None,
+    ensure_native_byte_order="auto",
+):
+    """Reconstruct an object only from an allowlisted, verified artifact.
+
+    This is the hardened counterpart of :func:`load` for production settings
+    where deserialization is only permitted for artifacts present in an
+    :class:`~joblib.security.ApprovedArtifacts` manifest.
+
+    The file is opened through a file descriptor whose full content is hashed
+    and compared to the approved digest *before* unpickling starts. The same
+    descriptor (reached through ``/dev/fd``) is used for memory mapping, so the
+    bytes that were checked and the bytes that are consumed cannot diverge,
+    even if the path is swapped, replaced or unlinked in the meantime. Both
+    plain and compressed artifacts are supported; compression transparently
+    disables ``mmap_mode`` exactly like :func:`load`.
+
+    Parameters
+    ----------
+    filename: str or os.PathLike
+        Path of the artifact to load. It must be registered in
+        ``approved_artifacts``. File-like objects are not accepted: strict
+        loading relies on holding the underlying file descriptor.
+    approved_artifacts: ApprovedArtifacts
+        Allowlist containing the approved digest for ``filename``.
+    mmap_mode: {None, 'r+', 'r', 'w+', 'c'}, optional
+        If not None, the arrays are memory-mapped from the verified file. This
+        mode has no effect for compressed files.
+    ensure_native_byte_order: bool, or 'auto', default=='auto'
+        If True, ensures that the byte order of the loaded arrays matches the
+        native byte ordering of the host system. See :func:`load`.
+
+    Returns
+    -------
+    result: any Python object
+        The object stored in the verified artifact.
+
+    Raises
+    ------
+    UnapprovedArtifactError
+        If ``filename`` is missing from the approved manifest.
+    ArtifactIntegrityError
+        If the file content does not match its approved digest.
+    StrictLoadError
+        If strict loading cannot be honored for the requested parameters, for
+        instance memory mapping on a platform without ``/dev/fd`` support or a
+        legacy joblib (<= 0.9) artifact.
+    """
+    if ensure_native_byte_order == "auto":
+        ensure_native_byte_order = mmap_mode is None
+
+    if ensure_native_byte_order and mmap_mode is not None:
+        raise ValueError(
+            "Native byte ordering can only be enforced if 'mmap_mode' parameter "
+            f"is set to None, but got 'mmap_mode={mmap_mode}' instead."
+        )
+
+    if hasattr(filename, "read"):
+        raise StrictLoadError(
+            "strict_load requires a filename backed by an open file descriptor "
+            "to bind verification to the consumed bytes; file-like objects are "
+            "not supported."
+        )
+
+    if isinstance(filename, os.PathLike):
+        filename = os.fspath(filename)
+
+    # The context manager verifies the digest before yielding, so any failure
+    # raised while entering it happens before deserialization.
+    with approved_artifacts.verified_open(filename) as (fobj, identity):
+        with _validate_fileobject_and_memmap(
+            fobj, identity.path, mmap_mode
+        ) as (validated_fobj, validated_mmap_mode):
+            if isinstance(validated_fobj, str):
+                # The legacy (<= 0.9) compatibility path re-opens the file by
+                # name and cannot be bound to the verified descriptor.
+                raise StrictLoadError(
+                    f"Artifact {identity.path!r} uses the legacy joblib (<=0.9) "
+                    "persistence format, which cannot be loaded under strict "
+                    "mode. Regenerate it with a current joblib version."
+                )
+
+            if validated_mmap_mode is not None and identity.fd_path is None:
+                raise StrictLoadError(
+                    "Memory mapping a verified artifact relies on /dev/fd, which "
+                    "is unavailable on this platform. Retry without mmap_mode."
+                )
+
+            # Point the unpickler at the verified descriptor rather than the
+            # original path: a swap of the path cannot affect an open fd.
+            unpickle_filename = (
+                identity.fd_path
+                if validated_mmap_mode is not None
+                else identity.path
+            )
+            obj = _unpickle(
+                validated_fobj,
+                ensure_native_byte_order=ensure_native_byte_order,
+                filename=unpickle_filename,
+                mmap_mode=validated_mmap_mode,
+            )
 
     return obj

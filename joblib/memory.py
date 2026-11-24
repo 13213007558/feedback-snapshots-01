@@ -1001,6 +1001,13 @@ class Memory(Logger):
         Verbosity flag, controls the debug messages that are issued
         as functions are evaluated.
 
+    approved_artifacts: ApprovedArtifacts, optional
+        An allowlist of artifacts accepted when reading cached results. When
+        set, cached ``output.pkl`` files are loaded through
+        :func:`joblib.strict_load`, which verifies their digest against this
+        allowlist before any deserialization. By default no allowlist is
+        enforced and cached results are loaded with :func:`joblib.load`.
+
     backend_options: dict, optional
         Contains a dictionary of named parameters used to configure
         the store backend.
@@ -1018,6 +1025,7 @@ class Memory(Logger):
         compress=False,
         verbose=1,
         backend_options=None,
+        approved_artifacts=None,
     ):
         Logger.__init__(self)
         self._verbose = verbose
@@ -1028,6 +1036,7 @@ class Memory(Logger):
         if backend_options is None:
             backend_options = {}
         self.backend_options = backend_options
+        self.approved_artifacts = approved_artifacts
 
         if compress and mmap_mode is not None:
             warnings.warn("Compressed results cannot be memmapped", stacklevel=2)
@@ -1041,7 +1050,10 @@ class Memory(Logger):
             location,
             verbose=self._verbose,
             backend_options=dict(
-                compress=compress, mmap_mode=mmap_mode, **backend_options
+                compress=compress,
+                mmap_mode=mmap_mode,
+                approved_artifacts=approved_artifacts,
+                **backend_options,
             ),
         )
 
@@ -1132,6 +1144,7 @@ class Memory(Logger):
                     **self.backend_options,
                     compress=self.compress,
                     mmap_mode=mmap_mode,
+                    approved_artifacts=self.approved_artifacts,
                 ),
             )
 

@@ -118,7 +118,14 @@ from .compressor import register_compressor
 from .hashing import hash
 from .logger import Logger, PrintTime
 from .memory import MemorizedResult, Memory, expires_after, register_store_backend
-from .numpy_pickle import dump, load
+from .numpy_pickle import dump, load, strict_load
+from .security import (
+    ApprovedArtifacts,
+    ArtifactIntegrityError,
+    StrictLoadError,
+    UnapprovedArtifactError,
+    VerifiedArtifact,
+)
 from .parallel import (
     Parallel,
     cpu_count,
@@ -156,6 +163,13 @@ __all__ = [
     "hash",
     "dump",
     "load",
+    # Strict, allowlist-based loading of persisted artifacts
+    "strict_load",
+    "ApprovedArtifacts",
+    "VerifiedArtifact",
+    "StrictLoadError",
+    "UnapprovedArtifactError",
+    "ArtifactIntegrityError",
 ]
 
 
