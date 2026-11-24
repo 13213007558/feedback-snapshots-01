@@ -94,6 +94,44 @@ can :update, User, [:email, :password], id: user.id
 params.require(:user).permit(current_ability.permitted_attributes(:update, @user))
 ```
 
+## Aliased actions and merged abilities
+
+`permitted_attributes` follows the rule of the action through its aliases, so an old action name gets
+the same attributes as the action it is aliased to:
+
+```ruby
+alias_action :save_legacy, to: :update
+can :update, User, [:email, :password]
+cannot :update, User, [:password], role: "admin"
+
+current_ability.permitted_attributes(:save_legacy, @user) #=> [:email]
+```
+
+The same applies after merging an ability: a plugin can add a `cannot` rule with conditions without
+declaring the aliases again, and the aliases of the receiving ability keep applying to the merged rules.
+
+```ruby
+class FinanceAbility
+  include CanCan::Ability
+
+  def initialize
+    cannot :update, User, [:password], role: "admin"
+  end
+end
+
+current_ability.merge(FinanceAbility.new)
+current_ability.permitted_attributes(:save_legacy, @admin_user) #=> [:email]
+```
+
+To tell an attribute that cannot be written from an update that is not allowed at all, compare
+`permitted_attributes` with `can?` on the record:
+
+```ruby
+current_ability.can?(:update, @user)                      # => false when the update is denied
+current_ability.permitted_attributes(:update, @user)      # => [] in that case
+current_ability.disallowed_attributes(:update, @user)     # => [:password] when only the attribute is denied
+```
+
 ## Loading records
 
 Attribute rules are not applied when loading records: `accessible_by` and `load_resource` return records with all their attributes.

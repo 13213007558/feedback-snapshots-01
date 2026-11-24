@@ -226,7 +226,8 @@ module CanCan
     #   read_ability.aliased_actions #=> [:see => [:show, :index], :modify => [:create, :update]]
     #
     # If there are collisions when merging the +aliased_actions+, the actions on +self+ will be
-    # overwritten.
+    # overwritten by the aliases the given ability declares. An action that the given ability
+    # does not alias keeps the aliases of +self+.
     #
     # class ReadAbility
     #   include CanCan::Ability
@@ -247,11 +248,15 @@ module CanCan
     # read_ability = ReadAbility.new
     # read_ability.merge(ShowAbility)
     # read_ability.aliased_actions #=> [:see => [:show]]
+    #
+    # A plugin can add rules on an action without touching its aliases, so the aliases that
+    # +self+ declared still apply to those rules: an old action name keeps inheriting the
+    # conditions and the denied attributes of the new one.
     def merge(ability)
       ability.rules.each do |rule|
         add_rule(rule.dup)
       end
-      @aliased_actions = aliased_actions.merge(ability.aliased_actions)
+      merge_aliased_actions(ability)
       @expanded_actions = nil
       self
     end

@@ -730,6 +730,117 @@ describe CanCan::Ability do
     expect(@ability.permitted_attributes(:read, 2..4)).to eq(%i[class to_s])
   end
 
+  it 'applies a cannot rule with attributes to the aliased actions too' do
+    @ability.can :update, NamedUser, %i[first_name last_name]
+    @ability.cannot :update, NamedUser, [:last_name], first_name: 'Locked'
+
+    expect(@ability.permitted_attributes(:update, NamedUser.new(first_name: 'Locked'))).to eq([:first_name])
+    expect(@ability.permitted_attributes(:edit, NamedUser.new(first_name: 'Locked'))).to eq([:first_name])
+    expect(@ability.disallowed_attributes(:edit, NamedUser.new(first_name: 'Locked'))).to eq([:last_name])
+  end
+
+  it 'applies a cannot rule with attributes through a custom alias' do
+    @ability.alias_action :save_legacy, to: :update
+    @ability.can :update, NamedUser, %i[first_name last_name]
+    @ability.cannot :update, NamedUser, [:last_name], first_name: 'Locked'
+
+    expect(@ability.permitted_attributes(:save_legacy, NamedUser.new(first_name: 'Locked'))).to eq([:first_name])
+    expect(@ability.can?(:save_legacy, NamedUser.new(first_name: 'Locked'), :last_name)).to be(false)
+  end
+
+  it 'keeps the alias and its attribute restrictions when merging an ability that adds a conditional cannot' do
+    @ability.alias_action :save_legacy, to: :update
+    @ability.can :update, NamedUser, %i[first_name last_name]
+    (another_ability = double).extend(CanCan::Ability)
+    another_ability.cannot :update, NamedUser, [:last_name], first_name: 'Locked'
+
+    @ability.merge(another_ability)
+    expect(@ability.permitted_attributes(:save_legacy, NamedUser.new(first_name: 'Locked'))).to eq([:first_name])
+    expect(@ability.permitted_attributes(:save_legacy, NamedUser.new(first_name: 'Open')))
+      .to eq(%i[first_name last_name])
+  end
+
+  it 'tells a forbidden attribute from a forbidden update' do
+    @ability.can :update, NamedUser, %i[first_name last_name]
+    @ability.cannot :update, NamedUser, [:last_name], first_name: 'Locked'
+
+    locked = NamedUser.new(first_name: 'Locked')
+    expect(@ability.can?(:update, locked)).to be(true)
+    expect(@ability.permitted_attributes(:update, locked)).to eq([:first_name])
+    expect(@ability.disallowed_attributes(:update, locked)).to eq([:last_name])
+
+    @ability.cannot :update, NamedUser, first_name: 'Frozen'
+    frozen = NamedUser.new(first_name: 'Frozen')
+    expect(@ability.can?(:update, frozen)).to be(false)
+    expect(@ability.permitted_attributes(:update, frozen)).to eq([])
+  end
+
+  describe 'writing the submitted attributes' do
+    def write(action, ability, user, submitted)
+      permitted = ability.permitted_attributes(action, user)
+      filtered = ActionController::Parameters.new(user: submitted).require(:user).permit(*permitted)
+      user.assign_attributes(filtered)
+      user.save!
+      user.reload
+    end
+
+    before(:each) do
+      require 'action_controller'
+    rescue LoadError
+      skip 'actionpack is not available'
+    end
+
+    it 'writes the same fields for the new and the old action name' do
+      @ability.can :update, NamedUser, %i[first_name last_name]
+      @ability.cannot :update, NamedUser, [:last_name], first_name: 'Locked'
+
+      %i[update edit].each do |action|
+        user = NamedUser.create!(first_name: 'Locked', last_name: 'Original')
+        write(action, @ability, user, first_name: 'Submitted', last_name: 'Submitted')
+        expect(user.first_name).to eq('Submitted')
+        expect(user.last_name).to eq('Original')
+      end
+    end
+
+    it 'writes every field of the base rule when the condition does not deny any' do
+      @ability.can :update, NamedUser, %i[first_name last_name]
+      @ability.cannot :update, NamedUser, [:last_name], first_name: 'Locked'
+
+      %i[update edit].each do |action|
+        user = NamedUser.create!(first_name: 'Open', last_name: 'Original')
+        write(action, @ability, user, first_name: 'Submitted', last_name: 'Submitted')
+        expect(user.first_name).to eq('Submitted')
+        expect(user.last_name).to eq('Submitted')
+      end
+    end
+
+    it 'writes the same fields for a custom alias after merging the ability that denies one' do
+      @ability.alias_action :save_legacy, to: :update
+      @ability.can :update, NamedUser, %i[first_name last_name]
+      (finance_ability = double).extend(CanCan::Ability)
+      finance_ability.cannot :update, NamedUser, [:last_name], first_name: 'Locked'
+      @ability.merge(finance_ability)
+
+      %i[update save_legacy].each do |action|
+        user = NamedUser.create!(first_name: 'Locked', last_name: 'Original')
+        write(action, @ability, user, first_name: 'Submitted', last_name: 'Submitted')
+        expect(user.first_name).to eq('Submitted')
+        expect(user.last_name).to eq('Original')
+      end
+    end
+
+    it 'does not write anything when the whole update is not allowed' do
+      @ability.can :update, NamedUser, %i[first_name last_name]
+      @ability.cannot :update, NamedUser, first_name: 'Frozen'
+
+      user = NamedUser.create!(first_name: 'Frozen', last_name: 'Original')
+      expect(@ability.can?(:update, user)).to be(false)
+      write(:update, @ability, user, first_name: 'Submitted', last_name: 'Submitted')
+      expect(user.first_name).to eq('Frozen')
+      expect(user.last_name).to eq('Original')
+    end
+  end
+
   it 'removes the attributes of a can rule when a cannot rule has no attributes' do
     @ability.can :update, Range, %i[first last]
     @ability.cannot :update, Range
@@ -908,6 +1019,39 @@ describe CanCan::Ability do
 
       @ability.merge(another_ability)
       expect(@ability.can?(:update, Integer)).to be(true)
+    end
+
+    it 'keeps the aliases of an action that the given ability does not alias' do
+      @ability.alias_action :save_legacy, to: :update
+      @ability.can :update, Integer
+      (another_ability = double).extend(CanCan::Ability)
+      another_ability.cannot :update, Integer
+
+      @ability.merge(another_ability)
+      expect(@ability.aliased_actions[:update]).to eq(%i[edit save_legacy])
+      expect(@ability.can?(:save_legacy, Integer)).to be(false)
+    end
+
+    it 'does not wipe the aliases of an action when the given ability has cleared them' do
+      @ability.alias_action :save_legacy, to: :update
+      (another_ability = double).extend(CanCan::Ability)
+      another_ability.clear_aliased_actions
+      another_ability.cannot :update, Integer
+
+      @ability.merge(another_ability)
+      expect(@ability.aliased_actions[:update]).to eq(%i[edit save_legacy])
+      expect(@ability.can?(:save_legacy, Integer)).to be(false)
+    end
+
+    it 'keeps the defaults of an action that it adds an alias to' do
+      @ability.can :update, Integer
+      (another_ability = double).extend(CanCan::Ability)
+      another_ability.alias_action :save_legacy, to: :update
+      another_ability.cannot :update, Integer
+
+      @ability.merge(another_ability)
+      expect(@ability.aliased_actions[:update]).to eq(%i[edit save_legacy])
+      expect(@ability.can?(:save_legacy, Integer)).to be(false)
     end
 
     it 'can add an empty ability' do

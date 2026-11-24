@@ -38,6 +38,8 @@ module CanCan
         validate_target(target, actions)
         aliased_actions[target] ||= []
         aliased_actions[target] += actions
+        explicit_aliased_actions[target] ||= []
+        explicit_aliased_actions[target] += actions
         @expanded_actions = nil
       end
 
@@ -49,6 +51,7 @@ module CanCan
       # Removes previously aliased actions including the defaults.
       def clear_aliased_actions
         @aliased_actions = {}
+        @explicit_aliased_actions = nil
         @expanded_actions = nil
       end
 
@@ -60,6 +63,26 @@ module CanCan
           create: [:new],
           update: [:edit]
         }
+      end
+
+      # The aliases this ability declares itself, without the defaults it inherits.
+      # Merging copies these, so that a plugin which does not touch an action does
+      # not take over the aliases that the receiving ability declared for it.
+      def explicit_aliased_actions
+        @explicit_aliased_actions ||= {}
+      end
+
+      # Applies the aliases that the given ability declares. An action that the given ability
+      # does not alias keeps the aliases of this ability, with its defaults. An action that it
+      # aliases is overwritten, so that merging the same ability twice gives the same result.
+      def merge_aliased_actions(ability)
+        plugin_explicit = ability.send(:explicit_aliased_actions)
+        merged = aliased_actions.dup
+        plugin_explicit.each_key do |target|
+          merged[target] = ability.aliased_actions[target]
+        end
+        @aliased_actions = merged
+        explicit_aliased_actions.merge!(plugin_explicit.transform_values { |actions| actions.dup })
       end
 
       # Given an action, it will try to find all of the actions which are aliased to it.

@@ -1,3 +1,7 @@
+## Unreleased
+
+* Keep the aliased actions of a merged ability when the ability given to `merge` does not declare them: a plugin that adds a `cannot` rule on `:update` without touching the aliases no longer dropped `alias_action :save_legacy, to: :update`, so the old action name lost its permission and the attribute restrictions that `permitted_attributes` applies to `:update`. ([@coorasse][])
+
 ## 3.7.1
 
 * [#939](https://github.com/CanCanCommunity/cancancan/issues/939): Do not match a record of another model with the same id in `can?` when the value of a condition is a relation, as `accessible_by` already did: with a polymorphic association, `can :read, Document, owner: Introduction.where(client: user)` allowed a document owned by a record of another model with the id of an allowed introduction. ([@manuelmeurer][])
