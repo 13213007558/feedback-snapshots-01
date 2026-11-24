@@ -145,6 +145,13 @@ class Session:
         self._credentials = None
         self._auth_token = None
         self._profile_map = None
+        self._credential_cache = {}
+        self._sso_binding_registry = botocore.credentials.SSOBindingRegistry(
+            cache=botocore.credentials.JSONFileCache(
+                botocore.credentials.SSOProvider._SSO_TOKEN_CACHE_DIR
+            ),
+            credential_cache=self._credential_cache,
+        )
         # This is a dict that stores per session specific config variable
         # overrides via set_config_variable().
         self._session_instance_vars = {}
@@ -192,7 +199,10 @@ class Session:
 
     def _create_credential_resolver(self):
         return botocore.credentials.create_credential_resolver(
-            self, region_name=self._last_client_region_used
+            self,
+            region_name=self._last_client_region_used,
+            cache=self._credential_cache,
+            sso_binding_registry=self._sso_binding_registry,
         )
 
     def _register_data_loader(self):
@@ -521,6 +531,39 @@ class Session:
                 'credential_provider'
             ).load_credentials()
         return self._credentials
+
+    @property
+    def sso_binding_registry(self):
+        return self._sso_binding_registry
+
+    def _create_sso_binding_provider(self, profile_name):
+        return botocore.credentials.SSOProvider(
+            load_config=lambda: self.full_config,
+            client_creator=self.create_client,
+            profile_name=profile_name,
+            cache=self._credential_cache,
+            binding_registry=self._sso_binding_registry,
+        )
+
+    def revoke_sso_binding(self, profile_name=None, reason=None):
+        """Revoke only the account/role SSO binding for one profile."""
+        profile_name = (
+            profile_name or self.get_config_variable('profile') or 'default'
+        )
+        provider = self._create_sso_binding_provider(profile_name)
+        return provider.revoke_binding(reason=reason)
+
+    revoke_sso_role_binding = revoke_sso_binding
+
+    def approve_sso_binding(self, profile_name=None):
+        """Re-approve a previously revoked account/role SSO binding."""
+        profile_name = (
+            profile_name or self.get_config_variable('profile') or 'default'
+        )
+        provider = self._create_sso_binding_provider(profile_name)
+        return provider.approve_binding()
+
+    reapprove_sso_binding = approve_sso_binding
 
     def get_auth_token(self, **kwargs):
         """

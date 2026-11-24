@@ -776,6 +776,43 @@ class UnauthorizedSSOTokenError(SSOError):
     )
 
 
+class SSOAuthorizationRequiredError(UnauthorizedSSOTokenError):
+    """An SSO role grant was revoked and requires interactive approval."""
+
+    fmt = (
+        "Access for the SSO account/role binding{binding_description} has "
+        "been revoked or has not been approved yet. Re-approve it "
+        "interactively by running '{login_command}' before requesting new "
+        "role credentials."
+    )
+
+    def __init__(self, **kwargs):
+        profile_name = kwargs.get("profile_name")
+        if kwargs.get("binding_scope"):
+            binding_description = f" {kwargs['binding_scope']}"
+        else:
+            binding_description = ""
+        kwargs.setdefault("binding_description", binding_description)
+        login_command = "aws sso login"
+        if profile_name:
+            login_command += f" --profile {profile_name}"
+        kwargs.setdefault("login_command", login_command)
+        super().__init__(**kwargs)
+        self.binding_scope = kwargs.get("binding_scope")
+        self.profile_name = profile_name
+        self.interaction_required = True
+        self.requires_interaction = True
+        self.reauthorization_required = True
+
+
+SSOBindingAuthorizationRequiredError = SSOAuthorizationRequiredError
+SSOBindingRevokedError = SSOAuthorizationRequiredError
+SSOAuthorizationRevokedError = SSOAuthorizationRequiredError
+SSOInteractionRequiredError = SSOAuthorizationRequiredError
+SSOReauthorizationRequiredError = SSOAuthorizationRequiredError
+SSOConsentRequiredError = SSOAuthorizationRequiredError
+
+
 class LoginError(BotoCoreError):
     fmt = (
         "An unspecified error happened when resolving AWS credentials or "

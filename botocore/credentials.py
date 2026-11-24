@@ -51,6 +51,7 @@ from botocore.exceptions import (
     MissingDependencyException,
     PartialCredentialsError,
     RefreshWithMFAUnsupportedError,
+    SSOAuthorizationRequiredError,
     UnauthorizedSSOTokenError,
     UnknownCredentialError,
 )
@@ -81,7 +82,12 @@ _DEFAULT_MANDATORY_REFRESH_TIMEOUT = 10 * 60  # 10 min
 _DEFAULT_ADVISORY_REFRESH_TIMEOUT = 15 * 60  # 15 min
 
 
-def create_credential_resolver(session, cache=None, region_name=None):
+def create_credential_resolver(
+    session,
+    cache=None,
+    region_name=None,
+    sso_binding_registry=None,
+):
     """Create a default credential resolver.
 
     This creates a pre-configured credential resolver
@@ -122,7 +128,10 @@ def create_credential_resolver(session, cache=None, region_name=None):
     )
 
     profile_provider_builder = ProfileProviderBuilder(
-        session, cache=cache, region_name=region_name
+        session,
+        cache=cache,
+        region_name=region_name,
+        sso_binding_registry=sso_binding_registry,
     )
     assume_role_provider = AssumeRoleProvider(
         load_config=lambda: session.full_config,
@@ -195,12 +204,14 @@ class ProfileProviderBuilder:
         region_name=None,
         sso_token_cache=None,
         login_token_cache=None,
+        sso_binding_registry=None,
     ):
         self._session = session
         self._cache = cache
         self._region_name = region_name
         self._sso_token_cache = sso_token_cache
         self._login_token_cache = login_token_cache
+        self._sso_binding_registry = sso_binding_registry
 
     def providers(self, profile_name, disable_env_vars=False):
         return [
@@ -258,6 +269,7 @@ class ProfileProviderBuilder:
                 cache=self._sso_token_cache,
                 profile_name=profile_name,
             ),
+            binding_registry=self._sso_binding_registry,
         )
 
     def _create_login_provider(self, profile_name):
@@ -773,17 +785,18 @@ class CachedCredentialFetcher:
         else:
             logger.debug("Credentials for role retrieved from cache.")
 
+        return self._build_credentials_from_response(response)
+
+    def _build_credentials_from_response(self, response):
         creds = response['Credentials']
         expiration = _serialize_if_needed(creds['Expiration'], iso=True)
-        credentials = {
+        return {
             'access_key': creds['AccessKeyId'],
             'secret_key': creds['SecretAccessKey'],
             'token': creds['SessionToken'],
             'expiry_time': expiration,
             'account_id': creds.get('AccountId'),
         }
-
-        return credentials
 
     def _load_from_cache(self):
         if self._cache_key in self._cache:
@@ -2260,6 +2273,288 @@ class CredentialResolver:
         return None
 
 
+class SSOBindingScope(
+    namedtuple(
+        'SSOBindingScope',
+        [
+            'account_id',
+            'role_name',
+            'sso_session_name',
+            'start_url',
+            'sso_region',
+            'profile_name',
+        ],
+        defaults=(None, None, None, None),
+    )
+):
+    """Stable identity for one account/role grant behind an SSO entry."""
+
+    __slots__ = ()
+
+    @classmethod
+    def from_config(cls, config, profile_name=None):
+        return cls(
+            account_id=config['sso_account_id'],
+            role_name=config['sso_role_name'],
+            sso_session_name=config.get('sso_session'),
+            start_url=config.get('sso_start_url'),
+            sso_region=config.get('sso_region'),
+            profile_name=profile_name or config.get('profile_name'),
+        )
+
+    def cache_arguments(self):
+        arguments = {
+            'roleName': self.role_name,
+            'accountId': self.account_id,
+        }
+        if self.sso_session_name:
+            arguments['sessionName'] = self.sso_session_name
+        else:
+            arguments['startUrl'] = self.start_url
+        return arguments
+
+    @property
+    def cache_key(self):
+        arguments = json.dumps(
+            self.cache_arguments(),
+            sort_keys=True,
+            separators=(',', ':'),
+        )
+        return sha1(arguments.encode('utf-8')).hexdigest()
+
+    @property
+    def scope_id(self):
+        return self.cache_key
+
+    @property
+    def description(self):
+        return f' for account {self.account_id}, role {self.role_name!r}'
+
+
+class SSOBindingRegistry:
+    """Persistent, role-scoped revocation and refresh fences.
+
+    Revocation state is deliberately keyed by the account/role cache scope and
+    never by the shared SSO session token. This allows one role grant to be
+    revoked without removing the login token used by another profile.
+    """
+
+    _STATE_KEY_PREFIX = 'botocore-sso-binding-v1-'
+    _global_lock = threading.RLock()
+
+    def __init__(self, cache=None, credential_cache=None):
+        if cache is None:
+            cache = {}
+        self._cache = cache
+        self._credential_cache = credential_cache
+        self._locks_guard = threading.Lock()
+        self._locks = {}
+
+    @staticmethod
+    def coerce_scope_id(scope):
+        if isinstance(scope, SSOBindingScope):
+            return scope.scope_id
+        for attribute in ('binding_scope_id', 'scope_id', 'cache_key'):
+            value = getattr(scope, attribute, None)
+            if value:
+                return value
+        return str(scope)
+
+    def _state_key(self, scope_id):
+        return f'{self._STATE_KEY_PREFIX}{scope_id}'
+
+    def _lock_for(self, scope_id):
+        with self._locks_guard:
+            lock = self._locks.get(scope_id)
+            if lock is None:
+                lock = threading.RLock()
+                self._locks[scope_id] = lock
+            return lock
+
+    def _read_state(self, scope_id):
+        state_key = self._state_key(scope_id)
+        if state_key not in self._cache:
+            return None
+        state = self._cache[state_key]
+        if not isinstance(state, dict):
+            return None
+        return state
+
+    def _generation(self, scope_id):
+        state = self._read_state(scope_id)
+        if state is None:
+            return 0
+        try:
+            return max(0, int(state.get('generation', 0)))
+        except (TypeError, ValueError):
+            return 0
+
+    def is_revoked(self, scope):
+        scope_id = self.coerce_scope_id(scope)
+        state = self._read_state(scope_id)
+        return bool(
+            state
+            and (
+                state.get('revoked') is True
+                or state.get('status') == 'revoked'
+            )
+        )
+
+    def ensure_authorized(self, scope, profile_name=None):
+        scope_id = self.coerce_scope_id(scope)
+        lock = self._lock_for(scope_id)
+        with self._global_lock, lock:
+            if self.is_revoked(scope_id):
+                state = self._read_state(scope_id) or {}
+                raise SSOAuthorizationRequiredError(
+                    binding_scope=scope_id,
+                    profile_name=profile_name or state.get('profile_name'),
+                )
+
+    def revoke(
+        self,
+        scope,
+        profile_name=None,
+        cache_key=None,
+        credential_cache=None,
+        reason=None,
+    ):
+        scope_id = self.coerce_scope_id(scope)
+        lock = self._lock_for(scope_id)
+        with self._global_lock, lock:
+            generation = self._generation(scope_id) + 1
+            now = time.time()
+            state = {
+                'version': 1,
+                'scope': scope_id,
+                'status': 'revoked',
+                'revoked': True,
+                'generation': generation,
+                'updated_at': now,
+                'revoked_at': now,
+            }
+            if profile_name is not None:
+                state['profile_name'] = profile_name
+            if reason is not None:
+                state['reason'] = str(reason)
+            self._cache[self._state_key(scope_id)] = state
+            target_cache = (
+                credential_cache
+                if credential_cache is not None
+                else self._credential_cache
+            )
+            target_key = cache_key or scope_id
+            if target_cache is not None:
+                try:
+                    if target_key in target_cache:
+                        del target_cache[target_key]
+                except KeyError:
+                    pass
+            return dict(state)
+
+    def approve(self, scope, profile_name=None):
+        scope_id = self.coerce_scope_id(scope)
+        lock = self._lock_for(scope_id)
+        with self._global_lock, lock:
+            generation = self._generation(scope_id) + 1
+            state = {
+                'version': 1,
+                'scope': scope_id,
+                'status': 'approved',
+                'revoked': False,
+                'generation': generation,
+                'updated_at': time.time(),
+                'approved_at': time.time(),
+            }
+            if profile_name is not None:
+                state['profile_name'] = profile_name
+            self._cache[self._state_key(scope_id)] = state
+            return dict(state)
+
+    reapprove = approve
+    unrevoke = approve
+    restore = approve
+    grant = approve
+    revoke_binding = revoke
+    revoke_scope = revoke
+    invalidate = revoke
+    approve_binding = approve
+
+    def begin_refresh(self, scope, profile_name=None):
+        scope_id = self.coerce_scope_id(scope)
+        lock = self._lock_for(scope_id)
+        with self._global_lock, lock:
+            self.ensure_authorized(scope_id, profile_name=profile_name)
+            return self._generation(scope_id)
+
+    def commit_refresh(
+        self,
+        scope,
+        generation,
+        write_callback,
+        profile_name=None,
+    ):
+        scope_id = self.coerce_scope_id(scope)
+        lock = self._lock_for(scope_id)
+        with self._global_lock, lock:
+            current_generation = self._generation(scope_id)
+            if self.is_revoked(scope_id):
+                self.ensure_authorized(scope_id, profile_name=profile_name)
+            if current_generation != generation:
+                return False
+            write_callback()
+            return True
+
+
+SSOBindingStore = SSOBindingRegistry
+SSORevocationRegistry = SSOBindingRegistry
+SSORevocationStore = SSOBindingRegistry
+SSOGrantRegistry = SSOBindingRegistry
+SSORoleBinding = SSOBindingScope
+SSOCredentialScope = SSOBindingScope
+
+
+class SSOBoundRefreshableCredentials(DeferredRefreshableCredentials):
+    """Refreshable SSO credentials that observe role-binding revocation."""
+
+    def __init__(
+        self,
+        refresh_using,
+        method,
+        binding_registry=None,
+        binding_scope=None,
+        profile_name=None,
+        time_fetcher=_local_now,
+    ):
+        super().__init__(refresh_using, method, time_fetcher=time_fetcher)
+        self._binding_registry = binding_registry
+        self._binding_scope = binding_scope
+        self._binding_profile_name = profile_name
+
+    def _ensure_binding_authorized(self):
+        if self._binding_registry is None or self._binding_scope is None:
+            return
+        try:
+            self._binding_registry.ensure_authorized(
+                self._binding_scope,
+                profile_name=self._binding_profile_name,
+            )
+        except Exception:
+            with self._refresh_lock:
+                self._frozen_credentials = None
+            raise
+
+    def _refresh(self):
+        self._ensure_binding_authorized()
+        try:
+            super()._refresh()
+        except SSOAuthorizationRequiredError:
+            with self._refresh_lock:
+                self._frozen_credentials = None
+            raise
+        self._ensure_binding_authorized()
+
+
 class SSOCredentialFetcher(CachedCredentialFetcher):
     _UTC_DATE_FORMAT = '%Y-%m-%dT%H:%M:%SZ'
 
@@ -2276,6 +2571,10 @@ class SSOCredentialFetcher(CachedCredentialFetcher):
         token_provider=None,
         sso_session_name=None,
         time_fetcher=_local_now,
+        binding_registry=None,
+        revocation_registry=None,
+        grant_registry=None,
+        profile_name=None,
     ):
         self._client_creator = client_creator
         self._sso_region = sso_region
@@ -2286,7 +2585,51 @@ class SSOCredentialFetcher(CachedCredentialFetcher):
         self._token_provider = token_provider
         self._sso_session_name = sso_session_name
         self._time_fetcher = time_fetcher
+        self._profile_name = profile_name
+        if binding_registry is None:
+            binding_registry = revocation_registry or grant_registry
+        if binding_registry is None:
+            binding_registry = SSOBindingRegistry(
+                cache=cache,
+                credential_cache=cache,
+            )
+        self._binding_registry = binding_registry
         super().__init__(cache, expiry_window_seconds)
+        self._binding_scope = SSOBindingScope(
+            account_id=account_id,
+            role_name=role_name,
+            sso_session_name=sso_session_name,
+            start_url=start_url,
+            sso_region=sso_region,
+            profile_name=profile_name,
+        )
+
+    @property
+    def binding_scope(self):
+        return self._binding_scope.scope_id
+
+    @property
+    def sso_binding_scope(self):
+        return self.binding_scope
+
+    def revoke_binding(self, reason=None):
+        return self._binding_registry.revoke(
+            self._binding_scope,
+            profile_name=self._profile_name,
+            cache_key=self._cache_key,
+            credential_cache=self._cache,
+            reason=reason,
+        )
+
+    def approve_binding(self):
+        return self._binding_registry.approve(
+            self._binding_scope,
+            profile_name=self._profile_name,
+        )
+
+    reapprove_binding = approve_binding
+    revoke = revoke_binding
+    invalidate = revoke_binding
 
     def _create_cache_key(self):
         """Create a predictable cache key for the current configuration.
@@ -2309,6 +2652,62 @@ class SSOCredentialFetcher(CachedCredentialFetcher):
         args = json.dumps(args, sort_keys=True, separators=(',', ':'))
         argument_hash = sha1(args.encode('utf-8')).hexdigest()
         return self._make_file_safe(argument_hash)
+
+    def _get_cached_credentials(self):
+        self._binding_registry.ensure_authorized(
+            self._binding_scope,
+            profile_name=self._profile_name,
+        )
+        response = self._load_from_cache()
+        if response is not None:
+            logger.debug("Credentials for role retrieved from cache.")
+            credentials = self._build_credentials_from_response(response)
+            self._binding_registry.ensure_authorized(
+                self._binding_scope,
+                profile_name=self._profile_name,
+            )
+            return credentials
+
+        for _ in range(2):
+            generation = self._binding_registry.begin_refresh(
+                self._binding_scope,
+                profile_name=self._profile_name,
+            )
+            response = self._get_credentials()
+            committed = self._binding_registry.commit_refresh(
+                self._binding_scope,
+                generation,
+                lambda: self._write_to_cache(response),
+                profile_name=self._profile_name,
+            )
+            if committed:
+                break
+            # The scope was revoked and re-approved while the request was in
+            # flight. Discard the stale response and fetch once under the new
+            # generation. A still-revoked scope raises from commit_refresh.
+            self._binding_registry.ensure_authorized(
+                self._binding_scope,
+                profile_name=self._profile_name,
+            )
+        else:  # pragma: no cover - defensive retry bound
+            raise SSOAuthorizationRequiredError(
+                binding_scope=self.binding_scope,
+                profile_name=self._profile_name,
+            )
+
+        credentials = self._build_credentials_from_response(response)
+        self._binding_registry.ensure_authorized(
+            self._binding_scope,
+            profile_name=self._profile_name,
+        )
+        return credentials
+
+    def _discard_cached_credentials(self):
+        try:
+            if self._cache_key in self._cache:
+                del self._cache[self._cache_key]
+        except KeyError:
+            pass
 
     def _parse_timestamp(self, timestamp_ms):
         # fromtimestamp expects seconds so: milliseconds / 1000 = seconds
@@ -2347,6 +2746,7 @@ class SSOCredentialFetcher(CachedCredentialFetcher):
             register_feature_ids(self.feature_ids)
             response = client.get_role_credentials(**kwargs)
         except client.exceptions.UnauthorizedException:
+            self._discard_cached_credentials()
             raise UnauthorizedSSOTokenError()
         credentials = response['roleCredentials']
 
@@ -2389,6 +2789,9 @@ class SSOProvider(CredentialProvider):
         cache=None,
         token_cache=None,
         token_provider=None,
+        binding_registry=None,
+        revocation_registry=None,
+        grant_registry=None,
     ):
         if token_cache is None:
             token_cache = JSONFileCache(self._SSO_TOKEN_CACHE_DIR)
@@ -2397,6 +2800,14 @@ class SSOProvider(CredentialProvider):
         if cache is None:
             cache = {}
         self.cache = cache
+        if binding_registry is None:
+            binding_registry = revocation_registry or grant_registry
+        if binding_registry is None:
+            binding_registry = SSOBindingRegistry(
+                cache=self._token_cache,
+                credential_cache=self.cache,
+            )
+        self._binding_registry = binding_registry
         self._load_config = load_config
         self._client_creator = client_creator
         self._profile_name = profile_name
@@ -2438,6 +2849,48 @@ class SSOProvider(CredentialProvider):
             )
         return config
 
+    def _binding_scope_from_config(self, sso_config):
+        return SSOBindingScope.from_config(
+            sso_config,
+            profile_name=self._profile_name,
+        )
+
+    def revoke_binding(self, reason=None):
+        sso_config = self._load_sso_config()
+        if not sso_config:
+            raise InvalidConfigError(
+                error_msg=(
+                    f'Profile "{self._profile_name}" is not configured for '
+                    'SSO role credentials.'
+                )
+            )
+        scope = self._binding_scope_from_config(sso_config)
+        return self._binding_registry.revoke(
+            scope,
+            profile_name=self._profile_name,
+            cache_key=scope.cache_key,
+            credential_cache=self.cache,
+            reason=reason,
+        )
+
+    def approve_binding(self):
+        sso_config = self._load_sso_config()
+        if not sso_config:
+            raise InvalidConfigError(
+                error_msg=(
+                    f'Profile "{self._profile_name}" is not configured for '
+                    'SSO role credentials.'
+                )
+            )
+        scope = self._binding_scope_from_config(sso_config)
+        return self._binding_registry.approve(
+            scope,
+            profile_name=self._profile_name,
+        )
+
+    reapprove_binding = approve_binding
+    revoke = revoke_binding
+
     def _resolve_sso_session_reference(self, profile_config, sso_sessions):
         sso_session_name = profile_config.get('sso_session')
         if sso_session_name is None:
@@ -2474,6 +2927,8 @@ class SSOProvider(CredentialProvider):
             'client_creator': self._client_creator,
             'token_loader': SSOTokenLoader(cache=self._token_cache),
             'cache': self.cache,
+            'binding_registry': self._binding_registry,
+            'profile_name': self._profile_name,
         }
         sso_session_in_config = 'sso_session' in sso_config
         if sso_session_in_config:
@@ -2492,9 +2947,12 @@ class SSOProvider(CredentialProvider):
             self._feature_ids.add('CREDENTIALS_SSO_LEGACY')
 
         register_feature_ids(self._feature_ids)
-        return DeferredRefreshableCredentials(
+        return SSOBoundRefreshableCredentials(
             method=self.METHOD,
             refresh_using=sso_fetcher.fetch_credentials,
+            binding_registry=self._binding_registry,
+            binding_scope=sso_fetcher.binding_scope,
+            profile_name=self._profile_name,
         )
 
 
