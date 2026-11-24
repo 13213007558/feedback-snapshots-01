@@ -17,10 +17,11 @@ import six
 from six import text_type
 
 if typing.TYPE_CHECKING:
-    from typing import Optional, Text
+    from typing import Any, Optional, Text
 
 
 __all__ = [
+    "BackendUnavailable",
     "BulkCopyFailed",
     "CreateFailed",
     "DestinationExists",
@@ -215,6 +216,45 @@ class RemoteConnectionError(OperationFailed):
     """Operations encountered remote connection trouble."""
 
     default_message = "remote connection error"
+
+
+class BackendUnavailable(OperationFailed):
+    """A MultiFS backend could not be queried and the result is partial.
+
+    Raised by `fs.multifs.MultiFS` when one or more of its child
+    filesystems raise an error other than `ResourceNotFound` while a
+    resource is being looked up or a directory enumerated. Any result
+    returned alongside the exception is only built from the backends
+    that *were* reachable and may therefore be incomplete.
+
+    Attributes:
+        failures (list): A list of ``(name, path, exc)`` tuples, one per
+            backend that failed, where ``name`` is the name the backend
+            was registered with, ``path`` is the resource path being
+            queried, and ``exc`` is the original exception.
+        partial: The partial result that could be assembled from the
+            reachable backends (a list of names for ``listdir`` /
+            ``scandir`` style operations, otherwise `None`).
+
+    """
+
+    default_message = "backend unavailable, result is partial"
+
+    def __init__(self, failures, partial=None, path=None, msg=None):  # noqa: D107
+        # type: (list, Any, Optional[Text], Optional[Text]) -> None
+        self.failures = failures
+        self.partial = partial
+        details = "; ".join(
+            "{}: {} ({})".format(name, error_path, exc)
+            for name, error_path, exc in failures
+        )
+        super(BackendUnavailable, self).__init__(
+            path=path, exc=failures[0][2] if failures else None, msg=msg
+        )
+        self.details = details
+
+    def __reduce__(self):
+        return type(self), (self.failures, self.partial, self.path, self._msg)
 
 
 class InsufficientStorage(OperationFailed):

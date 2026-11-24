@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 - Added `filter_glob` and `exclude_glob` parameters to `fs.walk.Walker`.
   Closes [#459](https://github.com/PyFilesystem/pyfilesystem2/issues/459).
+- Added `MultiFS.add_mask`, `MultiFS.remove_mask` and the `MultiFS.masks`
+  property to hide paths (and their descendants) from every read operation
+  on the combined filesystem, even when the underlying layers still contain
+  them. Each read or directory traversal now snapshots the layer order and
+  mask set so reconfigurations cannot produce mixed views.
+- Added `fs.errors.BackendUnavailable`, raised by `MultiFS` when a child
+  filesystem cannot be queried; the remaining layers are still consulted and
+  the exception reports the failures (and any partial directory entries).
 
 ### Fixed
 - Elaborated documentation of `filter_dirs` and `exclude_dirs` in `fs.walk.Walker`.

@@ -13,7 +13,7 @@ from . import errors
 from .base import FS
 from .mode import check_writable
 from .opener import open_fs
-from .path import abspath, normpath
+from .path import abspath, join, normpath
 
 if typing.TYPE_CHECKING:
     from typing import (
@@ -21,6 +21,7 @@ if typing.TYPE_CHECKING:
         Any,
         BinaryIO,
         Collection,
+        FrozenSet,
         Iterator,
         List,
         MutableMapping,
@@ -48,6 +49,18 @@ class MultiFS(FS):
     until it succeeds. In effect, creating a filesystem that combines
     the files and dirs of its children.
 
+    Paths may be *masked* (see `add_mask`). A masked path -- and all of
+    its descendants -- is hidden from every read operation on the
+    combined filesystem, even if one or more child filesystems still
+    contain resources at that path. This allows an upper layer to
+    declare that a resource has been withdrawn from publication while
+    the lower, archival layers retain their copies.
+
+    If a child filesystem raises an error other than
+    `~fs.errors.ResourceNotFound` while it is being consulted, the
+    remaining filesystems are still tried but the incomplete result is
+    signalled to the caller with `~fs.errors.BackendUnavailable`.
+
     """
 
     _meta = {"virtual": True, "read_only": False, "case_insensitive": False}
@@ -69,6 +82,7 @@ class MultiFS(FS):
         self._sort_index = 0
         self._filesystems = {}  # type: MutableMapping[Text, _PrioritizedFS]
         self._fs_sequence = None  # type: Optional[List[Tuple[Text, FS]]]
+        self._masks = set()  # type: MutableSet[Text]
         self._closed = False
 
     def __repr__(self):
@@ -148,13 +162,112 @@ class MultiFS(FS):
             ]
         return iter(self._fs_sequence)
 
+    @property
+    def masks(self):
+        # type: () -> FrozenSet[Text]
+        """The paths currently masked from the combined filesystem.
+
+        Returns:
+            frozenset: A snapshot of the masked paths, each normalized to
+            an absolute path. A mask hides the path itself and all of its
+            descendants from read operations.
+
+        """
+        return frozenset(self._masks)
+
+    def add_mask(self, path):
+        # type: (Text) -> None
+        """Mask a path from the combined filesystem.
+
+        A masked resource -- along with everything beneath it -- is no
+        longer exposed by `getinfo`, `open`, `scandir`, `listdir` or any
+        other read operation, even if it still exists on one or more of
+        the child filesystems. The decision is taken at the MultiFS
+        level, so it applies to every layer.
+
+        Arguments:
+            path (str): A path on the filesystem. Masking a directory
+                hides that directory and all of its descendants.
+
+        """
+        self._masks.add(abspath(normpath(path)))
+        self._resort()
+
+    def remove_mask(self, path):
+        # type: (Text) -> None
+        """Remove a mask previously added with `add_mask`.
+
+        Arguments:
+            path (str): A path previously passed to `add_mask`.
+
+        Raises:
+            KeyError: If ``path`` is not currently masked.
+
+        """
+        self._masks.remove(abspath(normpath(path)))
+        self._resort()
+
+    def _is_masked(self, path, masks):
+        # type: (Text, FrozenSet[Text]) -> bool
+        """Check if ``path`` is one of the masked paths or below one."""
+        for mask in masks:
+            if path == mask or path.startswith(mask.rstrip("/") + "/"):
+                return True
+        return False
+
+    def _snapshot(self):
+        # type: () -> Tuple[List[Tuple[Text, FS]], FrozenSet[Text]]
+        """Take a consistent snapshot of the layers and masks.
+
+        Capturing both the ordered child filesystems and the current mask
+        set together ensures that a single read, or a single directory
+        traversal, observes one explainable configuration even if the
+        MultiFS is reconfigured while it is running.
+
+        """
+        return list(self.iterate_fs()), self.masks
+
+    def _find_delegate(self, path, sequence=None):
+        # type: (Text, Optional[List[Tuple[Text, FS]]]) -> Tuple[Optional[Text], Optional[FS], List[Tuple[Text, Text, Exception]]]  # noqa: E501
+        """Find the first reachable layer exposing ``path``.
+
+        Returns a tuple of ``(name, fs, failures)``. ``name`` and ``fs``
+        are `None` when no reachable layer exposes the path. ``failures``
+        records every ``(name, path, exc)`` for a layer that raised an
+        error other than `~fs.errors.ResourceNotFound`, so that callers
+        can report an incomplete result rather than silently ignoring a
+        backend that was unavailable.
+
+        """
+        if sequence is None:
+            sequence, _masks = self._snapshot()
+        failures = []  # type: List[Tuple[Text, Text, Exception]]
+        for name, fs in sequence:
+            try:
+                if fs.exists(path):
+                    return name, fs, failures
+            except errors.ResourceNotFound:
+                continue
+            except errors.ResourceInvalid:
+                # A definitive answer about the resource type, not an
+                # unavailable backend: let it reach the caller.
+                raise
+            except errors.FSError as exc:
+                failures.append((name, path, exc))
+        return None, None, failures
+
     def _delegate(self, path):
         # type: (Text) -> Optional[FS]
         """Get a filesystem which has a given path."""
-        for _name, fs in self.iterate_fs():
-            if fs.exists(path):
-                return fs
-        return None
+        sequence, masks = self._snapshot()
+        if self._is_masked(abspath(normpath(path)), masks):
+            return None
+        _name, fs, failures = self._find_delegate(path, sequence)
+        if fs is None and failures:
+            raise errors.BackendUnavailable(
+                failures, path=abspath(normpath(path))
+            )
+        return fs
 
     def _delegate_required(self, path):
         # type: (Text) -> FS
@@ -182,10 +295,14 @@ class MultiFS(FS):
         """
         if check_writable(mode):
             return self._write_fs_name, self.write_fs
-        for name, fs in self.iterate_fs():
-            if fs.exists(path):
-                return name, fs
-        return None, None
+        sequence, masks = self._snapshot()
+        abs_path = abspath(normpath(path))
+        if self._is_masked(abs_path, masks):
+            return None, None
+        name, fs, failures = self._find_delegate(path, sequence)
+        if fs is None and failures:
+            raise errors.BackendUnavailable(failures, path=abs_path)
+        return name, fs
 
     def close(self):
         # type: () -> None
@@ -202,10 +319,10 @@ class MultiFS(FS):
         # type: (Text, Optional[Collection[Text]]) -> Info
         self.check()
         namespaces = namespaces or ()
-        fs = self._delegate(path)
+        _path = abspath(normpath(path))
+        fs = self._delegate(_path)
         if fs is None:
             raise errors.ResourceNotFound(path)
-        _path = abspath(normpath(path))
         info = fs.getinfo(_path, namespaces=namespaces)
         return info
 
@@ -214,16 +331,34 @@ class MultiFS(FS):
         self.check()
         directory = []
         exists = False
-        for _name, _fs in self.iterate_fs():
+        sequence, masks = self._snapshot()
+        abs_path = abspath(normpath(path))
+        if self._is_masked(abs_path, masks):
+            raise errors.ResourceNotFound(path)
+        failures = []  # type: List[Tuple[Text, Text, Exception]]
+        for name, _fs in sequence:
             try:
-                directory.extend(_fs.listdir(path))
+                entries = _fs.listdir(path)
             except errors.ResourceNotFound:
-                pass
-            else:
-                exists = True
+                continue
+            except errors.ResourceInvalid:
+                raise
+            except errors.FSError as exc:
+                failures.append((name, abs_path, exc))
+                continue
+            exists = True
+            for entry in entries:
+                if not self._is_masked(join(abs_path, entry), masks):
+                    directory.append(entry)
         if not exists:
+            if failures:
+                raise errors.BackendUnavailable(failures, path=abs_path)
             raise errors.ResourceNotFound(path)
         directory = list(OrderedDict.fromkeys(directory))
+        if failures:
+            raise errors.BackendUnavailable(
+                failures, partial=directory, path=abs_path
+            )
         return directory
 
     def makedir(
@@ -266,20 +401,47 @@ class MultiFS(FS):
     ):
         # type: (...) -> Iterator[Info]
         self.check()
+        # Snapshot the layers and masks up front so a single traversal
+        # keeps returning one explainable, consistent view even if the
+        # configuration changes while iteration is in progress.
+        sequence, masks = self._snapshot()
+        abs_path = abspath(normpath(path))
+        if self._is_masked(abs_path, masks):
+            raise errors.ResourceNotFound(path)
         seen = set()  # type: MutableSet[Text]
         exists = False
-        for _name, fs in self.iterate_fs():
+        failures = []  # type: List[Tuple[Text, Text, Exception]]
+        yielded = []  # type: List[Text]
+        for name, fs in sequence:
             try:
-                for info in fs.scandir(path, namespaces=namespaces, page=page):
-                    if info.name not in seen:
-                        yield info
-                        seen.add(info.name)
-                exists = True
+                infos = list(fs.scandir(path, namespaces=namespaces, page=page))
             except errors.ResourceNotFound:
-                pass
+                continue
+            except errors.ResourceInvalid:
+                raise
+            except errors.FSError as exc:
+                failures.append((name, abs_path, exc))
+                continue
+            exists = True
+            for info in infos:
+                if info.name in seen:
+                    continue
+                if self._is_masked(join(abs_path, info.name), masks):
+                    continue
+                yield info
+                seen.add(info.name)
+                yielded.append(info.name)
 
+        if not exists and failures:
+            raise errors.BackendUnavailable(
+                failures, partial=yielded, path=abs_path
+            )
         if not exists:
             raise errors.ResourceNotFound(path)
+        if failures:
+            raise errors.BackendUnavailable(
+                failures, partial=yielded, path=abs_path
+            )
 
     def readbytes(self, path):
         # type: (Text) -> bytes
