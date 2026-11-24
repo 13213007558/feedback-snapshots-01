@@ -113,6 +113,19 @@ end
 
 To keep the enclosing handler for such an exception, register its class in the nested scope as well: a scope's class handlers still rank ahead of its own `rescue_from :all`. An exception `rescue_from :all` does not catch, one that is not a `StandardError`, still reaches the enclosing scope's handlers, and so does one raised inside the catch-all's block.
 
+#### Multipart tempfiles are closed after the request unless taken over
+
+Grape now tracks the tempfiles a multipart form uploaded in a `Grape::UploadRegistry` and closes every one of them the endpoint did not take over once the request is answered — however it ended: rendered, halted with `error!`, or rejected by validation. An endpoint that keeps using an uploaded tempfile after the response, for example from a background job, must take it over inside the endpoint; its tempfile then stays open and becomes the application's responsibility to close:
+
+```ruby
+post '/' do
+  kept = take_over_upload(:approved)
+  ProcessReceiptJob.perform_later(kept[:tempfile].path)
+end
+```
+
+See [Multipart File Parameters](README.md#multipart-file-parameters).
+
 ### Upgrading to >= 4.1.0
 
 #### `Rack::Head` wraps the router instead of each endpoint's stack

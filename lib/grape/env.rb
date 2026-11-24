@@ -15,6 +15,7 @@ module Grape
     GRAPE_ROUTING_ARGS = 'grape.routing_args'
     GRAPE_ALLOWED_METHODS = 'grape.allowed_methods'
     GRAPE_EXCEPTION = 'grape.exception'
+    GRAPE_UPLOAD_REGISTRY = 'grape.upload_registry'
 
     # Not a Grape-owned key: the de-facto convention for an exception that was
     # handled rather than raised, which is how error trackers find one they

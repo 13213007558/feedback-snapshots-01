@@ -1293,6 +1293,34 @@ post '/' do
 end
 ```
 
+Grape tracks the tempfiles of a multipart form per request and closes every uploaded tempfile the endpoint did not take over once the request is answered — however it ended: rendered, halted with `error!`, or rejected by validation. Call `take_over_upload` for the files the application keeps; their tempfiles stay open and become the application's responsibility to close:
+
+```ruby
+params do
+  requires :approved, type: File
+  requires :rejected, type: File
+end
+post '/' do
+  kept = take_over_upload(:approved)
+  # kept[:tempfile] is still open here and after the response;
+  # params[:rejected][:tempfile] has been closed by Grape
+end
+```
+
+Every transition is recorded in the request's upload registry, reachable inside the endpoint as `upload_registry` and from the Rack env as `env['grape.upload_registry']`. Its `audit_trail` lists each `tracked`, `handed_over` and `closed` event with the param and the original client filename, for internal diagnostics. When a client filename itself should not reach the application, declare the param with `internal_upload_names`: the endpoint then sees a generated placeholder in `params`, and the original name appears only in the audit trail:
+
+```ruby
+internal_upload_names :diagnostics
+
+params do
+  requires :attachment, type: File
+  requires :diagnostics, type: File
+end
+post '/' do
+  params[:diagnostics][:filename] # => 'diagnostics.internal'
+end
+```
+
 ### First-Class `JSON` Types
 
 Grape supports complex parameters given as JSON-formatted strings using the special `type: JSON` declaration. JSON objects and arrays of objects are accepted equally, with nested validation rules applied to all objects in either case:

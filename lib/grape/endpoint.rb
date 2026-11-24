@@ -487,6 +487,8 @@ module Grape
 
       stack.use Grape::Middleware::Error, **error_middleware_options(format, content_types)
 
+      stack.use Grape::Middleware::UploadHandover
+
       stack.concat setting.middleware
       use_versioner(stack)
       stack.use Grape::Middleware::Formatter, **formatter_middleware_options(format, content_types)

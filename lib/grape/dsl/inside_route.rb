@@ -72,6 +72,30 @@ module Grape
         body format(REDIRECT_MESSAGES.fetch(code), url:)
       end
 
+      # The registry tracking this request's multipart uploads, or nil when
+      # the request is not a multipart form. Its audit trail records every
+      # transition of each tempfile for internal diagnostics.
+      def upload_registry
+        env[Grape::Env::GRAPE_UPLOAD_REGISTRY]
+      end
+
+      # Take an uploaded file over from Grape: the endpoint becomes
+      # responsible for its tempfile, and Grape no longer closes it when the
+      # request is answered. Every upload the endpoint does not take over is
+      # closed by Grape instead.
+      #
+      # @param name [String, Symbol] the param the file was uploaded under
+      # @return [Hash] the upload's file hash, as seen in +params+; an Array
+      #   of them when several files were uploaded under the same param
+      # @raise [KeyError] when no upload was tracked under +name+
+      def take_over_upload(name)
+        registry = upload_registry
+        raise KeyError, "no upload tracked for #{name.inspect}" unless registry
+
+        files = registry.hand_over(name)
+        files.one? ? files.first : files
+      end
+
       # Set or retrieve the HTTP status code.
       #
       # @param status [Integer] The HTTP Status Code to return for this request.
