@@ -33,7 +33,13 @@ from botocore.exceptions import ClientError, HTTPClientError, ParamValidationErr
 from botocore.parsers import ResponseParserError
 
 from s3fs.errors import translate_boto_error
-from s3fs.utils import S3BucketRegionCache, ParamKwargsHelper, _get_brange, FileExpired
+from s3fs.utils import (
+    S3BucketRegionCache,
+    ParamKwargsHelper,
+    _get_brange,
+    FileExpired,
+    VersionConflict,
+)
 
 # ClientPayloadError can be thrown during an incomplete read. aiohttp is a dependency of
 # aiobotocore, we guard the import here in case this dependency is replaced in a future version
@@ -226,6 +232,20 @@ def version_id_kw(version_id):
         return {"VersionId": version_id}
     else:
         return {}
+
+
+def _redact_metadata_for_log(call_kwargs, redact_keys):
+    """Return a copy of S3 call kwargs with restricted user-metadata values
+    replaced by ``"***"``, so they never appear in debug logs."""
+    out = dict(call_kwargs)
+    out.pop("_log_redact", None)
+    metadata = out.get("Metadata")
+    if metadata:
+        lowered = {k.lower() for k in redact_keys}
+        out["Metadata"] = {
+            k: ("***" if k.lower() in lowered else v) for k, v in metadata.items()
+        }
+    return out
 
 
 def _coalesce_version_id(*args):
@@ -461,7 +481,20 @@ class S3FileSystem(AsyncFileSystem):
         method = getattr(s3, method)
         kw2 = kwargs.copy()
         kw2.pop("Body", None)
-        logger.debug("CALL: %s - %s - %s", method.__name__, akwarglist, kw2)
+        redact = kw2.pop("_log_redact", None)
+        if redact is None:
+            for akw in akwarglist:
+                redact = akw.get("_log_redact")
+                if redact is not None:
+                    break
+        if redact:
+            kw2 = _redact_metadata_for_log(kw2, redact)
+            akwarglist_log = tuple(
+                _redact_metadata_for_log(dict(akw), redact) for akw in akwarglist
+            )
+        else:
+            akwarglist_log = akwarglist
+        logger.debug("CALL: %s - %s - %s", method.__name__, akwarglist_log, kw2)
         additional_kwargs = self._get_s3_method_kwargs(method, *akwarglist, **kwargs)
         return await _error_wrapper(
             method, kwargs=additional_kwargs, retries=self.retries
@@ -2118,6 +2151,136 @@ class S3FileSystem(AsyncFileSystem):
 
     setxattr = sync_wrapper(_setxattr)
 
+    async def _update_metadata(
+        self,
+        path,
+        updates,
+        expected_version_id=None,
+        restricted_keys=(),
+        block_size=50 * 2**20,
+        **kwargs,
+    ):
+        """Merge approved metadata updates into an existing object.
+
+        The object's current user metadata (retention tags, internal
+        attributes, ...) is read first and the approved ``updates`` are
+        merged into it, so every attribute not mentioned in ``updates``
+        continues to exist. Small objects are rewritten with a single
+        ``copy_object`` call; objects larger than the managed-copy
+        threshold are rewritten with a multipart copy. Both paths apply
+        exactly the same merged attribute set.
+
+        Parameters
+        ----------
+        path : string
+            the object to update
+        updates : dict
+            approved metadata keys/values to set; a value of None deletes
+            the key. Keys listed in ``restricted_keys`` may not appear here.
+        expected_version_id : str, optional
+            the object version the approval was issued for. If the object's
+            current version no longer matches, a ``VersionConflict`` is
+            raised and nothing is written, so a stale approval can never
+            overwrite a newer version with old attributes.
+        restricted_keys : list of str, optional
+            internal attribute names that operators may not modify and that
+            must not be readable from the outside: they are preserved on the
+            object but are redacted from debug logs and omitted from the
+            returned public result.
+        block_size : int
+            part size for the multipart copy of large objects
+        kwargs : dict
+            additional arguments for the copy call (e.g. encryption)
+
+        Returns
+        -------
+        dict
+            ``{"VersionId": <new version or None>, "Metadata": {...}}`` where
+            ``Metadata`` is the merged public attribute set with all
+            restricted keys removed.
+        """
+        updates = {k.replace("_", "-"): v for k, v in updates.items()}
+        restricted = {k.replace("_", "-") for k in restricted_keys}
+        restricted_lower = {k.lower() for k in restricted}
+        attempted = {k for k in updates if k.lower() in restricted_lower}
+        if attempted:
+            raise PermissionError(
+                "Cannot update restricted metadata keys: %s" % sorted(attempted)
+            )
+
+        bucket, key, version_id = self.split_path(path)
+        head = await self._call_s3(
+            "head_object", Bucket=bucket, Key=key, **version_id_kw(version_id)
+        )
+        current_version_id = head.get("VersionId")
+        if (
+            expected_version_id is not None
+            and current_version_id != expected_version_id
+        ):
+            raise VersionConflict(path, expected_version_id, current_version_id)
+
+        metadata = {k.replace("_", "-"): v for k, v in head["Metadata"].items()}
+        for kw_key, kw_value in updates.items():
+            if kw_value is None:
+                metadata.pop(kw_key, None)
+            else:
+                metadata[kw_key] = kw_value
+
+        # object tags (e.g. retention tags) survive a plain copy_object, but
+        # not a multipart upload, so they are re-applied explicitly below
+        tagging = await self._call_s3(
+            "get_object_tagging", Bucket=bucket, Key=key, **version_id_kw(version_id)
+        )
+        tagset = tagging.get("TagSet", [])
+
+        copy_kwargs = dict(kwargs)
+        copy_kwargs["_log_redact"] = restricted
+        size = head["ContentLength"]
+        if size <= MANAGED_COPY_THRESHOLD:
+            src = {"Bucket": bucket, "Key": key}
+            if version_id:
+                src["VersionId"] = version_id
+            out = await self._call_s3(
+                "copy_object",
+                copy_kwargs,
+                CopySource=src,
+                Bucket=bucket,
+                Key=key,
+                Metadata=metadata,
+                MetadataDirective="REPLACE",
+                TaggingDirective="COPY",
+            )
+            new_version_id = out.get("VersionId")
+        else:
+            src_path = "%s/%s" % (bucket, key)
+            out = await self._copy_managed(
+                src_path,
+                src_path,
+                size,
+                block=block_size,
+                Metadata=metadata,
+                **copy_kwargs,
+            )
+            if tagset:
+                await self._call_s3(
+                    "put_object_tagging",
+                    Bucket=bucket,
+                    Key=key,
+                    Tagging={"TagSet": tagset},
+                )
+            new_version_id = (out or {}).get("VersionId")
+
+        self.invalidate_cache(path)
+        self._metadata_cache[path] = metadata
+        return {
+            "VersionId": new_version_id,
+            "Metadata": {
+                k: v for k, v in metadata.items() if k.lower() not in restricted_lower
+            },
+        }
+
+    update_metadata = sync_wrapper(_update_metadata)
+
     async def _chmod(self, path, acl, recursive=False, **kwargs):
         """Set Access Control on a bucket/key
 
@@ -2332,7 +2495,7 @@ class S3FileSystem(AsyncFileSystem):
             {"PartNumber": i + 1, "ETag": o["CopyPartResult"]["ETag"]}
             for i, o in enumerate(out)
         ]
-        await self._call_s3(
+        out = await self._call_s3(
             "complete_multipart_upload",
             Bucket=bucket,
             Key=key,
@@ -2340,6 +2503,7 @@ class S3FileSystem(AsyncFileSystem):
             MultipartUpload={"Parts": parts},
         )
         self.invalidate_cache(path2)
+        return out
 
     async def _cp_file(self, path1, path2, preserve_etag=None, **kwargs):
         """Copy file between locations on S3.

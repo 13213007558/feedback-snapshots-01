@@ -107,6 +107,25 @@ class FileExpired(IOError):
         )
 
 
+class VersionConflict(IOError):
+    """
+    Is raised when an approval-based metadata update is applied to an object
+    whose current version no longer matches the version the approval was
+    issued for. The update is aborted so that stale approved attributes can
+    never overwrite a newer version of the object.
+    """
+
+    def __init__(
+        self, filename: str, expected_version_id: str, current_version_id: str
+    ):
+        super().__init__(
+            errno.EBUSY,
+            "The approval for %s was issued for version %r, but the current "
+            "version is %r; refusing to apply stale attributes."
+            % (filename, expected_version_id, current_version_id),
+        )
+
+
 def title_case(string):
     """
     TitleCases a given string.

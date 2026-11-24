@@ -21,7 +21,7 @@ from dateutil.tz import tzutc
 import botocore
 import s3fs.core
 from s3fs.core import MAX_UPLOAD_PARTS, S3FileSystem, calculate_chunksize
-from s3fs.utils import ignoring, SSEParams, FileExpired
+from s3fs.utils import ignoring, SSEParams, FileExpired, VersionConflict
 from botocore.exceptions import ClientError, NoCredentialsError
 from fsspec.asyn import sync
 from fsspec.callbacks import Callback
@@ -3068,6 +3068,170 @@ def test_copy_multipart_object_options(s3, monkeypatch, preserve_etag, managed_c
     assert s3.cat_file(target) == data
     if preserve_etag:
         assert result["ETag"] == source_etag
+
+
+RESTRICTED_KEYS = ["internal-token"]
+APPROVED_META = {"approved-note": "old", "approved-flag": "no"}
+INTERNAL_META = {"retention-tag": "keep-7y", "internal-token": "s3cr3t-value"}
+TAGSET = {"TagSet": [{"Key": "retention", "Value": "legal-hold"}]}
+
+
+def _put_object_with_attrs(bucket, key, data, metadata):
+    client = get_boto3_client()
+    client.put_object(Bucket=bucket, Key=key, Body=data, Metadata=metadata)
+    client.put_object_tagging(Bucket=bucket, Key=key, Tagging=TAGSET)
+
+
+def _head_metadata(bucket, key):
+    return get_boto3_client().head_object(Bucket=bucket, Key=key)["Metadata"]
+
+
+def test_update_metadata_small_object(s3, caplog):
+    import logging
+
+    path = test_bucket_name + "/update-meta-small"
+    data = b"x" * 100
+    _put_object_with_attrs(
+        test_bucket_name, "update-meta-small", data, {**APPROVED_META, **INTERNAL_META}
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="s3fs"):
+        result = s3.update_metadata(
+            path,
+            {"approved-note": "new", "approved-extra": "yes"},
+            restricted_keys=RESTRICTED_KEYS,
+        )
+
+    # merge: approved fields updated, retention tag and internal attribute kept
+    assert _head_metadata(test_bucket_name, "update-meta-small") == {
+        "approved-note": "new",
+        "approved-flag": "no",
+        "approved-extra": "yes",
+        **INTERNAL_META,
+    }
+    # public result carries the merged set minus the restricted fields
+    assert result["Metadata"] == {
+        "approved-note": "new",
+        "approved-flag": "no",
+        "approved-extra": "yes",
+        "retention-tag": "keep-7y",
+    }
+    # restricted values are not readable from the response or the logs
+    assert "internal-token" not in result["Metadata"]
+    assert "s3cr3t-value" not in caplog.text
+    assert "keep-7y" in caplog.text  # non-restricted metadata is still logged
+    # retention tags survive the copy
+    assert s3.get_tags(path) == {"retention": "legal-hold"}
+    assert s3.cat_file(path) == data
+
+
+def test_update_metadata_multipart_object(s3, monkeypatch, caplog):
+    import logging
+
+    monkeypatch.setattr(s3fs.core, "MANAGED_COPY_THRESHOLD", 5 * 2**20)
+    path = test_bucket_name + "/update-meta-large"
+    data = b"z" * (12 * 2**20)
+    _put_object_with_attrs(
+        test_bucket_name, "update-meta-large", data, {**APPROVED_META, **INTERNAL_META}
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="s3fs"):
+        result = s3.update_metadata(
+            path,
+            {"approved-note": "new"},
+            restricted_keys=RESTRICTED_KEYS,
+            block_size=5 * 2**20,
+        )
+
+    # the multipart copy path applies the same merge rules as the small path
+    assert _head_metadata(test_bucket_name, "update-meta-large") == {
+        "approved-note": "new",
+        "approved-flag": "no",
+        **INTERNAL_META,
+    }
+    assert result["Metadata"] == {
+        "approved-note": "new",
+        "approved-flag": "no",
+        "retention-tag": "keep-7y",
+    }
+    assert "s3cr3t-value" not in caplog.text
+    # retention tags are re-applied after the multipart copy
+    assert s3.get_tags(path) == {"retention": "legal-hold"}
+    assert s3.cat_file(path) == data
+
+
+def test_update_metadata_version_conflict(s3):
+    s3v = S3FileSystem(
+        anon=False, version_aware=True, client_kwargs={"endpoint_url": endpoint_uri}
+    )
+    path = versioned_bucket_name + "/update-meta-versioned"
+    client = get_boto3_client()
+    client.put_object(
+        Bucket=versioned_bucket_name,
+        Key="update-meta-versioned",
+        Body=b"v1",
+        Metadata={"approved-note": "v1", "internal-token": "s3cr3t-v1"},
+    )
+    approved_version = client.head_object(
+        Bucket=versioned_bucket_name, Key="update-meta-versioned"
+    )["VersionId"]
+    # the object is re-versioned after the approval was issued
+    client.put_object(
+        Bucket=versioned_bucket_name,
+        Key="update-meta-versioned",
+        Body=b"v2",
+        Metadata={"approved-note": "v2"},
+    )
+
+    with pytest.raises(VersionConflict):
+        s3v.update_metadata(
+            path,
+            {"approved-note": "stale"},
+            expected_version_id=approved_version,
+            restricted_keys=RESTRICTED_KEYS,
+        )
+
+    # nothing was written: the new version keeps its own attributes
+    assert _head_metadata(versioned_bucket_name, "update-meta-versioned") == {
+        "approved-note": "v2"
+    }
+    versions = client.list_object_versions(
+        Bucket=versioned_bucket_name, Prefix="update-meta-versioned"
+    )["Versions"]
+    assert len(versions) == 2
+
+    # an approval against the current version applies cleanly
+    current_version = client.head_object(
+        Bucket=versioned_bucket_name, Key="update-meta-versioned"
+    )["VersionId"]
+    result = s3v.update_metadata(
+        path,
+        {"approved-note": "v2-reviewed"},
+        expected_version_id=current_version,
+        restricted_keys=RESTRICTED_KEYS,
+    )
+    assert result["Metadata"] == {"approved-note": "v2-reviewed"}
+    assert result["VersionId"] is not None
+    assert result["VersionId"] != current_version
+
+
+def test_update_metadata_restricted_update_rejected(s3):
+    path = test_bucket_name + "/update-meta-restricted"
+    _put_object_with_attrs(
+        test_bucket_name,
+        "update-meta-restricted",
+        b"x",
+        {**APPROVED_META, **INTERNAL_META},
+    )
+    with pytest.raises(PermissionError):
+        s3.update_metadata(
+            path, {"internal-token": "forged"}, restricted_keys=RESTRICTED_KEYS
+        )
+    # the object is untouched
+    assert _head_metadata(test_bucket_name, "update-meta-restricted") == {
+        **APPROVED_META,
+        **INTERNAL_META,
+    }
 
 
 def test_sync_from_wihin_async(s3):
