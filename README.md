@@ -598,6 +598,7 @@ Currently the configurable settings are:
 * `raise_rendering_errors`: Lets an error response that cannot be rendered propagate out of the middleware stack instead of being answered with a failsafe `500`, defaults to `false`. See [When the error response itself cannot be rendered](#when-the-error-response-itself-cannot-be-rendered).
 * `raise_rescue_handler_errors`: Lets an exception raised inside a `rescue_from` block propagate out of the middleware stack instead of being redispatched, defaults to `false`. See [Re-raising from inside a `rescue_from` block](#re-raising-from-inside-a-rescue_from-block).
 * `allow_undeclared_params`: Hands an endpoint the params a request carries that it did not declare, defaults to `true` and to `false` from Grape 5.0. Set to `false`, such a request is answered `400`. See [Rejecting Undeclared Parameters](#rejecting-undeclared-parameters).
+* `validation_work_budget`: Caps the validation work one request may spend across param normalization, `given` dependency checks, per-element validators and error aggregation, defaults to `1_000_000`. The request is answered `400` once it is exceeded. See [Limiting Validation Work](#limiting-validation-work).
 
 To change a setting value make sure that at some point during load time the following code runs
 
@@ -2053,6 +2054,26 @@ The keys of a `Hash` or `JSON` param declared with a block, and those of each el
 * The version a client sends with [`using: :param`](#param) is a param like any other on an endpoint that its API does not version.
 
 The message is the `undeclared` key of [en.yml](lib/grape/locale/en.yml).
+
+### Limiting Validation Work
+
+A batch endpoint repeats one `params` block per element, and a `given` scope is evaluated per element as well. The byte size of the request bounds neither: a small body can describe an Array whose every element makes the validators walk several dependency branches and accumulate failures. `Grape.config.validation_work_budget` caps that per request.
+
+```ruby
+Grape.configure do |config|
+  config.validation_work_budget = 250_000
+end
+```
+
+The budget charges one unit per entry of the normalized params tree, per `given` dependency evaluated, per attribute visited by a validator, per element an Array scope maps over, and per error aggregated. A large batch of simple elements stays far below the default of `1_000_000`; a request whose branches multiply stops as soon as it spends past it, with `Grape::Exceptions::ValidationBudgetExceeded` (`400`, message `exceeds the validation work budget of <limit>`). It is not a `ValidationErrors`, so a handler for field errors does not catch it; rescue it on its own. The exception carries `limit` and `spent`, and can be handled like any other:
+
+```ruby
+rescue_from Grape::Exceptions::ValidationBudgetExceeded do |e|
+  error!({ error: 'too much validation work', limit: e.limit }, 422)
+end
+```
+
+The handler does not start for a request that exceeds the budget. Set the setting to `nil` to turn the limit off. A budget opened by an endpoint is shared with the endpoints it reaches through `mount`, so a request cannot escape the allowance by hopping APIs.
 
 ### I18n
 

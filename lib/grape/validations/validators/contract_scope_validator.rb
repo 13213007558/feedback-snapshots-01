@@ -17,6 +17,7 @@ module Grape
         # @raise [Grape::Exceptions::ValidationArrayErrors] if validation failed
         # @return [void]
         def validate(request)
+          Grape::Validations::WorkBudget.charge_params(request.params)
           res = schema.call(request.params)
 
           if res.success?

@@ -37,6 +37,7 @@ module Grape
         # that depends on no other param, so the iterator and its dependency
         # check have nothing to add.
         def apply_defaults(params)
+          WorkBudget.charge(@attrs.size)
           @attrs.each do |attr_name|
             params[attr_name] = @default_call.call(params) if params[attr_name].nil?
           end

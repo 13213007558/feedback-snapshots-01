@@ -56,4 +56,5 @@ en:
         unknown_params_builder: 'unknown params_builder: %{params_builder_type}'
         unknown_validator: 'unknown validator: %{validator_type}'
         unsupported_group_type: 'group type must be Array, Hash, JSON or Array[JSON]'
+        validation_budget: 'exceeds the validation work budget of %{limit}'
         values: 'does not have a valid value'

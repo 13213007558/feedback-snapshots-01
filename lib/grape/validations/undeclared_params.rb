@@ -43,7 +43,9 @@ module Grape
       def errors(request)
         return unless request.params_sent?
 
-        undeclared_in(request.params, @tree)&.map do |path|
+        params = request.params
+        WorkBudget.charge_params(params)
+        undeclared_in(params, @tree)&.map do |path|
           Grape::Exceptions::Validation.new(params: full_name(path), message: :undeclared)
         end
       end

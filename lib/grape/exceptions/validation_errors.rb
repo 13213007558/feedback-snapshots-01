@@ -6,7 +6,9 @@ module Grape
       attr_reader :errors
 
       def initialize(exceptions: [], headers: {})
-        @errors = exceptions.flat_map(&:errors).group_by(&:params)
+        flat_errors = exceptions.flat_map(&:errors)
+        Grape::Validations::WorkBudget.charge(flat_errors.size)
+        @errors = flat_errors.group_by(&:params)
         super(message: full_messages.join(', '), status: 400, headers:)
       end
 
@@ -39,6 +41,7 @@ module Grape
       # attribute names, so each is looked up once and only the interpolation,
       # which is what I18n would end with anyway, runs per message.
       def translate_full_messages
+        Grape::Validations::WorkBudget.charge(errors.size)
         template = translate(:format, scope: 'grape.errors', default: '%<attributes>s %<message>s')
         messages = errors.flat_map do |keys, errs|
           attributes = translate_attributes(keys)

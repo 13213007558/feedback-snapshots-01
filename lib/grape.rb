@@ -68,6 +68,16 @@ module Grape
   # When false, such a request is answered 400. Grape 5.0 makes false the
   # default.
   setting :allow_undeclared_params, default: true
+  # How much validation work one request may spend across param scoping,
+  # +given+ dependencies and error aggregation. A large batch of simple
+  # params stays well under the default; a request whose branches multiply
+  # out stops with Grape::Exceptions::ValidationBudgetExceeded. Set to nil
+  # to disable the limit.
+  setting :validation_work_budget, default: 1_000_000, constructor: lambda { |value|
+    next value if value.nil? || (value.is_a?(Integer) && !value.negative?)
+
+    raise ArgumentError, 'validation_work_budget must be a non-negative Integer or nil'
+  }
 
   # The HTTP QUERY method (RFC 10008): a safe, idempotent request whose content
   # carries the query. Rack has no constant for it yet, hence the literal.

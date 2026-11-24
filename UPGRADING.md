@@ -33,6 +33,12 @@ Grape.config.allow_undeclared_params = false
 
 To keep accepting undeclared params from 5.0, set it to `true`. See [Rejecting Undeclared Parameters](README.md#rejecting-undeclared-parameters).
 
+#### Validation work is budgeted per request
+
+Validation now spends from a per-request work budget, `Grape.config.validation_work_budget`. It defaults to `1_000_000` units, which a large batch of simple params stays well under, but a request whose `given` branches and per-element validations multiply its work past the limit is answered `400` with `Grape::Exceptions::ValidationBudgetExceeded` instead of being validated to the end.
+
+A `rescue_from Grape::Exceptions::ValidationErrors` handler does not catch it: it is a separate class, so a client can tell a budget stop from a field failure. Rescuing `Grape::Exceptions::ValidationBudgetExceeded` gives access to `limit` and `spent`. Set the setting to `nil` to restore the previous, unbounded behavior.
+
 #### A helper reaches every route of its scope, wherever it is declared
 
 A `helpers` block or module used to reach only the routes declared below it in the same scope. A route declared above it raised `NameError` when it called the helper ([#34](https://github.com/ruby-grape/grape/issues/34)). Since [#3061](https://github.com/ruby-grape/grape/pull/3061) it reaches every route of its scope, as it already did from an enclosing scope and through `mount`.

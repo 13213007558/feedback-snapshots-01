@@ -146,11 +146,16 @@ module Grape
     # that follow -- routing args, coercions, defaults -- reach the env.
     def build_params
       form = form_params?
-      return params_builder.call(rack_params) if form && !query_string.empty?
+      return charge_and_build(rack_params) if form && !query_string.empty?
 
       source = form ? self.POST : query_params
-      built = params_builder.call(source)
+      built = charge_and_build(source)
       built.equal?(source) ? built.dup : built
+    end
+
+    def charge_and_build(source)
+      Grape::Validations::WorkBudget.charge_params(source)
+      params_builder.call(source)
     end
 
     def query_params

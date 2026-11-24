@@ -138,6 +138,7 @@ module Grape
       # @return [Boolean] whether or not this entire scope needs to be
       #   validated
       def should_validate?(parameters)
+        WorkBudget.charge
         return !NOT_VALIDATED.equal?(validated_params(parameters)) if @independent
 
         scoped_params = params(parameters)
@@ -161,6 +162,8 @@ module Grape
 
       def meets_dependency?(params, request_params)
         return true unless @dependent_on
+
+        WorkBudget.charge
         return false if @parent && !@parent.meets_dependency?(@parent.params(request_params), request_params)
 
         if params.is_a?(Array)
@@ -305,6 +308,7 @@ module Grape
       def map_params(params, element, is_array: false)
         case params
         when Array
+          WorkBudget.charge(params.size)
           params.map do |el|
             map_params(el, element, is_array: true)
           end
@@ -330,6 +334,7 @@ module Grape
       # the ones that do then keep the index the request sent them at, which
       # is the one their errors name.
       def qualifying_elements(params, request_params)
+        WorkBudget.charge(params.size)
         params.map do |param|
           next qualifying_elements(param, request_params) if param.is_a?(Array)
 

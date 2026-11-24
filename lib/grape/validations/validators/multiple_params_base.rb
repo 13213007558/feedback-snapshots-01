@@ -20,6 +20,7 @@ module Grape
         attr_reader :group
 
         def validate_element_attributes(element, array_errors)
+          WorkBudget.charge(group.size)
           begin
             validate_params!(element)
           rescue Grape::Exceptions::Validation => e

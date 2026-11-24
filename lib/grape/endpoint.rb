@@ -195,10 +195,7 @@ module Grape
         @request = Grape::Request.new(env, build_params_with: @state.build_params_with)
         callbacks = @state.callbacks
         begin
-          run_filters callbacks, :before if callbacks
-          @before_filter_passed = true
-
-          response_object = env.key?(Grape::Env::GRAPE_ALLOWED_METHODS) ? answer_allowed_methods : validate_and_execute(callbacks)
+          response_object = serve_in_budget(callbacks)
           run_filters callbacks, :after if callbacks
           build_response_cookies
           rack_triplet(response_object)
@@ -291,6 +288,20 @@ module Grape
       end
 
       validation_exceptions
+    end
+
+    # The request is metered from its first params build -- whichever of a
+    # +before+ filter, the validators or the route block triggers it -- through
+    # the validators and the errors they aggregate. Only those points charge
+    # (see WorkBudget), so the block's own work is never budgeted; a request
+    # whose validation overruns is stopped before the block could run.
+    def serve_in_budget(callbacks)
+      Grape::Validations::WorkBudget.track(Grape.config.validation_work_budget) do
+        run_filters callbacks, :before if callbacks
+        @before_filter_passed = true
+
+        env.key?(Grape::Env::GRAPE_ALLOWED_METHODS) ? answer_allowed_methods : validate_and_execute(callbacks)
+      end
     end
 
     # The route block's value, run once the params are validated between the

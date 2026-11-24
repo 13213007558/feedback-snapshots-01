@@ -135,6 +135,7 @@ module Grape
         # the checks around the attribute loop drop out. The machinery cost
         # more than the validation itself.
         def validate_attributes!(params)
+          WorkBudget.charge(@attrs.size)
           array_errors = nil
 
           @attrs.each do |attr_name|
@@ -199,6 +200,7 @@ module Grape
         # one when they are required, and returns +array_errors+ with what
         # failed appended, allocating it on the first failure.
         def validate_element_attributes(element, array_errors)
+          WorkBudget.charge(@attrs.size)
           @attrs.each do |attr_name|
             validate_param!(attr_name, element) if required? || (hash_like?(element) && element.key?(attr_name))
           rescue Grape::Exceptions::Validation => e
