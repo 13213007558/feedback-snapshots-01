@@ -66,6 +66,26 @@ class _ProxySSLTCPConnector(aiohttp.TCPConnector):
             proxy_req._ssl = self._proxy_ssl_context
         return proxy_req
 
+    async def _create_proxy_connection(self, req, traces, timeout):
+        try:
+            return await super()._create_proxy_connection(req, traces, timeout)
+        except ClientSSLError as e:
+            # aiohttp raises ClientConnectorSSLError/CertificateError for the
+            # proxy hop too — they bypass client_error=... in
+            # _create_direct_connection — so a TLS failure against the proxy
+            # looks identical to one against the tunnelled endpoint. Tell the
+            # hops apart by whose connection failed: the proxy hop's
+            # connection key names the proxy itself.
+            proxy = req.proxy
+            if proxy is not None and (e.host, e.port) == (
+                proxy.host,
+                proxy.port,
+            ):
+                raise ClientProxyConnectionError(
+                    e._conn_key, e.os_error
+                ) from e
+            raise
+
 
 class AIOHTTPSession:
     def __init__(
@@ -82,9 +102,10 @@ class AIOHTTPSession:
         self._exit_stack = contextlib.AsyncExitStack()
 
         # TODO: handle socket_options
-        # keep track of sessions by proxy url (if any)
+        # keep track of sessions by proxy url (if any) and the trust
+        # material in effect — see _session_key
         self._sessions_lock = asyncio.Lock()
-        self._sessions: dict[str | None, aiohttp.ClientSession] | None = None
+        self._sessions: dict[tuple, aiohttp.ClientSession] | None = None
         self._verify = verify
         self._proxy_config = ProxyConfiguration(
             proxies=proxies, proxies_settings=proxies_config
@@ -228,12 +249,38 @@ class AIOHTTPSession:
             **self._connector_args,
         )
 
+    def _session_key(self, proxy_url):
+        """The pool key for a proxied (or direct) session.
+
+        Proxy and endpoint trust are approved independently — the proxy's
+        trust root and the endpoint's are managed separately, and some
+        endpoints present client certificates — so reuse is keyed by
+        everything that goes into either SSL context, not just the proxy
+        URL. Two approved configurations may share a proxy yet must never
+        share connections, and a session whose material changed must
+        reconnect rather than reuse a connection authenticated under the
+        previous material.
+        """
+        settings = self._proxy_config.settings
+        proxy_cert = settings.get('proxy_client_cert')
+        if isinstance(proxy_cert, (list, tuple)):
+            proxy_cert = tuple(proxy_cert)
+        return (
+            proxy_url,
+            self._verify,
+            self._cert_file,
+            self._key_file,
+            settings.get('proxy_ca_bundle'),
+            proxy_cert,
+        )
+
     async def _get_session(self, proxy_url):
-        if not (session := self._sessions.get(proxy_url)):
+        key = self._session_key(proxy_url)
+        if not (session := self._sessions.get(key)):
             async with self._sessions_lock:
-                if not (session := self._sessions.get(proxy_url)):
+                if not (session := self._sessions.get(key)):
                     connector = await self._create_connector(proxy_url)
-                    self._sessions[proxy_url] = (
+                    self._sessions[key] = (
                         session
                     ) = await self._exit_stack.enter_async_context(
                         aiohttp.ClientSession(
