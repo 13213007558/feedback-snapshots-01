@@ -11,6 +11,13 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 ### Added
 
+- Added `fs.delegation`, an approval-scoped filesystem wrapper
+  (`DelegatedFS` / `DelegatedSubFS` with `DelegationPolicy` and
+  `DelegationScope`) for handing a virtual directory to a plugin.
+  Virtual reads/writes and cross-backend copies keep using the regular
+  FS interface, while real system paths (`getsyspath`) and download
+  URLs (`geturl`) are granted separately per approved sub-tree and the
+  restrictions propagate to recursively opened directories.
 - Added `filter_glob` and `exclude_glob` parameters to `fs.walk.Walker`.
   Closes [#459](https://github.com/PyFilesystem/pyfilesystem2/issues/459).
 
