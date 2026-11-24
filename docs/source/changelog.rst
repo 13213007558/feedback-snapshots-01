@@ -4,6 +4,8 @@ Changelog
 Unreleased
 ----------
 
+- Bind ``open``, ``open_async``, ranged and concurrent reads to the object version resolved at open time, so later default-version changes and retries cannot mix versions.
+- Raise ``VersionUnavailable`` (a ``FileExpired`` and ``FileNotFoundError``) when the selected version disappears mid-read, distinct from transient transfer timeouts.
 - Preserve exclusive-create conditions and file options when committing empty files.
 - Forward per-call S3 request options through single-object and batched deletes.
 - Delete the requested object version in ``rm_file`` when the path includes one.

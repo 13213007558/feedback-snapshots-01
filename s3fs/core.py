@@ -33,7 +33,13 @@ from botocore.exceptions import ClientError, HTTPClientError, ParamValidationErr
 from botocore.parsers import ResponseParserError
 
 from s3fs.errors import translate_boto_error
-from s3fs.utils import S3BucketRegionCache, ParamKwargsHelper, _get_brange, FileExpired
+from s3fs.utils import (
+    S3BucketRegionCache,
+    ParamKwargsHelper,
+    _get_brange,
+    FileExpired,
+    VersionUnavailable,
+)
 
 # ClientPayloadError can be thrown during an incomplete read. aiohttp is a dependency of
 # aiobotocore, we guard the import here in case this dependency is replaced in a future version
@@ -158,7 +164,25 @@ key_acls = {
 buck_acls = {"private", "public-read", "public-read-write", "authenticated-read"}
 
 
-async def _error_wrapper(func, *, args=(), kwargs=None, retries):
+def _is_version_gone(error):
+    """Whether a FileNotFoundError means the selected object version is gone.
+
+    A missing bucket is not a vanished version; it should stay a plain
+    ``FileNotFoundError``.  Errors without a boto response (e.g. from a
+    transport double) are treated as version-specific.
+    """
+    cause = getattr(error, "__cause__", None)
+    response = getattr(cause, "response", None)
+    if response is not None:
+        code = response.get("Error", {}).get("Code")
+        if code == "NoSuchBucket":
+            return False
+    return True
+
+
+async def _error_wrapper(
+    func, *, args=(), kwargs=None, retries, version_id=None, path=None
+):
     if kwargs is None:
         kwargs = {}
     err = None
@@ -212,7 +236,18 @@ async def _error_wrapper(func, *, args=(), kwargs=None, retries):
                 await tb.tb_frame.f_locals["response"]
             except Exception as e:
                 err = e
+    if isinstance(err, VersionUnavailable):
+        raise err
     err = translate_boto_error(err)
+    if (
+        version_id is not None
+        and isinstance(err, FileNotFoundError)
+        and _is_version_gone(err)
+    ):
+        # The version selected when the read started is gone. Retrying the
+        # same request cannot succeed, so report it separately from
+        # transient transfer failures such as timeouts.
+        raise VersionUnavailable(path or "", version_id) from err
     raise err
 
 
@@ -1321,6 +1356,10 @@ class S3FileSystem(AsyncFileSystem):
         max_concurrency=None,
     ):
         bucket, key, vers = self.split_path(path)
+        # The version selected for this read. When the caller names a version
+        # (directly or in the path), every request below must use it, even if
+        # the bucket's default version changes while the read is in progress.
+        read_version = version_id or vers
         if start is not None or end is not None:
             if end == 0 or (
                 start is not None
@@ -1335,7 +1374,9 @@ class S3FileSystem(AsyncFileSystem):
                 # Resolve negative offsets like a slice, against the size of the
                 # version being read. An empty or crossed range can't be sent:
                 # S3 ignores an invalid Range and returns the whole object.
-                size = (await self._info(path, version_id=version_id or vers))["size"]
+                size = (
+                    await self._info(path, version_id=read_version)
+                )["size"]
                 start, end, _ = slice(start, end).indices(size)
                 if start >= end:
                     return b""
@@ -1348,7 +1389,7 @@ class S3FileSystem(AsyncFileSystem):
                 "get_object",
                 Bucket=bucket,
                 Key=key,
-                **version_id_kw(version_id or vers),
+                **version_id_kw(read_version),
                 **head,
             )
             try:
@@ -1362,7 +1403,16 @@ class S3FileSystem(AsyncFileSystem):
             and (max_concurrency or self.max_concurrency) > 1
         ):
             chunksize = chunksize or self.default_block_size
-            content_length = await self._size(path)
+            info = await self._info(
+                path,
+                refresh=read_version is None and self.version_aware,
+                version_id=read_version,
+            )
+            content_length = info["size"]
+            if read_version is None and self.version_aware:
+                # Reading the default version: pin the version HEAD resolved so
+                # the parallel segments cannot mix in a newer default version.
+                read_version = info.get("VersionId")
 
             if content_length and content_length > chunksize:
                 return await self._cat_file_concurrent(
@@ -1371,10 +1421,16 @@ class S3FileSystem(AsyncFileSystem):
                     content_length,
                     chunksize,
                     max_concurrency=max_concurrency,
-                    version_id=version_id or vers,
+                    version_id=read_version,
+                    path=path,
                 )
 
-        return await _error_wrapper(_call_and_read, retries=self.retries)
+        return await _error_wrapper(
+            _call_and_read,
+            retries=self.retries,
+            version_id=read_version,
+            path=path,
+        )
 
     async def _cat_file_concurrent(
         self,
@@ -1384,10 +1440,11 @@ class S3FileSystem(AsyncFileSystem):
         chunksize,
         max_concurrency=None,
         version_id=None,
+        path=None,
     ):
         max_concurrency = max_concurrency or self.max_concurrency
 
-        async def _read_chunk(start, end):
+        async def _call_and_read_chunk(start, end):
             kw = self.req_kw.copy()
             kw["Range"] = f"bytes={start}-{end}"
             resp = await self._call_s3(
@@ -1402,6 +1459,15 @@ class S3FileSystem(AsyncFileSystem):
             finally:
                 resp["Body"].close()
             return start, data
+
+        async def _read_chunk(start, end):
+            return await _error_wrapper(
+                _call_and_read_chunk,
+                args=(start, end),
+                retries=self.retries,
+                version_id=version_id,
+                path=path or f"{bucket}/{key}",
+            )
 
         ranges = list(_get_brange(content_length, chunksize))
         inds = list(range(0, len(ranges), max_concurrency)) + [len(ranges)]
@@ -1617,11 +1683,12 @@ class S3FileSystem(AsyncFileSystem):
         callback=_DEFAULT_CALLBACK,
         max_concurrency=None,
         version_id=None,
+        path=None,
         **kwargs,
     ):
         max_concurrency = max_concurrency or self.max_concurrency
 
-        async def _download_chunk(start, end):
+        async def _fetch_chunk(start, end):
             kw = {**self.req_kw, **kwargs}
             kw["Range"] = f"bytes={start}-{end}"
             resp = await self._call_s3(
@@ -1636,6 +1703,15 @@ class S3FileSystem(AsyncFileSystem):
             finally:
                 resp["Body"].close()
             return start, data
+
+        async def _download_chunk(start, end):
+            return await _error_wrapper(
+                _fetch_chunk,
+                args=(start, end),
+                retries=self.retries,
+                version_id=version_id,
+                path=path or f"{bucket}/{key}",
+            )
 
         ranges = list(_get_brange(content_length, chunksize))
         inds = list(range(0, len(ranges), max_concurrency)) + [len(ranges)]
@@ -1675,8 +1751,14 @@ class S3FileSystem(AsyncFileSystem):
         if os.path.isdir(lpath):
             return
         bucket, key, vers = self.split_path(rpath)
+        read_version = version_id or vers
+        if read_version is None and self.version_aware:
+            # Pin the current default version for the whole download, so a
+            # concurrent replacement cannot mix two versions in the result.
+            info = await self._info(rpath, refresh=True)
+            read_version = info.get("VersionId")
 
-        async def _open_file(range: int):
+        async def _fetch_file(range: int):
             kw = {**self.req_kw, **kwargs}
             if range:
                 kw["Range"] = f"bytes={range}-"
@@ -1684,10 +1766,19 @@ class S3FileSystem(AsyncFileSystem):
                 "get_object",
                 Bucket=bucket,
                 Key=key,
-                **version_id_kw(version_id or vers),
+                **version_id_kw(read_version),
                 **kw,
             )
             return resp["Body"], resp.get("ContentLength", None)
+
+        async def _open_file(range: int):
+            return await _error_wrapper(
+                _fetch_file,
+                args=(range,),
+                retries=self.retries,
+                version_id=read_version,
+                path=rpath,
+            )
 
         body, content_length = await _open_file(range=0)
         callback.set_size(content_length)
@@ -1708,7 +1799,8 @@ class S3FileSystem(AsyncFileSystem):
                 chunksize,
                 callback=callback,
                 max_concurrency=max_concurrency,
-                version_id=version_id or vers,
+                version_id=read_version,
+                path=rpath,
                 **kwargs,
             )
 
@@ -1810,9 +1902,7 @@ class S3FileSystem(AsyncFileSystem):
                 if version_id is not None:
                     # Directories have no versions, so a listing cannot satisfy
                     # this request or replace the failed object lookup.
-                    raise FileNotFoundError(
-                        f"{fullpath} (version_id={version_id})"
-                    ) from e
+                    raise VersionUnavailable(fullpath, version_id) from e
                 pass
             except PermissionError as e:
                 if version_id is not None:
@@ -2560,7 +2650,13 @@ class S3FileSystem(AsyncFileSystem):
     async def open_async(self, path, mode="rb", **kwargs):
         if "b" not in mode or kwargs.get("compression"):
             raise ValueError
-        return S3AsyncStreamedFile(self, path, mode)
+        version_id = kwargs.get("version_id")
+        if not self.version_aware and version_id:
+            raise ValueError(
+                "version_id cannot be specified if the filesystem "
+                "is not version aware"
+            )
+        return await S3AsyncStreamedFile.create(self, path, mode, version_id=version_id)
 
 
 class S3File(AbstractBufferedFile):
@@ -2801,7 +2897,11 @@ class S3File(AbstractBufferedFile):
             )
 
         except OSError as ex:
-            if ex.args[0] == errno.EINVAL and "pre-conditions" in ex.args[1]:
+            if (
+                len(ex.args) > 1
+                and ex.args[0] == errno.EINVAL
+                and "pre-conditions" in ex.args[1]
+            ):
                 raise FileExpired(
                     filename=self.details["name"], e_tag=self.details.get("ETag")
                 ) from ex
@@ -2935,23 +3035,108 @@ class S3File(AbstractBufferedFile):
 
 
 class S3AsyncStreamedFile(AbstractAsyncStreamedFile):
-    def __init__(self, fs, path, mode):
+    def __init__(self, fs, path, mode, version_id=None):
         self.fs = fs
         self.path = path
         self.mode = mode
         self.r = None
         self.loc = 0
         self.size = None
+        self.version_id = version_id
+        self._details = {}
+        self._legacy_unversioned = False
+
+    @classmethod
+    async def create(cls, fs, path, mode="rb", version_id=None):
+        """Resolve the version to read before any data is fetched.
+
+        When a version is named (directly or in the path), or when the
+        filesystem tracks versions, the version is fixed for the lifetime of
+        the stream.  Later segments and retries therefore keep reading the
+        same object version even if the bucket's default version changes.
+        Without version tracking and without a named version, the previous
+        lazy single-body behaviour is retained.
+        """
+        self = cls(fs, path, mode)
+        if "r" in mode:
+            bucket, key, path_version_id = fs.split_path(path)
+            read_version = _coalesce_version_id(version_id, path_version_id)
+            if read_version is not None or fs.version_aware:
+                self.version_id = read_version
+                self.details = await fs._info(
+                    path,
+                    refresh=read_version is None,
+                    version_id=read_version,
+                )
+                if read_version is None:
+                    # Default-version read: pin the version the HEAD resolved,
+                    # so a later replacement cannot change bytes mid-stream.
+                    self.version_id = self.details.get("VersionId")
+                self.size = self.details["size"]
+            else:
+                self._legacy_unversioned = True
+        return self
+
+    async def _fetch_range(self, start, end):
+        bucket, key, _ = self.fs.split_path(self.path)
+        if self._legacy_unversioned:
+            # No version to pin: stream one response body, as before.
+            if self.r is None:
+                resp = await self.fs._call_s3("get_object", Bucket=bucket, Key=key)
+                self.r = resp["Body"]
+            return await self.r.read(end - start)
+
+        async def _call_and_read():
+            resp = await self.fs._call_s3(
+                "get_object",
+                Bucket=bucket,
+                Key=key,
+                Range=f"bytes={start}-{end - 1}",
+                **version_id_kw(self.version_id),
+            )
+            try:
+                return await resp["Body"].read()
+            finally:
+                resp["Body"].close()
+
+        return await _error_wrapper(
+            _call_and_read,
+            retries=self.fs.retries,
+            version_id=self.version_id,
+            path=self.path,
+        )
 
     async def read(self, length=-1):
-        if self.r is None:
-            bucket, key, gen = self.fs.split_path(self.path)
-            r = await self.fs._call_s3("get_object", Bucket=bucket, Key=key)
-            self.size = int(r["ResponseMetadata"]["HTTPHeaders"]["content-length"])
-            self.r = r["Body"]
-        out = await self.r.read(length)
+        length = -1 if length is None else int(length)
+        if self.mode != "rb":
+            raise ValueError("File not in read mode")
+        if self._legacy_unversioned:
+            if self.r is None:
+                bucket, key, _ = self.fs.split_path(self.path)
+                resp = await self.fs._call_s3("get_object", Bucket=bucket, Key=key)
+                self.r = resp["Body"]
+                self.size = int(
+                    resp["ResponseMetadata"]["HTTPHeaders"]["content-length"]
+                )
+            out = await self.r.read(length)
+            self.loc += len(out)
+            return out
+        if length < 0:
+            length = self.size - self.loc
+        if length == 0 or self.loc >= self.size:
+            return b""
+        out = await self._fetch_range(self.loc, min(self.loc + length, self.size))
         self.loc += len(out)
         return out
+
+    async def close(self):
+        if self.r is not None:
+            try:
+                self.r.close()
+            except Exception:
+                pass
+        self.r = None
+        await super().close()
 
 
 def _fetch_range(fs, bucket, key, version_id, start, end, req_kw=None, details=None):
@@ -3000,4 +3185,9 @@ async def _inner_fetch(
         finally:
             resp["Body"].close()
 
-    return await _error_wrapper(_call_and_read, retries=fs.retries)
+    return await _error_wrapper(
+        _call_and_read,
+        retries=fs.retries,
+        version_id=version_id,
+        path="/".join((bucket, key)),
+    )

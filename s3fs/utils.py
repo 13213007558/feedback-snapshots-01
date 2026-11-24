@@ -107,6 +107,30 @@ class FileExpired(IOError):
         )
 
 
+class VersionUnavailable(FileExpired, FileNotFoundError):
+    """
+    Is raised, when the object version selected at the start of a read can no
+    longer be fetched.  This is deliberately distinct from transient transfer
+    errors such as ``TimeoutError``: retrying the same request will not make a
+    removed version readable again.
+
+    It is both a ``FileExpired`` (the content selected for reading is gone) and
+    a ``FileNotFoundError`` (the version does not exist), so callers used to
+    either family keep working.
+    """
+
+    def __init__(self, filename: str, version_id: str):
+        self.filename = filename
+        self.version_id = version_id
+        OSError.__init__(
+            self,
+            errno.ENOENT,
+            "The remote file corresponding to filename %s and version %s "
+            "is no longer available." % (filename, version_id),
+            filename,
+        )
+
+
 def title_case(string):
     """
     TitleCases a given string.

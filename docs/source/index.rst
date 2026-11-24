@@ -396,6 +396,27 @@ to the same object.
 In order for this to function the user must have the necessary IAM permissions to perform
 a GetObjectVersion
 
+A read is bound to one object version.  When a version is given explicitly, or
+the filesystem is ``version_aware``, that version is resolved when the file is
+opened and reused for every segment and retry; a concurrent change to the
+bucket's default version cannot change the bytes returned.  This applies to
+``open``/``open_async``, ranged reads and concurrent ``cat``.
+
+If the selected version becomes unreadable while the read is in progress,
+s3fs raises ``s3fs.utils.VersionUnavailable`` (both a ``FileExpired`` and a
+``FileNotFoundError``) and stops, rather than retrying until a transfer
+timeout.  Ordinary transport failures such as ``TimeoutError`` still surface
+as before, so callers can tell the two apart:
+
+.. code-block:: python
+
+   from s3fs.utils import VersionUnavailable
+
+   try:
+       with s3.open("versioned_bucket/object", version_id="SOMEVERSIONID") as f:
+           data = f.read()
+   except VersionUnavailable:
+       ...  # the authorized version is gone; do not retry against the default
 
 Contents
 ========
