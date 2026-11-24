@@ -140,12 +140,12 @@ module Grape
       def build_formatted_response(env, status, headers, bodies, negotiated)
         content_type_given = headers.key?(Rack::CONTENT_TYPE)
         ensure_content_type!(env, headers)
-        return stream_response(status, headers, bodies) if bodies.is_a?(Grape::ServeStream::StreamResponse)
+        return stream_response(env, status, headers, bodies) if bodies.is_a?(Grape::ServeStream::StreamResponse)
 
         bodymap = format_bodies(env, headers, bodies)
         # A formatter that renders a body only as Rack reads it (see
         # Grape::Formatter::Jsonl) hands back a stream, served as +stream+'s is.
-        return stream_response(status, headers, bodymap.first) if bodymap.first.is_a?(Grape::ServeStream::StreamResponse)
+        return stream_response(env, status, headers, bodymap.first) if bodymap.first.is_a?(Grape::ServeStream::StreamResponse)
 
         # A bare Rack tuple rather than a Rack::Response: +headers+ is already
         # a Rack::Headers, so wrapping only re-normalizes the same keys into a
@@ -169,10 +169,27 @@ module Grape
         end
       end
 
-      def stream_response(status, headers, bodies)
+      def stream_response(env, status, headers, bodies)
+        stream = bodies.stream
+        # A +sendfile+ body names a path (+#to_path) for Rack::Sendfile to
+        # hand to the web server: opening it here to probe would defeat the
+        # redirect and fail when the path is not readable by this process. It
+        # stays unwrapped and lazy. Anything enumerable is wrapped so a read
+        # failure is classified before the first byte and contained after it.
+        safe_stream = stream.respond_to?(:to_path) ? stream : guarded_stream(stream, env)
         Grape::ServeStream::SendfileResponse.new([], status, headers) do |resp|
-          resp.body = bodies.stream
+          resp.body = safe_stream
         end
+      end
+
+      def guarded_stream(stream, env)
+        safe_stream = Grape::ServeStream::SafeStream.new(stream, env)
+        # Pull the first chunk before the response is built so a failure before
+        # the first byte still raises into the error middleware and renders a
+        # normal error response. Once that chunk exists, the response is
+        # committed and the SafeStream ends later failures on its own.
+        safe_stream.probe
+        safe_stream
       end
 
       # A format the client negotiated -- by its Accept header, the path's

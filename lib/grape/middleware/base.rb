@@ -78,8 +78,15 @@ module Grape
       # raises is reported before it goes on: a +rescue_from :all+ handler
       # turns it into a 500 without logging it, so this may be the only trace
       # of it.
+      #
+      # A stream's first-chunk probe opts out: its exception is still on its
+      # way to the error middleware, which renders the response and owns the
+      # logging, and its message may carry internal state that must not be
+      # written to stderr verbatim.
       def reporting_after_errors
         yield
+      rescue Grape::ServeStream::ProbeError => e
+        raise e.cause
       rescue StandardError => e
         warn "caught error of type #{e.class} in after callback inside #{self.class.name} : #{e.message}"
         raise e

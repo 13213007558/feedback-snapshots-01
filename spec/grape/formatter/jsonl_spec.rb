@@ -64,7 +64,10 @@ describe Grape::Formatter::Jsonl do
     end
 
     _status, _headers, body = api.call(Rack::MockRequest.env_for('/'))
-    expect(produced).to be_empty
+    # The first element is produced before the headers leave Grape so a failure
+    # ahead of the first byte can still be answered as an error response; every
+    # later element stays lazy until the body is read.
+    expect(produced).to eq([0])
 
     chunks = body.enum_for(:each).to_a
     body.close if body.respond_to?(:close)

@@ -113,6 +113,15 @@ end
 
 To keep the enclosing handler for such an exception, register its class in the nested scope as well: a scope's class handlers still rank ahead of its own `rescue_from :all`. An exception `rescue_from :all` does not catch, one that is not a `StandardError`, still reaches the enclosing scope's handlers, and so does one raised inside the catch-all's block.
 
+#### A streamed body is probed for its first chunk before the response is sent
+
+A `stream` (or `sendfile` of an enumerable body) that raised while it was being read used to take the exception out past Grape while Rack was already writing the response, so a failure could not be answered as an error response and its message could leak. Grape now wraps every enumerable stream and reads its first chunk before the status and headers leave the framework ([#3080](https://github.com/ruby-grape/grape/pull/3080)):
+
+- A failure **before the first chunk** re-raises inside the error middleware, so a `rescue_from` handler renders a normal error response exactly as it would for any other endpoint. Without a handler that matches, the exception still propagates as it did before.
+- A failure **after the first chunk** can no longer change the committed status. Grape ends the stream cleanly, closes the body, publishes the original exception on `grape.exception`/`rack.exception`, and writes only its class name (never its message) to `rack.errors` and the API logger.
+
+One consequence is that the first element of a lazily rendered stream, such as an `Enumerator` served through the JSON Lines formatter, is now produced during the request rather than when Rack first reads the body. Every later element is still rendered lazily as the body is read. A `sendfile` of a path (a body responding to `to_path`) is unchanged and stays fully lazy so `Rack::Sendfile` can redirect it.
+
 ### Upgrading to >= 4.1.0
 
 #### `Rack::Head` wraps the router instead of each endpoint's stack
