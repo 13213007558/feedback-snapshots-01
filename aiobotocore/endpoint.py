@@ -1,4 +1,5 @@
 import asyncio
+import http.client
 
 from botocore.endpoint import (
     DEFAULT_TIMEOUT,
@@ -13,12 +14,15 @@ from botocore.endpoint import (
     logger,
 )
 from botocore.hooks import first_non_none_response
+from botocore.parsers import ResponseParserError
 
 from aiobotocore._async_primitives import (
     AsyncPrimitives,
     infer_async_primitives,
 )
+from aiobotocore._errorbody import error_body_budget_for_context
 from aiobotocore._httpx import httpx
+from aiobotocore.awsrequest import HttpxAWSResponse
 from aiobotocore.httpchecksum import handle_checksum_body
 from aiobotocore.httpsession import AIOHTTPSession
 from aiobotocore.parsers import AioResponseParserFactory
@@ -27,13 +31,30 @@ from aiobotocore.response import AioHttpxStreamingBody, AioStreamingBody
 DEFAULT_HTTP_SESSION_CLS = AIOHTTPSession
 
 
-async def convert_to_response_dict(http_response, operation_model):
+def _truncated_error_response(status_code):
+    message = http.client.responses.get(status_code, '')
+    if message:
+        message = f'{message} (error response body was truncated)'
+    else:
+        message = 'error response body was truncated'
+    return {
+        'Error': {'Code': str(status_code), 'Message': message},
+        'ResponseMetadata': {'HTTPStatusCode': status_code},
+    }
+
+
+async def convert_to_response_dict(
+    http_response, operation_model, context=None
+):
     """Convert an HTTP response object to a request dict.
 
     This converts the HTTP response object to a dictionary.
 
     :type http_response: botocore.awsrequest.AWSResponse
     :param http_response: The HTTP response from an AWS service request.
+    :param context: The API call's request context.  Error responses draw
+        their body bytes from the budget stored there, so every retry of the
+        same call shares one allowance.  Successful responses ignore it.
 
     :rtype: dict
     :return: A response dictionary which will contain the following keys:
@@ -45,17 +66,22 @@ async def convert_to_response_dict(http_response, operation_model):
     response_dict = {
         'headers': http_response.headers,
         'status_code': http_response.status_code,
-        'context': {
-            'operation_name': operation_model.name,
-        },
+        'context': {'operation_name': operation_model.name},
     }
     if response_dict['status_code'] >= 300:
-        response_dict['body'] = await http_response.content
+        budget = error_body_budget_for_context(context)
+        read_error_body = getattr(http_response, 'read_error_body', None)
+        if read_error_body is not None:
+            response_dict['body'] = await read_error_body(budget)
+        else:
+            response_dict['body'] = await http_response.content
     elif operation_model.has_event_stream_output:
         response_dict['body'] = http_response.raw
     elif operation_model.has_streaming_output:
         length = response_dict['headers'].get('content-length')
-        if httpx and isinstance(http_response.raw, httpx.Response):
+        if isinstance(http_response, HttpxAWSResponse) or (
+            httpx is not None and isinstance(http_response.raw, httpx.Response)
+        ):
             response_dict['body'] = AioHttpxStreamingBody(
                 http_response.raw, length
             )
@@ -171,7 +197,7 @@ class AioEndpoint(Endpoint):
             http_response, parsed_response = success_response
             kwargs_to_emit['parsed_response'] = parsed_response
             kwargs_to_emit['response_dict'] = await convert_to_response_dict(
-                http_response, operation_model
+                http_response, operation_model, context
             )
         service_id = operation_model.service_model.service_id.hyphenize()
         await self._event_emitter.emit(
@@ -211,14 +237,21 @@ class AioEndpoint(Endpoint):
 
         # This returns the http_response and the parsed_data.
         response_dict = await convert_to_response_dict(
-            http_response, operation_model
+            http_response, operation_model, context
         )
-        await handle_checksum_body(
-            http_response,
-            response_dict,
-            context,
-            operation_model,
-        )
+        if not (
+            http_response.status_code >= 300
+            and getattr(http_response, 'error_body_truncated', False)
+        ):
+            # A truncated error body cannot be checksum-validated, and a
+            # checksum failure there would mask the status code that decides
+            # the retry.
+            await handle_checksum_body(
+                http_response,
+                response_dict,
+                context,
+                operation_model,
+            )
 
         http_response_record_dict = response_dict.copy()
         http_response_record_dict['streaming'] = (
@@ -235,20 +268,76 @@ class AioEndpoint(Endpoint):
             customized_response_dict=customized_response_dict,
         )
         parser = self._response_parser_factory.create_parser(protocol)
-        parsed_response = await parser.parse(
-            response_dict, operation_model.output_shape
-        )
+        try:
+            parsed_response = await parser.parse(
+                response_dict, operation_model.output_shape
+            )
+        except ResponseParserError:
+            if not getattr(http_response, 'error_body_truncated', False):
+                raise
+            # A truncated error body (budget or broken stream) can leave the
+            # protocol document unparseable.  The status code still drives the
+            # retry decision, so fall back to the generic error shape rather
+            # than replacing a service error with a parser error.
+            logger.debug(
+                'Could not parse truncated error response body for %s',
+                operation_model.name,
+                exc_info=True,
+            )
+            parsed_response = _truncated_error_response(
+                http_response.status_code
+            )
         parsed_response.update(customized_response_dict)
 
         if http_response.status_code >= 300:
-            await self._add_modeled_error_fields(
-                response_dict,
-                parsed_response,
-                operation_model,
-                parser,
+            self._record_error_body_diagnostics(
+                http_response, parsed_response, context
             )
+            try:
+                await self._add_modeled_error_fields(
+                    response_dict,
+                    parsed_response,
+                    operation_model,
+                    parser,
+                )
+            except ResponseParserError:
+                if not getattr(http_response, 'error_body_truncated', False):
+                    raise
+                # The modeled fields live in the same truncated body; the
+                # generic Error/ResponseMetadata already parsed above is the
+                # bounded diagnosis we keep.
+                logger.debug(
+                    'Could not parse modeled fields from truncated error '
+                    'response body for %s',
+                    operation_model.name,
+                    exc_info=True,
+                )
         history_recorder.record('PARSED_RESPONSE', parsed_response)
         return (http_response, parsed_response), None
+
+    @staticmethod
+    def _record_error_body_diagnostics(
+        http_response, parsed_response, context
+    ):
+        """Expose bounded failure-path diagnostics on error responses.
+
+        The body may have been cut short by the budget or a broken stream.
+        Record how many error-body bytes this API call has read (across all
+        attempts, so the figure stays meaningful on the final error) and
+        whether any attempt truncated, letting callers distinguish a complete
+        error from a partial one without re-reading anything.
+        """
+        metadata = parsed_response.get('ResponseMetadata')
+        if not isinstance(metadata, dict):
+            return
+        budget = (context or {}).get('error_body_budget')
+        bytes_read = getattr(http_response, 'error_body_bytes_read', 0)
+        if budget is not None:
+            bytes_read = max(bytes_read, budget.consumed)
+        if bytes_read:
+            metadata['ErrorBodyBytesRead'] = bytes_read
+        if getattr(http_response, 'error_body_truncated', False):
+            metadata['ErrorBodyTruncated'] = True
 
     async def _add_modeled_error_fields(
         self,

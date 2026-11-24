@@ -10,6 +10,7 @@ from botocore.response import (
 )
 
 from aiobotocore import parsers
+from aiobotocore._errorbody import ErrorBodyBudget
 from aiobotocore._httpx import httpx
 
 if httpx is not None:
@@ -304,7 +305,13 @@ async def get_response(operation_model, http_response):
     # If it looks like an error, in the streaming response case we
     # need to actually grab the contents.
     if response_dict['status_code'] >= 300:
-        response_dict['body'] = await http_response.content
+        read_error_body = getattr(http_response, 'read_error_body', None)
+        if read_error_body is not None:
+            # botocore's get_response has no retry budget to share, so a
+            # standalone call gets the configured default bound.
+            response_dict['body'] = await read_error_body(ErrorBodyBudget())
+        else:
+            response_dict['body'] = await http_response.content
     elif operation_model.has_streaming_output:
         response_dict['body'] = AioStreamingBody(
             http_response.raw, response_dict['headers'].get('content-length')

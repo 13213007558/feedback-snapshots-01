@@ -9,7 +9,7 @@ from aiohttp import SocketFactoryType
 from aiohttp.abc import AbstractResolver
 from botocore.exceptions import ParamValidationError
 
-from ._constants import DEFAULT_KEEPALIVE_TIMEOUT
+from ._constants import DEFAULT_ERROR_BODY_LIMIT, DEFAULT_KEEPALIVE_TIMEOUT
 from .endpoint import DEFAULT_HTTP_SESSION_CLS
 from .httpsession import AIOHTTPSession
 from .httpxsession import HttpxSession, is_httpx_session_cls
@@ -46,6 +46,7 @@ class AioConfig(botocore.client.Config):
         connector_args: _ConnectorArgs | None | object = _OPTION_DEFAULT,
         http_session_cls: type[_HttpSessionType] | object = _OPTION_DEFAULT,
         warm_up_loader_caches: bool | object = _OPTION_DEFAULT,
+        error_body_limit: int | None | object = _OPTION_DEFAULT,
         **kwargs,
     ):
         aio_options = {}
@@ -61,6 +62,10 @@ class AioConfig(botocore.client.Config):
             aio_options['warm_up_loader_caches'] = warm_up_loader_caches
         else:
             warm_up_loader_caches = False
+        if error_body_limit is not _OPTION_DEFAULT:
+            aio_options['error_body_limit'] = error_body_limit
+        else:
+            error_body_limit = DEFAULT_ERROR_BODY_LIMIT
 
         super().__init__(**kwargs)
         self._user_provided_options.update(aio_options)
@@ -72,6 +77,8 @@ class AioConfig(botocore.client.Config):
         )
         self.http_session_cls = cast(type[_HttpSessionType], http_session_cls)
         self.warm_up_loader_caches = cast(bool, warm_up_loader_caches)
+        self.error_body_limit = cast(int | None, error_body_limit)
+        self._validate_error_body_limit(self.error_body_limit)
         self._validate_connector_args(
             self.connector_args, self.http_session_cls
         )
@@ -86,6 +93,22 @@ class AioConfig(botocore.client.Config):
         config_options = copy.copy(self._user_provided_options)
         config_options.update(other_config._user_provided_options)
         return AioConfig(**config_options)
+
+    @staticmethod
+    def _validate_error_body_limit(error_body_limit: int | None) -> None:
+        if error_body_limit is None:
+            return
+        if (
+            isinstance(error_body_limit, bool)
+            or not isinstance(error_body_limit, int)
+            or error_body_limit < 0
+        ):
+            raise ParamValidationError(
+                report=(
+                    'error_body_limit must be a non-negative int or None, '
+                    f'got {error_body_limit!r}'
+                )
+            )
 
     @staticmethod
     def _validate_connector_args(

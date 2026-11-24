@@ -4,6 +4,7 @@ import botocore.parsers
 import botocore.serialize
 from botocore.args import ClientArgsCreator, EPRBuiltins
 
+from ._constants import DEFAULT_ERROR_BODY_LIMIT
 from .config import AioConfig
 from .endpoint import DEFAULT_HTTP_SESSION_CLS, AioEndpointCreator
 from .parsers import create_parser
@@ -73,9 +74,11 @@ class AioClientArgsCreator(ClientArgsCreator):
         if isinstance(client_config, AioConfig):
             connector_args = client_config.connector_args
             http_session_cls = client_config.http_session_cls
+            error_body_limit = client_config.error_body_limit
         else:
             connector_args = None
             http_session_cls = DEFAULT_HTTP_SESSION_CLS
+            error_body_limit = DEFAULT_ERROR_BODY_LIMIT
 
         new_config = AioConfig(
             connector_args,
@@ -83,6 +86,7 @@ class AioClientArgsCreator(ClientArgsCreator):
             warm_up_loader_caches=getattr(
                 client_config, 'warm_up_loader_caches', False
             ),
+            error_body_limit=error_body_limit,
             **config_kwargs,
         )
         endpoint_creator = AioEndpointCreator(event_emitter)

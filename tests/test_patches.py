@@ -700,6 +700,7 @@ def test_protocol_parsers():
             {
                 '5b7701c1f5b3cb2daa6eb307cdbdbbb2e9d33e5f',
                 '0fb9d2f2ab899fad8b2be93223b403f11032670a',
+                '4a4c75d90ed094b056ea8a6e361ccd35adc81054',
             },
         ),
         (
@@ -1017,6 +1018,7 @@ def test_protocol_parsers():
             get_response,
             {
                 'ea8686ae71fae32410e2f1774e5774d6715dd492',
+                'edfa39e089750e0133801dbbefc0ae666925e450',
             },
         ),
         # session.py

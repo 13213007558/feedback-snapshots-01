@@ -207,8 +207,33 @@ emitter. Its `_emit()` method awaits each handler response via
 
 - `connector_args`: aiohttp connector tuning (ssl, keepalive, etc.)
 - `http_session_cls`: pluggable HTTP backend class
+- `error_body_limit`: per-API-call cap on bytes read from error (>=300)
+  response bodies
 
 Custom merge logic preserves these fields when configs are combined.
+
+### Error-body budget
+
+Error responses are parsed before the retry decision, so a service returning
+a huge error body would otherwise be buffered in full on the failure path.
+`AioConfig(error_body_limit=...)` caps the body bytes a single API call may
+read from error responses (`None` disables the bound; the default is 1 MiB).
+
+- The budget lives in the request context (`_errorbody.ErrorBodyBudget`) and
+  is shared by every retry of that call, so retrying cannot multiply the
+  allowance. A fresh call gets a fresh budget.
+- The cap is applied in `AioAWSResponse.read_error_body()` /
+  `HttpxAWSResponse.read_error_body()`, which both backends' responses use.
+  Only `status_code >= 300` reaches it via `convert_to_response_dict`;
+  successful responses, including streaming downloads, are never bounded.
+- A body that is over budget, breaks mid-stream, or is shorter than its
+  content-length is marked truncated and its connection is **closed**, not
+  returned to the pool (unread bytes make it unusable). An exactly-consumed
+  body is released for reuse.
+- Truncation never loses the status code: an unparseable truncated body falls
+  back to the generic HTTP error shape, and the error response metadata
+  carries `ErrorBodyBytesRead` (cumulative for the call) and
+  `ErrorBodyTruncated`.
 
 ## Pattern 8: Async context managers
 
