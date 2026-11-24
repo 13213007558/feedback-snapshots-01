@@ -1394,6 +1394,13 @@ class Minio:
             region: Optional[str] = None,
             extra_headers: Optional[HTTPHeaderDict] = None,
             extra_query_params: Optional[HTTPQueryDict] = None,
+            visibility: Any = None,
+            caller: Any = None,
+            restricted: Optional[bool] = None,
+            allowed_levels: Optional[Any] = None,
+            failure_log: Any = None,
+            audit_log: Any = None,
+            **visibility_options: Any,
     ) -> SelectObjectResponse:
         """
         Select content of an object by SQL expression.
@@ -1416,6 +1423,28 @@ class Minio:
 
             extra_query_params (Optional[HTTPQueryDict], default=None):
                 Extra query parameters for advanced usage.
+
+            visibility (Any, default=None):
+                Caller visibility contract. ``None`` or ``"admin"`` keeps
+                the complete historical output; ``"restricted"`` or
+                :meth:`SelectVisibility.restricted` hides Progress/Stats
+                and redacts failure diagnostics.
+
+            caller (Any, default=None):
+                :class:`SelectCaller`, role string, or compatible object
+                describing the caller. Administrators receive full output.
+
+            restricted (Optional[bool], default=None):
+                Shortcut for selecting the Records-only visibility scope.
+
+            allowed_levels (Optional[Any], default=None):
+                Explicit event levels allowed for this caller.
+
+            failure_log (Any, default=None):
+                Optional list or sink receiving visibility-safe failures.
+
+            audit_log (Any, default=None):
+                Optional list or sink receiving safe stream audit records.
 
         Returns:
             SelectObjectResponse:
@@ -1460,6 +1489,13 @@ class Minio:
             bucket_name=bucket_name,
             region=region or self._region_map.get(bucket_name) or "",
             object_name=object_name,
+            visibility=visibility,
+            caller=caller,
+            restricted=restricted,
+            allowed_levels=allowed_levels,
+            failure_log=failure_log,
+            audit_log=audit_log,
+            **visibility_options,
         )
 
     def make_bucket(

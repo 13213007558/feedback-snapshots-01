@@ -30,6 +30,13 @@ class MinioException(Exception):
     """Base Minio exception."""
 
 
+class SelectVisibilityError(MinioException, PermissionError):
+    """Raised when a Select event is not allowed for the caller."""
+
+    def __init__(self, message: str = ""):
+        super().__init__(message)
+
+
 class InvalidResponseError(MinioException):
     """Raised to indicate that non-xml response from server."""
 

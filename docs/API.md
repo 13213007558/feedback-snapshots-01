@@ -1208,6 +1208,32 @@ with client.select_object_content(
     print(response.stats())
 ```
 
+__Caller visibility__
+
+The default scope preserves the complete Select output, including
+Progress/Stats. Pass `restricted=True`, `visibility="normal"`, or
+`visibility=SelectVisibility.restricted()` for business callers that may read
+`Records` but must not receive processing statistics. Restricted responses
+return `None` from `stats()`/`progress()`, omit Progress/Stats from
+`events()`, and redact numeric diagnostics from exceptions and `failure_log`.
+Use `SelectVisibility.strict()` when encountering a denied event must stop
+iteration after the already-allowed records. Stream ordering, chunking, and
+`close()`/context-manager semantics remain unchanged.
+
+```py
+from minio.models import SelectVisibility
+
+failures = []
+with client.select_object_content(
+        bucket_name="my-bucket",
+        object_name="my-object.csv",
+        request=request,
+        visibility=SelectVisibility.restricted(),
+        failure_log=failures,
+) as response:
+    records = list(response.stream())
+```
+
 <a name="fget_object"></a>
 
 ### fget_object(self, *, bucket_name: str, object_name: str, file_path: str, match_etag: Optional[str] = None, not_match_etag: Optional[str] = None, modified_since: Optional[datetime] = None, unmodified_since: Optional[datetime] = None, fetch_checksum: bool = False, ssec: Optional[SseCustomerKey] = None, version_id: Optional[str] = None, tmp_file_path: Optional[str] = None, progress: Optional[ProgressType] = None, region: Optional[str] = None, extra_headers: Optional[HTTPHeaderDict] = None, extra_query_params: Optional[HTTPQueryDict] = None) -> GetObjectResponse

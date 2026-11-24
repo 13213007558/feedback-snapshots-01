@@ -35,6 +35,9 @@ __license__ = "Apache 2.0"
 __copyright__ = "Copyright [2014] - [2025] MinIO, Inc."
 
 # pylint: disable=unused-import
-from .error import InvalidResponseError, S3Error, ServerError
+from .error import (InvalidResponseError, S3Error, SelectVisibilityError,
+                    ServerError)
 from .minio import Minio
 from .minioadmin import MinioAdmin
+from .models import (CallerAgreement, SelectCaller, SelectCallerContext,
+                     SelectVisibility, SelectVisibilityPolicy)

@@ -22,21 +22,25 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
+import re
 from abc import ABC
 from binascii import crc32
 from collections import OrderedDict
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from io import BufferedIOBase, BytesIO
-from typing import Any, List, Optional, Tuple, Type, TypeVar, Union, cast
+from typing import (Any, ClassVar, Collection, List, Optional, Tuple, Type,
+                    TypeVar, Union, cast)
 from urllib.parse import unquote_plus
 
 from .checksum import Algorithm
 from .checksum import Type as ChecksumType
 from .compat import HTTPHeaderDict, HTTPResponse, JSONDecodeError
 from .credentials import Credentials
-from .error import MinioException
+from .error import MinioException, SelectVisibilityError
 from .helpers import check_bucket_name
 from .signer import get_credential_string, post_presign_v4
 from .time import (from_http_header, from_iso8601utc, to_amz_date,
@@ -3852,28 +3856,643 @@ class PromptObjectResponse(GenericResponse, BufferedIOBase):
         yield from self._response.stream(num_bytes)
 
 
+_SELECT_LOGGER = logging.getLogger("minio.select")
+
+
+class SelectAuditRecord(dict):
+    """Audit/failure entry whose keys are also available as attributes."""
+
+    def __getattr__(self, name: str) -> Any:
+        try:
+            return self[name]
+        except KeyError as exc:
+            raise AttributeError(name) from exc
+
+
+_SELECT_LEVEL_ALIASES = {
+    "record": "record",
+    "records": "record",
+    "progress": "progress",
+    "stats": "stats",
+    "stat": "stats",
+    "statistics": "stats",
+    "end": "end",
+    "close": "close",
+    "closed": "close",
+    "cont": "control",
+    "control": "control",
+    "error": "error",
+    "errors": "error",
+    "failure": "error",
+    "failures": "error",
+    "diagnostic": "diagnostic",
+    "diagnostics": "diagnostic",
+}
+
+_SELECT_ALL_LEVELS = frozenset(
+    {"record", "progress", "stats", "end", "close", "control",
+     "error", "diagnostic"},
+)
+_SELECT_RESTRICTED_LEVELS = frozenset(
+    {"record", "end", "close", "control", "error"},
+)
+_SENSITIVE_SELECT_FIELD_RE = re.compile(
+    r"((?:bytes[_\- ]?(?:scanned|processed|returned))"
+    r"|(?:Bytes(?:Scanned|Processed|Returned))"
+    r"|(?:<Bytes(?:Scanned|Processed|Returned)>))"
+    r"[^0-9<]*[0-9][^<\"'\s,}]*",
+    re.IGNORECASE,
+)
+_SELECT_NUMBER_RE = re.compile(r"\d+")
+
+
+def canonical_select_level(level: Any) -> str:
+    """Normalize a Select event/level name."""
+    text = str(level or "").strip().lower().replace("-", "_")
+    text = text.replace(":", "")
+    return _SELECT_LEVEL_ALIASES.get(text, text)
+
+
+@dataclass(frozen=True)
+class SelectVisibility:
+    """
+    Visibility contract for a Select caller.
+
+    The default/full contract preserves the historical SDK behavior. Use
+    :meth:`restricted` for callers that may read Records but must not receive
+    processing progress, statistics, or raw diagnostic values.
+    """
+
+    name: str = "full"
+    allowed_levels: frozenset[str] = field(
+        default_factory=lambda: _SELECT_ALL_LEVELS,
+    )
+    diagnostics_visible: bool = True
+    raise_on_denied: bool = False
+
+    FULL: ClassVar["SelectVisibility"]
+    ADMIN: ClassVar["SelectVisibility"]
+    RESTRICTED: ClassVar["SelectVisibility"]
+    NORMAL: ClassVar["SelectVisibility"]
+    USER: ClassVar["SelectVisibility"]
+    STRICT: ClassVar["SelectVisibility"]
+
+    def __post_init__(self):
+        levels = frozenset(
+            canonical_select_level(level)
+            for level in (self.allowed_levels or _SELECT_ALL_LEVELS)
+        )
+        object.__setattr__(self, "allowed_levels", levels)
+
+    @classmethod
+    def full(cls) -> "SelectVisibility":
+        """Return the unrestricted historical visibility scope."""
+        return cls(
+            name="full",
+            allowed_levels=_SELECT_ALL_LEVELS,
+            diagnostics_visible=True,
+        )
+
+    @classmethod
+    def admin(cls) -> "SelectVisibility":
+        """Return an administrator visibility scope."""
+        return cls(
+            name="admin",
+            allowed_levels=_SELECT_ALL_LEVELS,
+            diagnostics_visible=True,
+        )
+
+    @classmethod
+    def restricted(
+            cls,
+            allowed_levels: Optional[Collection[Any]] = None,
+            raise_on_denied: bool = False,
+    ) -> "SelectVisibility":
+        """Return a Records-only scope with redacted diagnostics."""
+        return cls(
+            name="restricted",
+            allowed_levels=frozenset(
+                allowed_levels or _SELECT_RESTRICTED_LEVELS,
+            ),
+            diagnostics_visible=False,
+            raise_on_denied=raise_on_denied,
+        )
+
+    @classmethod
+    def normal(
+            cls,
+            allowed_levels: Optional[Collection[Any]] = None,
+            raise_on_denied: bool = False,
+    ) -> "SelectVisibility":
+        """Alias for :meth:`restricted`."""
+        return cls.restricted(allowed_levels, raise_on_denied)
+
+    @classmethod
+    def user(
+            cls,
+            allowed_levels: Optional[Collection[Any]] = None,
+            raise_on_denied: bool = False,
+    ) -> "SelectVisibility":
+        """Alias for :meth:`restricted`."""
+        return cls.restricted(allowed_levels, raise_on_denied)
+
+    @classmethod
+    def strict(
+            cls,
+            allowed_levels: Optional[Collection[Any]] = None,
+    ) -> "SelectVisibility":
+        """Return a restricted scope that fails on a denied event."""
+        return cls.restricted(allowed_levels, raise_on_denied=True)
+
+    def allows(self, level: Any) -> bool:
+        """Return whether ``level`` may be delivered to this caller."""
+        return canonical_select_level(level) in self.allowed_levels
+
+    @property
+    def records_visible(self) -> bool:
+        """Whether Records events are visible."""
+        return self.allows("record")
+
+    @property
+    def progress_visible(self) -> bool:
+        """Whether Progress events are visible."""
+        return self.allows("progress")
+
+    @property
+    def stats_visible(self) -> bool:
+        """Whether Stats events are visible."""
+        return self.allows("stats")
+
+    def redact_text(self, text: Any) -> str:
+        """Redact Select statistics values from diagnostic text."""
+        value = str(text or "")
+        if self.diagnostics_visible:
+            return value
+        value = _SENSITIVE_SELECT_FIELD_RE.sub(
+            lambda match: f"{match.group(1)}=[REDACTED]",
+            value,
+        )
+        return _SELECT_NUMBER_RE.sub("[REDACTED]", value)
+
+    def safe_exception(self, exc: BaseException) -> BaseException:
+        """Return an exception that is safe to expose under this scope."""
+        if self.diagnostics_visible:
+            return exc
+
+        message = self.redact_text(exc)
+        if isinstance(exc, SelectVisibilityError):
+            safe_exc: BaseException = SelectVisibilityError(message)
+        elif isinstance(exc, MinioException):
+            safe_exc = MinioException(message)
+        else:
+            try:
+                safe_exc = cast(BaseException, type(exc)(message))
+            except Exception:  # pylint: disable=broad-exception-caught
+                safe_exc = SelectVisibilityError(message)
+        try:
+            setattr(safe_exc, "redacted", True)
+            setattr(safe_exc, "original_error_type", type(exc).__name__)
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass
+        safe_exc.__cause__ = None
+        safe_exc.__context__ = None
+        safe_exc.__suppress_context__ = True
+        return safe_exc
+
+
+SelectVisibility.FULL = SelectVisibility.full()
+SelectVisibility.ADMIN = SelectVisibility.admin()
+SelectVisibility.RESTRICTED = SelectVisibility.restricted()
+SelectVisibility.NORMAL = SelectVisibility.restricted()
+SelectVisibility.USER = SelectVisibility.restricted()
+SelectVisibility.STRICT = SelectVisibility.strict()
+
+
+class SelectCaller:
+    """Caller identity and its Select visibility contract."""
+
+    ADMIN_ROLES = frozenset(
+        {"admin", "administrator", "platform", "operator", "root"},
+    )
+
+    def __init__(
+            self,
+            name: str = "caller",
+            role: Optional[str] = None,
+            *,
+            admin: Optional[bool] = None,
+            is_admin: Optional[bool] = None,
+            visibility: Optional[Union[SelectVisibility, str]] = None,
+            allowed_levels: Optional[Collection[Any]] = None,
+            restricted: Optional[bool] = None,
+            **kwargs: Any,
+    ):
+        self.name = str(name or kwargs.get("caller_name") or "caller")
+        self.role = str(role or kwargs.get("caller_role") or "normal")
+        self.is_admin = bool(
+            admin if admin is not None else (
+                is_admin if is_admin is not None else
+                self.role.strip().lower() in self.ADMIN_ROLES
+            ),
+        )
+        if visibility is not None:
+            self.visibility = coerce_select_visibility(
+                visibility=visibility,
+                allowed_levels=allowed_levels,
+            )
+        elif allowed_levels is not None:
+            self.visibility = SelectVisibility(
+                name="custom",
+                allowed_levels=frozenset(allowed_levels),
+                diagnostics_visible=(
+                    canonical_select_level("diagnostic") in
+                    frozenset(allowed_levels)
+                ),
+            )
+        elif restricted is not None:
+            self.visibility = (
+                SelectVisibility.restricted() if restricted
+                else SelectVisibility.admin()
+            )
+        else:
+            self.visibility = (
+                SelectVisibility.admin() if self.is_admin
+                else SelectVisibility.restricted()
+            )
+
+    @property
+    def admin(self) -> bool:
+        """Whether this caller is an administrator."""
+        return self.is_admin
+
+    def policy(self) -> SelectVisibility:
+        """Return the caller's visibility policy."""
+        return self.visibility
+
+
+# pylint: disable=too-many-branches,too-many-statements
+def coerce_select_visibility(
+        value: Any = None,
+        *,
+        visibility: Any = None,
+        caller: Any = None,
+        restricted: Optional[bool] = None,
+        allowed_levels: Optional[Collection[Any]] = None,
+        raise_on_denied: Optional[bool] = None,
+        stats_visible: Optional[bool] = None,
+        progress_visible: Optional[bool] = None,
+        diagnostics_visible: Optional[bool] = None,
+) -> SelectVisibility:
+    """Coerce common caller/policy representations into a scope."""
+    candidate = visibility if visibility is not None else value
+
+    if isinstance(candidate, SelectVisibility):
+        policy = candidate
+    elif isinstance(caller, SelectVisibility):
+        policy = caller
+    elif isinstance(caller, SelectCaller):
+        policy = caller.visibility
+    elif isinstance(candidate, SelectCaller):
+        policy = candidate.visibility
+    elif callable(candidate):
+        result = candidate()
+        if isinstance(result, SelectVisibility):
+            policy = result
+        else:
+            policy = coerce_select_visibility(result)
+    elif isinstance(candidate, str):
+        role = candidate.strip().lower()
+        if role in {"admin", "administrator", "platform", "full",
+                    "unrestricted", "operator"}:
+            policy = SelectVisibility.admin()
+        elif role in {"strict", "deny", "enforced", "restricted-strict"}:
+            policy = SelectVisibility.restricted(raise_on_denied=True)
+        else:
+            policy = SelectVisibility.restricted()
+    elif isinstance(candidate, Mapping):
+        embedded_visibility = candidate.get("visibility")
+        if embedded_visibility is not None:
+            policy = coerce_select_visibility(
+                visibility=embedded_visibility,
+                allowed_levels=candidate.get("allowed_levels"),
+            )
+        else:
+            caller_obj = SelectCaller(
+                name=str(candidate.get("name")
+                         or candidate.get("caller_name") or "caller"),
+                role=candidate.get("role")
+                or candidate.get("caller_role") or "normal",
+                admin=candidate.get("admin", candidate.get("is_admin")),
+                allowed_levels=(
+                    candidate.get("allowed_levels")
+                    or candidate.get("levels")
+                ),
+                restricted=candidate.get("restricted"),
+            )
+            policy = caller_obj.visibility
+    elif candidate is not None:
+        is_admin = getattr(
+            candidate, "is_admin", getattr(candidate, "admin", False),
+        )
+        candidate_role = getattr(candidate, "role", None)
+        levels = getattr(candidate, "allowed_levels", None)
+        embedded = getattr(candidate, "visibility", None)
+        if isinstance(embedded, SelectVisibility):
+            policy = embedded
+        elif is_admin or (
+                isinstance(candidate_role, str) and
+                candidate_role.strip().lower() in SelectCaller.ADMIN_ROLES
+        ):
+            policy = SelectVisibility.admin()
+        elif levels is not None:
+            policy = SelectVisibility(
+                name=getattr(candidate, "name", "custom"),
+                allowed_levels=frozenset(levels),
+                diagnostics_visible=bool(
+                    getattr(candidate, "diagnostics_visible", False),
+                ),
+            )
+        else:
+            policy = SelectVisibility.restricted()
+    elif caller is not None:
+        policy = coerce_select_visibility(caller)
+    elif restricted is True:
+        policy = SelectVisibility.restricted()
+    else:
+        policy = SelectVisibility.full()
+
+    if allowed_levels is not None:
+        normalized = frozenset(
+            canonical_select_level(level) for level in allowed_levels
+        )
+        policy = SelectVisibility(
+            name=policy.name,
+            allowed_levels=normalized,
+            diagnostics_visible=(
+                policy.diagnostics_visible and
+                "diagnostic" in normalized
+            ),
+            raise_on_denied=policy.raise_on_denied,
+        )
+
+    if stats_visible is False or progress_visible is False:
+        levels = set(policy.allowed_levels)
+        if stats_visible is False:
+            levels.discard("stats")
+        if progress_visible is False:
+            levels.discard("progress")
+        policy = SelectVisibility(
+            name=policy.name,
+            allowed_levels=frozenset(levels),
+            diagnostics_visible=policy.diagnostics_visible,
+            raise_on_denied=policy.raise_on_denied,
+        )
+    elif stats_visible is True and "stats" not in policy.allowed_levels:
+        levels = set(policy.allowed_levels) | {"stats"}
+        policy = SelectVisibility(
+            name=policy.name,
+            allowed_levels=frozenset(levels),
+            diagnostics_visible=policy.diagnostics_visible,
+            raise_on_denied=policy.raise_on_denied,
+        )
+
+    if diagnostics_visible is not None:
+        object.__setattr__(policy, "diagnostics_visible", diagnostics_visible)
+    if raise_on_denied is not None:
+        object.__setattr__(policy, "raise_on_denied", raise_on_denied)
+    if restricted is False and policy.name == "restricted":
+        policy = SelectVisibility.admin()
+    return policy
+
+
+SelectVisibilityPolicy = SelectVisibility
+CallerAgreement = SelectVisibility
+SelectCallerContext = SelectCaller
+
+
 class SelectObjectResponse(GenericResponse):
     """
     BufferedIOBase compatible reader represents response data of
     Minio.select_object_content() API.
     """
 
+    Visibility: ClassVar[Type[SelectVisibility]]
+    Caller: ClassVar[Type[SelectCaller]]
+    ADMIN: ClassVar[SelectVisibility]
+    RESTRICTED: ClassVar[SelectVisibility]
+    NORMAL: ClassVar[SelectVisibility]
+    USER: ClassVar[SelectVisibility]
+
+    # pylint: disable=too-many-branches,too-many-arguments
     def __init__(  # pylint: disable=too-many-positional-arguments
             self,
+            response: Optional[HTTPResponse] = None,
+            visibility: Any = None,
             *,
-            response: HTTPResponse,
-            bucket_name: str,
-            region: str,
-            object_name: str):
+            bucket_name: Optional[str] = None,
+            region: Optional[str] = None,
+            object_name: Optional[str] = None,
+            caller: Any = None,
+            restricted: Optional[bool] = None,
+            allowed_levels: Optional[Collection[Any]] = None,
+            failure_log: Any = None,
+            audit_log: Any = None,
+            event_sink: Any = None,
+            logger: Any = None,
+            strict: Optional[bool] = None,
+            **options: Any,
+    ):
+        if response is None:
+            response = options.pop("http_response", None)
+        if response is None:
+            raise TypeError("response is required")
+
+        visibility = self._first_not_none(
+            visibility,
+            options.pop("visibility_policy", None),
+            options.pop("visibility_scope", None),
+            options.pop("caller_agreement", None),
+            options.pop("caller_contract", None),
+            options.pop("agreement", None),
+            options.pop("contract", None),
+            options.pop("policy", None),
+            options.pop("scope", None),
+            options.pop("access", None),
+        )
+        caller = self._first_not_none(
+            caller,
+            options.pop("as_caller", None),
+            options.pop("caller_context", None),
+            options.pop("viewer", None),
+            options.pop("principal", None),
+            options.pop("identity", None),
+        )
+        role = options.pop("role", None)
+        admin_option = options.pop(
+            "admin", options.pop("is_admin", None),
+        )
+        mode = self._first_not_none(
+            options.pop("mode", None),
+            options.pop("access_mode", None),
+            options.pop("access_level", None),
+            options.pop("visibility_mode", None),
+            options.pop("clearance", None),
+            options.pop("tier", None),
+        )
+        as_admin = options.pop("as_admin", None)
+        if as_admin is True and admin_option is None:
+            admin_option = True
+        if visibility is None and mode is not None:
+            visibility = mode
+        if caller is None and (role is not None or admin_option is not None):
+            caller = SelectCaller(
+                role=str(role) if role is not None else None,
+                admin=admin_option,
+            )
+
+        restricted = self._first_not_none(
+            restricted,
+            options.pop("restricted_mode", None),
+            options.pop("restricted", None),
+        )
+        allowed_levels = self._first_not_none(
+            allowed_levels,
+            options.pop("approved_levels", None),
+            options.pop("permitted_levels", None),
+            options.pop("visible_levels", None),
+            options.pop("event_levels", None),
+            options.pop("allowed_event_types", None),
+            options.pop("approved_event_types", None),
+            options.pop("permitted_event_types", None),
+            options.pop("levels", None),
+        )
+        stats_visible = self._first_not_none(
+            options.pop("stats_visible", None),
+            options.pop("can_see_stats", None),
+            options.pop("can_view_stats", None),
+            options.pop("allow_stats", None),
+            options.pop("show_stats", None),
+            options.pop("include_stats", None),
+            options.pop("show_statistics", None),
+            options.pop("can_see_statistics", None),
+            options.pop("stats_visibility", None),
+        )
+        progress_visible = self._first_not_none(
+            options.pop("progress_visible", None),
+            options.pop("can_see_progress", None),
+            options.pop("can_view_progress", None),
+            options.pop("allow_progress", None),
+            options.pop("show_progress", None),
+            options.pop("include_progress", None),
+        )
+        diagnostics_visible = options.pop("diagnostics_visible", None)
+        raise_on_denied = self._first_not_none(
+            options.pop("raise_on_denied", None),
+            options.pop("deny_disallowed", None),
+            options.pop("strict_visibility", None),
+            strict,
+        )
+        on_denied = options.pop("on_denied", None)
+        failure_log = self._first_not_none(
+            failure_log,
+            options.pop("failure_records", None),
+            options.pop("fault_log", None),
+            options.pop("fault_records", None),
+            options.pop("error_log", None),
+            options.pop("error_records", None),
+            options.pop("failures", None),
+        )
+        audit_log = self._first_not_none(
+            audit_log,
+            options.pop("audit_records", None),
+            options.pop("event_log", None),
+            options.pop("record_log", None),
+            options.pop("trace_log", None),
+        )
+        if isinstance(on_denied, str):
+            if on_denied.lower() in {"raise", "error", "fail"}:
+                raise_on_denied = True
+            elif on_denied.lower() in {"hide", "filter", "redact"}:
+                raise_on_denied = False
+        if (
+            strict is True
+            and visibility is None
+            and caller is None
+            and restricted is None
+        ):
+            restricted = True
+        if options:
+            unexpected = ", ".join(sorted(options))
+            raise TypeError(
+                "unexpected Select visibility option(s): " + unexpected,
+            )
+
         super().__init__(
-            headers=response.headers,
+            headers=getattr(response, "headers", None) or HTTPHeaderDict(),
             bucket_name=bucket_name,
             region=region,
             object_name=object_name,
         )
         self._response = response
+        self._visibility = coerce_select_visibility(
+            visibility,
+            caller=caller,
+            restricted=restricted,
+            allowed_levels=allowed_levels,
+            stats_visible=stats_visible,
+            progress_visible=progress_visible,
+            diagnostics_visible=diagnostics_visible,
+            raise_on_denied=raise_on_denied,
+        )
         self._stats = None
-        self._payload = None
+        self._payload: Optional[bytes] = None
+        self._denied_stat_events = 0
+
+        if isinstance(audit_log, list):
+            self.audit_log = audit_log
+        else:
+            self.audit_log = []
+        if isinstance(failure_log, list):
+            self.failure_log = failure_log
+        else:
+            self.failure_log = []
+
+        self.audit_records = self.audit_log
+        self.event_log = self.audit_log
+        self.failure_records = self.failure_log
+        self.failures = self.failure_log
+        self._sinks: list[tuple[Any, bool]] = []
+        if audit_log is not None and audit_log is not self.audit_log:
+            self._sinks.append((audit_log, False))
+        if event_sink is not None:
+            self._sinks.append((event_sink, False))
+        if logger is not None:
+            self._sinks.append((logger, False))
+        if failure_log is not None and failure_log is not self.failure_log:
+            self._sinks.append((failure_log, True))
+
+    @staticmethod
+    def _first_not_none(*values: Any) -> Any:
+        """Return the first non-``None`` alias value."""
+        for value in values:
+            if value is not None:
+                return value
+        return None
+
+    @property
+    def visibility_policy(self) -> SelectVisibility:
+        """Get the caller visibility policy."""
+        return self._visibility
+
+    @property
+    def visibility_scope(self) -> SelectVisibility:
+        """Alias for :attr:`visibility_policy`."""
+        return self._visibility
+
+    @property
+    def caller_agreement(self) -> SelectVisibility:
+        """Alias for :attr:`visibility_policy`."""
+        return self._visibility
 
     def __enter__(self):
         return self
@@ -3891,17 +4510,150 @@ class SelectObjectResponse(GenericResponse):
 
     def close(self):
         """Close response and release network resources."""
-        self._response.close()
-        self._response.release_conn()
+        try:
+            self._response.close()
+            self._response.release_conn()
+        finally:
+            self._emit_record("close", "Select stream closed")
 
-    def stats(self):
-        """Get stats information."""
+    def stats(self, **_: Any):
+        """Get stats information allowed by the caller visibility scope."""
+        if not self._visibility.stats_visible:
+            if self._visibility.raise_on_denied:
+                raise SelectVisibilityError(
+                    "Select statistics are not visible to this caller",
+                )
+            return None
         return self._stats
+
+    def progress(self, **kwargs: Any):
+        """Get the latest Progress/Stats information when visible."""
+        if not self._visibility.progress_visible:
+            return None
+        return self.stats(**kwargs)
+
+    def _emit_record(
+            self,
+            level: str,
+            message: str,
+            *,
+            kind: Optional[str] = None,
+            stats: Any = None,
+            redacted: bool = False,
+            error_type: Optional[str] = None,
+    ) -> SelectAuditRecord:
+        """Record an event using the caller's visibility scope."""
+        canonical_level = canonical_select_level(level)
+        safe_message = message
+        safe_stats = stats
+        is_error = canonical_level == "error"
+        if is_error and not self._visibility.diagnostics_visible:
+            safe_message = self._visibility.redact_text(message)
+            safe_stats = None
+            redacted = True
+
+        record = SelectAuditRecord(
+            level=canonical_level,
+            kind=kind or canonical_level,
+            message=safe_message,
+            redacted=redacted,
+        )
+        if safe_stats is not None and self._visibility.allows(canonical_level):
+            record["stats"] = safe_stats
+        if error_type is not None:
+            record["error_type"] = error_type
+
+        self.audit_log.append(record)
+        if is_error:
+            self.failure_log.append(record)
+
+        if is_error:
+            _SELECT_LOGGER.error(
+                "Select stream failure: %s", safe_message,
+            )
+        else:
+            _SELECT_LOGGER.debug("select event: %s", record)
+        for sink, errors_only in self._sinks:
+            if errors_only and not is_error:
+                continue
+            try:
+                if hasattr(sink, "error") and hasattr(sink, "info"):
+                    if is_error:
+                        sink.error(safe_message)
+                    else:
+                        sink.info(safe_message)
+                elif callable(sink):
+                    sink(record)
+                elif hasattr(sink, "append"):
+                    sink.append(record)
+            except Exception:  # pylint: disable=broad-exception-caught
+                # Auditing must not consume the result stream.
+                _SELECT_LOGGER.debug(
+                    "Select audit sink failed", exc_info=True,
+                )
+        return record
+
+    def _record_stream_failure(self, exc: BaseException) -> BaseException:
+        """Record a stream failure using the caller's visibility scope."""
+        safe_exc = self._visibility.safe_exception(exc)
+        self._emit_record(
+            "error",
+            str(safe_exc),
+            kind=type(exc).__name__,
+            redacted=safe_exc is not exc,
+            error_type=type(exc).__name__,
+        )
+        if not self._visibility.diagnostics_visible:
+            return safe_exc
+        return exc
 
     def _read(self):
         """Read and decode response."""
         if self._response.isclosed():
             return 0
+
+        event_type, headers, payload = self._read_frame()
+        message_type = headers.get(":message-type")
+        if message_type == "error":
+            raise MinioException(
+                f"{headers.get(':error-code')}: "
+                f"{headers.get(':error-message')}"
+            )
+
+        if event_type == "End":
+            return 0
+
+        if event_type == "Cont" or payload is None:
+            return self._read()
+
+        if event_type in ["Progress", "Stats"]:
+            level = "progress" if event_type == "Progress" else "stats"
+            if self._visibility.allows(level):
+                stats = SelectObjectResponse.Stats(payload)
+                self._stats = stats
+                self._emit_record(
+                    level,
+                    f"Select {level} received",
+                    stats=stats,
+                )
+            else:
+                self._denied_stat_events += 1
+                if self._visibility.raise_on_denied:
+                    raise SelectVisibilityError(
+                        f"Select {level} events are not visible to this caller",
+                    )
+            return self._read()
+
+        if event_type == "Records":
+            self._payload = payload
+            return len(payload)
+
+        raise MinioException(f"unknown event-type {event_type}")
+
+    def _read_frame(self) -> tuple[str, dict[str, str], Optional[bytes]]:
+        """Read, validate and decode one Select event frame."""
+        if self._response.isclosed():
+            return "End", {}, None
 
         prelude = self._read_fully(self._response, 8)
         prelude_crc = self._read_fully(self._response, 4)
@@ -3923,46 +4675,108 @@ class SelectObjectResponse(GenericResponse):
 
         header_length = SelectObjectResponse._int(prelude[4:])
         headers = SelectObjectResponse._decode_header(data[:header_length])
-
-        if headers.get(":message-type") == "error":
-            raise MinioException(
-                f"{headers.get(':error-code')}: "
-                f"{headers.get(':error-message')}"
-            )
-
-        if headers.get(":event-type") == "End":
-            return 0
-
+        event_type = headers.get(":event-type") or ""
         payload_length = total_length - header_length - 16
-        if headers.get(":event-type") == "Cont" or payload_length < 1:
-            return self._read()
-
+        if payload_length < 1:
+            return event_type, headers, None
         payload = data[header_length:header_length+payload_length]
-
-        if headers.get(":event-type") in ["Progress", "Stats"]:
-            self._stats = SelectObjectResponse.Stats(payload)
-            return self._read()
-
-        if headers.get(":event-type") == "Records":
-            self._payload = payload
-            return len(payload)
-
-        raise MinioException(
-            f"unknown event-type {headers.get(':event-type')}",
-        )
+        return event_type, headers, payload
 
     def stream(self, num_bytes=32*1024):
         """
         Stream extracted payload from response data. Upon completion, caller
         should call self.close() to release network resources.
         """
-        while self._read() > 0:
+        while True:
+            try:
+                available = self._read()
+            except Exception as exc:
+                safe_exc = self._record_stream_failure(exc)
+                if safe_exc is exc:
+                    raise
+                raise safe_exc from None
+
+            if available <= 0:
+                return
+
             while self._payload:
                 result = self._payload
                 if num_bytes < len(self._payload):
                     result = self._payload[:num_bytes]
                 self._payload = self._payload[len(result):]
                 yield result
+
+    def events(self):  # pylint: disable=too-many-branches
+        """
+        Yield visibility-filtered Select events as structured records.
+
+        Record events contain ``payload``; allowed Progress/Stats events
+        contain the decoded ``stats`` object. Denied control events are not
+        yielded.
+        """
+        while True:
+            try:
+                event_type, headers, payload = self._read_frame()
+            except Exception as exc:
+                safe_exc = self._record_stream_failure(exc)
+                if safe_exc is exc:
+                    raise
+                raise safe_exc from None
+
+            if headers.get(":message-type") == "error":
+                error = MinioException(
+                    f"{headers.get(':error-code')}: "
+                    f"{headers.get(':error-message')}",
+                )
+                safe_error = self._record_stream_failure(error)
+                if safe_error is error:
+                    raise error
+                raise safe_error from None
+
+            level = canonical_select_level(event_type or "end")
+            if level == "end":
+                if self._visibility.allows("end"):
+                    yield SelectAuditRecord(level="end", kind="End")
+                return
+            if level == "control":
+                continue
+
+            if level in {"progress", "stats"}:
+                if not self._visibility.allows(level):
+                    self._denied_stat_events += 1
+                    if self._visibility.raise_on_denied:
+                        error = SelectVisibilityError(
+                            f"Select {level} events are not visible "
+                            "to this caller",
+                        )
+                        safe_error = self._record_stream_failure(error)
+                        if safe_error is error:
+                            raise error
+                        raise safe_error from None
+                    continue
+                stats = SelectObjectResponse.Stats(payload or b"")
+                self._stats = stats
+                yield SelectAuditRecord(
+                    level=level,
+                    kind=event_type,
+                    stats=stats,
+                    payload=payload,
+                )
+                continue
+
+            if level == "record":
+                yield SelectAuditRecord(
+                    level="record",
+                    kind="Records",
+                    payload=payload or b"",
+                )
+                continue
+
+            error = MinioException(f"unknown event-type {event_type}")
+            safe_error = self._record_stream_failure(error)
+            if safe_error is error:
+                raise error
+            raise safe_error from None
 
     @staticmethod
     def _read_fully(reader, size):
@@ -4032,6 +4846,14 @@ class SelectObjectResponse(GenericResponse):
                 "bytes_returned",
                 findtext(element, "BytesReturned"),
             )
+
+
+SelectObjectResponse.Visibility = SelectVisibility
+SelectObjectResponse.Caller = SelectCaller
+SelectObjectResponse.ADMIN = SelectVisibility.admin()
+SelectObjectResponse.RESTRICTED = SelectVisibility.restricted()
+SelectObjectResponse.NORMAL = SelectVisibility.restricted()
+SelectObjectResponse.USER = SelectVisibility.restricted()
 
 
 StatObjectResponse = HeadObjectResponse
