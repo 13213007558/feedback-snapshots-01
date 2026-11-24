@@ -1,0 +1,84 @@
+
+==== EXPLICIT-DENY WORKED EXAMPLE (R5 present vs. control without R5) ====
+subject_A verdict_with_R5=true verdict_without_R5=true changed_by_explicit_deny=false
+subject_B verdict_with_R5=true verdict_without_R5=true changed_by_explicit_deny=false
+subject_C verdict_with_R5=false verdict_without_R5=true changed_by_explicit_deny=true
+note=R3 (cannot before the catch-all R4) never decides, because the later R4 catch-all overrides it
+
+==== COMPRESSOR ENABLED (default) ====
+
+==== Declared rule registry (source + order; values omitted) ====
+R1 | source=WorkflowAbility    | can    | action=read  | subject=Article | hash conditions           | keys=[published]
+R2 | source=OwnershipAbility   | can    | action=read  | subject=Article | hash conditions           | keys=[category_id]
+R3 | source=RestrictionAbility | cannot | action=read  | subject=Article | hash conditions           | keys=[secret]
+R4 | source=BaselineAbility    | can    | action=read  | subject=Article | catch_all (no conditions) | keys=[-]
+R5 | source=HoldAbility        | cannot | action=read  | subject=Article | hash conditions           | keys=[flagged]
+declared_rule_count=5
+
+==== Pure-Ruby evaluation order (relevant_rules, first-match wins) ====
+R5:cannot -> R4:can -> R3:cannot -> R2:can -> R1:can
+
+==== RulesCompressor library counters ====
+compressor_enabled=true
+rules_seen_by_adapter=5
+rules_handed_to_scope_query=2
+adapter_rule_tokens=R5 -> R4
+
+==== Pure-Ruby can? verdicts (boolean only; row content omitted) ====
+subject_A can?(:read)=true
+subject_B can?(:read)=true
+subject_C can?(:read)=false
+
+==== Real accessible_by scope query ====
+redacted_sql=SELECT "articles".* FROM "articles" WHERE (("articles"."flagged" = ?) IS NOT TRUE)
+
+==== Equivalence invariant (pure Ruby vs. SQL scope) ====
+ruby_allowed_tokens=[A,B]
+ruby_explicit_denied_tokens=[C]
+scope_row_count=2
+scope_allowed_tokens=[A,B]
+scope_set_equals_ruby_allow_set=true
+
+==== COMPRESSOR DISABLED ====
+
+==== Declared rule registry (source + order; values omitted) ====
+R1 | source=WorkflowAbility    | can    | action=read  | subject=Article | hash conditions           | keys=[published]
+R2 | source=OwnershipAbility   | can    | action=read  | subject=Article | hash conditions           | keys=[category_id]
+R3 | source=RestrictionAbility | cannot | action=read  | subject=Article | hash conditions           | keys=[secret]
+R4 | source=BaselineAbility    | can    | action=read  | subject=Article | catch_all (no conditions) | keys=[-]
+R5 | source=HoldAbility        | cannot | action=read  | subject=Article | hash conditions           | keys=[flagged]
+declared_rule_count=5
+
+==== Pure-Ruby evaluation order (relevant_rules, first-match wins) ====
+R5:cannot -> R4:can -> R3:cannot -> R2:can -> R1:can
+
+==== RulesCompressor library counters ====
+compressor_enabled=false
+rules_seen_by_adapter=5
+rules_handed_to_scope_query=5
+adapter_rule_tokens=R5 -> R4 -> R3 -> R2 -> R1
+
+==== Pure-Ruby can? verdicts (boolean only; row content omitted) ====
+subject_A can?(:read)=true
+subject_B can?(:read)=true
+subject_C can?(:read)=false
+
+==== Real accessible_by scope query ====
+redacted_sql=SELECT "articles".* FROM "articles" WHERE (("articles"."flagged" = ?) IS NOT TRUE)
+
+==== Equivalence invariant (pure Ruby vs. SQL scope) ====
+ruby_allowed_tokens=[A,B]
+ruby_explicit_denied_tokens=[C]
+scope_row_count=2
+scope_allowed_tokens=[A,B]
+scope_set_equals_ruby_allow_set=true
+
+==== ON vs OFF SUMMARY (compression changes rule count, never the decision) ====
+declared_rules=5 (identical both runs)
+adapter_rules_compressor_ON=2
+adapter_rules_compressor_OFF=5
+ruby_verdicts_identical=true
+scope_count_identical=true
+scope_invariant_holds_ON=true
+scope_invariant_holds_OFF=true
+result=PASS (effective authorization identical; only the stored rule count changed)
