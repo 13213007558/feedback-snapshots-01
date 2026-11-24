@@ -35,6 +35,15 @@ __license__ = "Apache 2.0"
 __copyright__ = "Copyright [2014] - [2025] MinIO, Inc."
 
 # pylint: disable=unused-import
+from .diagnostics import (AttemptChain, ControlledDiagnosticView,
+                          DiagnosticPolicy, DiagnosticRecord,
+                          DiagnosticRecorder, DiagnosticView, DisclosurePolicy,
+                          MaterialGuard, RecordingHTTPTransport,
+                          RecordingTransport, RedactionPolicy,
+                          ReplicationDiagnostics, SafeError, SafeTraceStream,
+                          ShareableError, diagnostic_attempt, diagnostic_job,
+                          diagnostic_stage, redact_headers, redact_text,
+                          shareable_error)
 from .error import InvalidResponseError, S3Error, ServerError
 from .minio import Minio
 from .minioadmin import MinioAdmin

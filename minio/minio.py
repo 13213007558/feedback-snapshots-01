@@ -58,6 +58,11 @@ from .compat import (HTTPHeaderDict, HTTPQueryDict, HTTPResponse, makedirs,
                      queryencode)
 from .credentials import StaticProvider
 from .credentials.providers import Provider
+from .diagnostics import (DiagnosticRecorder, DiagnosticView, DisclosurePolicy,
+                          bind_http_correlation, current_http_correlation_id,
+                          get_current_recorder, get_current_scope,
+                          infer_wire_stage, new_correlation_id,
+                          shareable_error)
 from .error import InvalidResponseError, S3Error, ServerError
 from .helpers import (MAX_MULTIPART_COUNT, MAX_MULTIPART_OBJECT_SIZE,
                       MAX_PART_SIZE, MIN_PART_SIZE, BaseURL, RegionMap,
@@ -111,6 +116,12 @@ class Minio:
             credentials: Optional[Provider] = None,
             cert_check: bool = True,
             enable_rdma: bool = False,
+            diagnostics: Union[
+                DiagnosticRecorder, DiagnosticView, bool, None,
+            ] = None,
+            diagnostic_recorder: Optional[DiagnosticRecorder] = None,
+            diagnostic_view: Optional[DiagnosticView] = None,
+            diagnostic_policy: Optional[DisclosurePolicy] = None,
     ):
         """
         Initializes a new Minio client object.
@@ -210,6 +221,21 @@ class Minio:
             app_name="", app_version="", default=True,
         )
         self._trace_stream = None
+        self._diagnostic_policy = DisclosurePolicy()
+        recorder = diagnostics if isinstance(
+            diagnostics, DiagnosticRecorder,
+        ) else diagnostic_recorder
+        if recorder is None and isinstance(diagnostics, DiagnosticView):
+            recorder = diagnostics.recorder
+        if recorder is None and diagnostic_view is not None:
+            recorder = diagnostic_view.recorder
+        if diagnostics is True and recorder is None:
+            recorder = DiagnosticRecorder(diagnostic_policy)
+        if recorder is None and diagnostic_policy is not None:
+            recorder = DiagnosticRecorder(diagnostic_policy)
+        if recorder is not None and recorder.policy is not None:
+            self._diagnostic_policy = recorder.policy
+        self._diagnostics = recorder
         if access_key:
             if secret_key is None:
                 raise ValueError("secret key must be provided with access key")
@@ -448,7 +474,72 @@ class Minio:
 
         return code, message
 
-    def _url_open(
+    def _active_diagnostic_recorder(self) -> Optional[DiagnosticRecorder]:
+        """Return the context recorder or the client's recorder."""
+        return get_current_recorder() or self._diagnostics
+
+    @staticmethod
+    def _diagnostic_context(
+            correlation_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Build exception-attached job/attempt correlation metadata."""
+        scope = get_current_scope()
+        context = scope.as_dict()
+        if correlation_id:
+            context["correlation_id"] = correlation_id
+        return context
+
+    def _attach_diagnostic_metadata(
+            self,
+            error: Exception,
+            recorder: Optional[DiagnosticRecorder],
+            correlation_id: Optional[str],
+    ) -> None:
+        """Attach redaction policy and correlation data to an exception."""
+        policies = [self._diagnostic_policy]
+        if recorder is not None and recorder.policy not in policies:
+            policies.append(recorder.policy)
+        try:
+            object.__setattr__(
+                error, "_diagnostic_policy", self._diagnostic_policy,
+            )
+            object.__setattr__(
+                error, "_diagnostic_extra_policies", policies[1:],
+            )
+            object.__setattr__(
+                error,
+                "_diagnostic_context",
+                self._diagnostic_context(correlation_id),
+            )
+            safe_error = shareable_error(error)
+            object.__setattr__(error, "shareable", safe_error)
+            object.__setattr__(
+                error, "diagnostic_summary", dict(safe_error),
+            )
+        except Exception:  # pylint: disable=broad-except
+            pass
+
+    def _url_open(self, **kwargs: Any) -> HTTPResponse:
+        """Wrap one wire request with diagnostic correlation and errors."""
+        correlation_id = new_correlation_id("http")
+        recorder = self._active_diagnostic_recorder()
+        with bind_http_correlation(correlation_id):
+            try:
+                return self._url_open_impl(**kwargs)
+            except Exception as exc:
+                self._attach_diagnostic_metadata(
+                    exc, recorder, correlation_id,
+                )
+                if recorder is not None:
+                    try:
+                        recorder.record_error(
+                            exc, correlation_id=correlation_id,
+                        )
+                    except Exception:  # pylint: disable=broad-except
+                        pass
+                raise
+
+    def _url_open_impl(
             self,
             *,
             method: str,
@@ -522,18 +613,54 @@ class Minio:
                 date=date,
             )
 
+        recorder = self._active_diagnostic_recorder()
+        if recorder is not None:
+            self._diagnostic_policy.guard.merge(recorder.policy.guard)
+        correlation_id = current_http_correlation_id()
+        wire_stage = infer_wire_stage(method, query_params, headers)
+        self._diagnostic_policy.redact_headers(
+            headers, stage=wire_stage,
+        )
+        if recorder is not None:
+            recorder.record_http_request(
+                method=method,
+                url=urlunsplit(url),
+                headers=headers,
+                body=body,
+                query_params=query_params,
+                wire_stage=wire_stage,
+                correlation_id=correlation_id,
+            )
+
         if self._trace_stream:
+            safe_headers = self._diagnostic_policy.redact_headers(
+                headers, stage=wire_stage,
+            )
             self._trace_stream.write("---------START-HTTP---------\n")
+            if recorder is not None:
+                scope = get_current_scope().as_dict()
+                self._trace_stream.write(
+                    "# diagnostic "
+                    f"job={scope['job_id']} chain={scope['chain_id']} "
+                    f"attempt={scope['attempt']} stage={wire_stage} "
+                    f"request={correlation_id}\n",
+                )
             query = ("?" + url.query) if url.query else ""
-            self._trace_stream.write(f"{method} {url.path}{query} HTTP/1.1\n")
+            safe_path = self._diagnostic_policy.redact_url(
+                f"{url.path}{query}",
+            )
+            self._trace_stream.write(f"{method} {safe_path} HTTP/1.1\n")
             self._trace_stream.write(
-                headers_to_strings(headers, titled_key=True),
+                headers_to_strings(safe_headers, titled_key=True),
             )
             self._trace_stream.write("\n")
             if not no_body_trace and body is not None:
                 self._trace_stream.write("\n")
+                body_text = (
+                    body.decode() if isinstance(body, bytes) else str(body)
+                )
                 self._trace_stream.write(
-                    body.decode() if isinstance(body, bytes) else str(body),
+                    self._diagnostic_policy.redact(body_text),
                 )
                 self._trace_stream.write("\n")
             self._trace_stream.write("\n")
@@ -546,10 +673,21 @@ class Minio:
             preload_content=preload_content,
         )
 
+        if recorder is not None:
+            recorder.record_http_response(
+                correlation_id=correlation_id or new_correlation_id("http"),
+                stage=wire_stage,
+                status=response.status,
+                headers=response.headers,
+            )
+
         if self._trace_stream:
+            safe_response_headers = self._diagnostic_policy.redact_headers(
+                response.headers, stage=wire_stage,
+            )
             self._trace_stream.write(f"HTTP/1.1 {response.status}\n")
             self._trace_stream.write(
-                headers_to_strings(response.headers),
+                headers_to_strings(safe_response_headers),
             )
             self._trace_stream.write("\n")
 
@@ -557,7 +695,11 @@ class Minio:
             if self._trace_stream:
                 if preload_content:
                     self._trace_stream.write("\n")
-                    self._trace_stream.write(response.data.decode())
+                    self._trace_stream.write(
+                        self._diagnostic_policy.redact(
+                            response.data.decode(),
+                        ),
+                    )
                     self._trace_stream.write("\n")
                 self._trace_stream.write("----------END-HTTP----------\n")
             return response
@@ -567,7 +709,9 @@ class Minio:
             response.release_conn()
 
         if self._trace_stream and method != "HEAD" and response.data:
-            self._trace_stream.write(response.data.decode())
+            self._trace_stream.write(
+                self._diagnostic_policy.redact(response.data.decode()),
+            )
             self._trace_stream.write("\n")
 
         if (
@@ -1360,6 +1504,64 @@ class Minio:
     def trace_off(self):
         """Disable HTTP trace."""
         self._trace_stream = None
+
+    def enable_diagnostics(
+            self,
+            recorder: Optional[DiagnosticRecorder] = None,
+            *,
+            stream: Optional[TextIO] = None,
+            policy: Optional[DisclosurePolicy] = None,
+    ) -> DiagnosticRecorder:
+        """Enable controlled diagnostic records and optional safe tracing."""
+        if recorder is None:
+            recorder = DiagnosticRecorder(policy or self._diagnostic_policy)
+        elif policy is not None:
+            recorder.policy = policy
+        self._diagnostics = recorder
+        self._diagnostic_policy = recorder.policy
+        if stream is not None:
+            self.trace_on(stream)
+        return recorder
+
+    def disable_diagnostics(self) -> None:
+        """Disable client-owned diagnostic recording."""
+        self._diagnostics = None
+
+    def diagnostic_view(self) -> DiagnosticView:
+        """Return a shareable view over this client's diagnostic recorder."""
+        if self._diagnostics is None:
+            self.enable_diagnostics()
+        return DiagnosticView(self._diagnostics)
+
+    def diagnostic_job(self, *args: Any, **kwargs: Any):
+        """Open a diagnostic job on this client's recorder."""
+        recorder = self._diagnostics or self.enable_diagnostics()
+        return recorder.job(*args, **kwargs)
+
+    def diagnostic_attempt(self, *args: Any, **kwargs: Any):
+        """Open a diagnostic attempt on this client's recorder."""
+        recorder = self._diagnostics or self.enable_diagnostics()
+        return recorder.attempt(*args, **kwargs)
+
+    def diagnostic_trace_on(
+            self,
+            stream: TextIO,
+            recorder: Optional[DiagnosticRecorder] = None,
+    ) -> DiagnosticRecorder:
+        """Enable safe HTTP tracing and return its diagnostic recorder."""
+        return self.enable_diagnostics(recorder, stream=stream)
+
+    safe_trace_on = diagnostic_trace_on
+
+    def protect_diagnostic_material(
+            self,
+            value: Any,
+            category: str = "protected_material",
+    ) -> str:
+        """Protect an additional internal marker in traces and summaries."""
+        if self._diagnostics is not None:
+            self._diagnostics.protect(value, category)
+        return self._diagnostic_policy.protect(value, category)
 
     def enable_accelerate_endpoint(self):
         """Enables accelerate endpoint for Amazon S3 endpoint."""

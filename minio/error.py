@@ -148,7 +148,7 @@ class S3Error(MinioException):
 
     def copy(self, code: str, message: str) -> S3Error:
         """Make a copy with replaced code and message."""
-        return S3Error(
+        error = S3Error(
             response=self.response,
             code=code,
             message=message,
@@ -158,6 +158,14 @@ class S3Error(MinioException):
             bucket_name=self.bucket_name,
             object_name=self.object_name,
         )
+        for name in (
+                "_diagnostic_policy",
+                "_diagnostic_extra_policies",
+                "_diagnostic_context",
+        ):
+            if hasattr(self, name):
+                object.__setattr__(error, name, getattr(self, name))
+        return error
 
     def __repr__(self):
         return (
