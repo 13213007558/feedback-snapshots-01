@@ -1,0 +1,5 @@
+{
+  "type": "feature",
+  "category": "s3",
+  "description": "Presigned URLs and POST forms now report the validity window they can actually honor. The effective window is the smallest of `ExpiresIn`, an optional per-operation `presign_expiration.max_expires_in` maximum, and the remaining lifetime of the signing credentials. `presign_expiration.strict` refuses to issue a presigned request when the effective window is shorter than `presign_expiration.minimum_expires_in`. Endpoint selection, signing, and the reported expiration all use one credential snapshot, and `generate_presigned_url` and `generate_presigned_post` keep their existing return shapes. New `generate_presigned_url_with_metadata` and `generate_presigned_post_with_metadata` methods expose the granted window and the signing access key."
+}

@@ -13,14 +13,17 @@
 import base64
 import datetime
 import json
+import math
 import weakref
+from collections import namedtuple
 
 import botocore
 import botocore.auth
 from botocore.awsrequest import create_request_object, prepare_request_dict
-from botocore.compat import OrderedDict, get_current_datetime
+from botocore.compat import OrderedDict, get_current_datetime, total_seconds
 from botocore.exceptions import (
     ParamValidationError,
+    PresignExpirationError,
     UnknownClientMethodError,
     UnknownSignatureVersionError,
     UnsupportedSignatureVersionError,
@@ -31,6 +34,395 @@ from botocore.utils import (
     datetime2timestamp,
     fix_s3_host,  # noqa: F401
 )
+
+# An immutable snapshot of the identity that signs a presigned request. The
+# credential values, account ID, and expiration come from the same credential
+# set so that endpoint selection and signing cannot observe different
+# identities if the underlying provider refreshes mid-request.
+SigningIdentity = namedtuple(
+    'SigningIdentity',
+    ['credentials', 'expires_at', 'access_key', 'account_id'],
+)
+
+
+def _snapshot_signing_identity(credentials):
+    """Capture a single, consistent view of the credentials used to sign."""
+    if credentials is None:
+        return SigningIdentity(None, None, None, None)
+    getter = getattr(credentials, 'get_frozen_credentials_with_expiry', None)
+    if getter is not None:
+        frozen, expires_at = getter()
+    else:
+        frozen_getter = getattr(credentials, 'get_frozen_credentials', None)
+        if frozen_getter is not None:
+            frozen = frozen_getter()
+        else:
+            frozen = credentials
+        expires_at = None
+    if frozen is None:
+        return SigningIdentity(None, expires_at, None, None)
+    return SigningIdentity(
+        frozen,
+        expires_at,
+        getattr(frozen, 'access_key', None),
+        getattr(frozen, 'account_id', None),
+    )
+
+
+def _remaining_seconds(expires_at, now=None):
+    if now is None:
+        now = get_current_datetime(remove_tzinfo=False)
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=datetime.timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=datetime.timezone.utc)
+    return total_seconds(expires_at - now)
+
+
+def _presign_expiration_metadata(
+    effective_expires_in,
+    requested_expires_in,
+    identity,
+    now,
+    signed_access_key,
+):
+    """Describe the validity window that was actually granted."""
+    return {
+        'requested_expires_in': requested_expires_in,
+        'effective_expires_in': effective_expires_in,
+        'expires_at': now + datetime.timedelta(seconds=effective_expires_in),
+        'credential_expires_at': (
+            identity.expires_at if identity is not None else None
+        ),
+        'access_key': signed_access_key,
+    }
+
+
+def _normalize_operation_name(name):
+    if not isinstance(name, str):
+        return name
+    return botocore.xform_name(name, '-')
+
+
+def _get_presign_expiration_config(client):
+    s3_config = getattr(client.meta.config, 's3', None) or {}
+    return s3_config.get('presign_expiration') or {}
+
+
+def _get_operation_expires_cap(presign_expiration, operation_names):
+    """Return the smallest configured maximum for the given operations."""
+    maxima = presign_expiration.get('max_expires_in') or {}
+    normalized = {}
+    global_cap = None
+    for operation, value in maxima.items():
+        if operation == '*':
+            global_cap = value
+        else:
+            normalized[_normalize_operation_name(operation)] = value
+    caps = []
+    if global_cap is not None:
+        caps.append(global_cap)
+    for operation in operation_names:
+        cap = normalized.get(_normalize_operation_name(operation))
+        if cap is not None:
+            caps.append(cap)
+    if not caps:
+        return None
+    return min(caps)
+
+
+def _compute_effective_expires_in(
+    requested_expires_in, operation_cap, identity, now
+):
+    """Compute the validity window a presigned request can actually honor.
+
+    The window is the smallest of the requested value, any operation-specific
+    maximum, and the remaining lifetime of the signing identity.
+    """
+    limits = [requested_expires_in]
+    if operation_cap is not None:
+        limits.append(operation_cap)
+    if identity is not None and identity.expires_at is not None:
+        limits.append(math.floor(_remaining_seconds(identity.expires_at, now)))
+    return int(min(limits))
+
+
+def _enforce_presign_expiration(
+    effective_expires_in,
+    requested_expires_in,
+    presign_expiration,
+    presign_type,
+    identity,
+):
+    if effective_expires_in < 1:
+        raise PresignExpirationError(
+            presign_type=presign_type,
+            requested_expires_in=requested_expires_in,
+            reason=(
+                'the effective validity window is zero. The signing '
+                'credentials expire at '
+                f'{identity.expires_at if identity is not None else None}'
+            ),
+        )
+    if not presign_expiration.get('strict', False):
+        return
+    minimum = presign_expiration.get('minimum_expires_in', 1)
+    if effective_expires_in < minimum:
+        raise PresignExpirationError(
+            presign_type=presign_type,
+            requested_expires_in=requested_expires_in,
+            reason=(
+                f'the effective validity window is {effective_expires_in} '
+                f'seconds, which is below the configured minimum of '
+                f'{minimum} seconds'
+            ),
+        )
+
+
+class _FrozenSigningCredentials:
+    """Credentials that never refresh, used to sign a presigned request.
+
+    Signing with the same snapshot that endpoint resolution used prevents a
+    credential refresh from swapping the identity between those two steps.
+    """
+
+    def __init__(self, identity):
+        self._identity = identity
+
+    def get_frozen_credentials(self):
+        return self._identity.credentials
+
+
+def _resolve_presign_identity(client, context):
+    """Snapshot the credentials used to sign, avoiding unsigned lookups."""
+    signature_version = (
+        context.get('auth_type') or client._request_signer.signature_version
+    )
+    if signature_version is botocore.UNSIGNED:
+        return SigningIdentity(None, None, None, None)
+    return _snapshot_signing_identity(client._request_signer._credentials)
+
+
+def _presign_url(
+    client,
+    ClientMethod,
+    Params,
+    ExpiresIn,
+    HttpMethod,
+    return_metadata,
+):
+    client_method = ClientMethod
+    params = Params
+    if params is None:
+        params = {}
+    expires_in = ExpiresIn
+    http_method = HttpMethod
+    context = {
+        'is_presign_request': True,
+        'use_global_endpoint': _should_use_global_endpoint(client),
+    }
+
+    request_signer = client._request_signer
+
+    try:
+        operation_name = client._PY_TO_OP_NAME[client_method]
+    except KeyError:
+        raise UnknownClientMethodError(method_name=client_method)
+
+    presign_expiration = _get_presign_expiration_config(client)
+    identity = _resolve_presign_identity(client, context)
+    context['signing_identity'] = identity
+    now = get_current_datetime(remove_tzinfo=False)
+    operation_cap = _get_operation_expires_cap(
+        presign_expiration, [client_method, operation_name]
+    )
+    effective_expires_in = _compute_effective_expires_in(
+        expires_in, operation_cap, identity, now
+    )
+    _enforce_presign_expiration(
+        effective_expires_in,
+        expires_in,
+        presign_expiration,
+        'url',
+        identity,
+    )
+
+    operation_model = client.meta.service_model.operation_model(operation_name)
+    params = client._emit_api_params(
+        api_params=params,
+        operation_model=operation_model,
+        context=context,
+    )
+    bucket_is_arn = ArnParser.is_arn(params.get('Bucket', ''))
+    (
+        endpoint_url,
+        additional_headers,
+        properties,
+    ) = client._resolve_endpoint_ruleset(
+        operation_model,
+        params,
+        context,
+        ignore_signing_region=(not bucket_is_arn),
+    )
+
+    request_dict = client._convert_to_request_dict(
+        api_params=params,
+        operation_model=operation_model,
+        endpoint_url=endpoint_url,
+        context=context,
+        headers=additional_headers,
+        set_user_agent_header=False,
+    )
+
+    if http_method is not None:
+        request_dict['method'] = http_method
+
+    if identity.credentials is None:
+        url = request_signer.generate_presigned_url(
+            request_dict=request_dict,
+            expires_in=effective_expires_in,
+            operation_name=operation_name,
+        )
+    else:
+        url = request_signer.generate_presigned_url(
+            request_dict=request_dict,
+            expires_in=effective_expires_in,
+            operation_name=operation_name,
+            signing_identity=identity,
+        )
+    if not return_metadata:
+        return url
+    return {
+        'url': url,
+        'expiration': _presign_expiration_metadata(
+            effective_expires_in,
+            expires_in,
+            identity,
+            now,
+            context.get('signing_access_key', identity.access_key),
+        ),
+    }
+
+
+def _presign_post(
+    client,
+    Bucket,
+    Key,
+    Fields,
+    Conditions,
+    ExpiresIn,
+    return_metadata,
+):
+    bucket = Bucket
+    key = Key
+    fields = Fields
+    conditions = Conditions
+    expires_in = ExpiresIn
+
+    if fields is None:
+        fields = {}
+    else:
+        fields = fields.copy()
+
+    if conditions is None:
+        conditions = []
+    else:
+        conditions = conditions.copy()
+
+    context = {
+        'is_presign_request': True,
+        'use_global_endpoint': _should_use_global_endpoint(client),
+    }
+
+    presign_expiration = _get_presign_expiration_config(client)
+    identity = _resolve_presign_identity(client, context)
+    context['signing_identity'] = identity
+    now = get_current_datetime(remove_tzinfo=False)
+    operation_cap = _get_operation_expires_cap(
+        presign_expiration, ['put_object', 'PutObject']
+    )
+    effective_expires_in = _compute_effective_expires_in(
+        expires_in, operation_cap, identity, now
+    )
+    _enforce_presign_expiration(
+        effective_expires_in,
+        expires_in,
+        presign_expiration,
+        'post',
+        identity,
+    )
+
+    post_presigner = S3PostPresigner(client._request_signer)
+
+    # We choose the CreateBucket operation model because its url gets
+    # serialized to what a presign post requires.
+    operation_model = client.meta.service_model.operation_model('CreateBucket')
+    params = client._emit_api_params(
+        api_params={'Bucket': bucket},
+        operation_model=operation_model,
+        context=context,
+    )
+    bucket_is_arn = ArnParser.is_arn(params.get('Bucket', ''))
+    (
+        endpoint_url,
+        additional_headers,
+        properties,
+    ) = client._resolve_endpoint_ruleset(
+        operation_model,
+        params,
+        context,
+        ignore_signing_region=(not bucket_is_arn),
+    )
+
+    request_dict = client._convert_to_request_dict(
+        api_params=params,
+        operation_model=operation_model,
+        endpoint_url=endpoint_url,
+        context=context,
+        headers=additional_headers,
+        set_user_agent_header=False,
+    )
+
+    # Append that the bucket name to the list of conditions.
+    conditions.append({'bucket': bucket})
+
+    # If the key ends with filename, the only constraint that can be
+    # imposed is if it starts with the specified prefix.
+    if key.endswith('${filename}'):
+        conditions.append(["starts-with", '$key', key[: -len('${filename}')]])
+    else:
+        conditions.append({'key': key})
+
+    # Add the key to the fields.
+    fields['key'] = key
+
+    if identity.credentials is None:
+        result = post_presigner.generate_presigned_post(
+            request_dict=request_dict,
+            fields=fields,
+            conditions=conditions,
+            expires_in=effective_expires_in,
+            now=now,
+        )
+    else:
+        result = post_presigner.generate_presigned_post(
+            request_dict=request_dict,
+            fields=fields,
+            conditions=conditions,
+            expires_in=effective_expires_in,
+            signing_identity=identity,
+            now=now,
+        )
+    if not return_metadata:
+        return result
+    result['expiration'] = _presign_expiration_metadata(
+        effective_expires_in,
+        expires_in,
+        identity,
+        now,
+        context.get('signing_access_key', identity.access_key),
+    )
+    return result
 
 
 class RequestSigner:
@@ -115,6 +507,7 @@ class RequestSigner:
         signing_type='standard',
         expires_in=None,
         signing_name=None,
+        signing_identity=None,
     ):
         """Sign a request before it goes out over the wire.
 
@@ -141,6 +534,11 @@ class RequestSigner:
 
         :type signing_name: str
         :param signing_name: The name to use for the service when signing.
+
+        :type signing_identity: SigningIdentity
+        :param signing_identity: An optional credential snapshot to sign with.
+            Pre-signing uses this to keep endpoint selection and signing on
+            the same identity.
         """
         explicit_region_name = region_name
         if region_name is None:
@@ -187,6 +585,13 @@ class RequestSigner:
                     signing_context['identity_cache'],
                     signing_context['cache_key'],
                 )
+            elif signing_identity is not None:
+                # Sign with the identity snapshot captured while resolving
+                # the endpoint instead of reading the provider again, which
+                # could have refreshed to a different identity.
+                kwargs['request_credentials'] = _FrozenSigningCredentials(
+                    signing_identity
+                )
             try:
                 auth = self.get_auth_instance(**kwargs)
             except UnknownSignatureVersionError as e:
@@ -198,6 +603,15 @@ class RequestSigner:
                     raise e
 
             auth.add_auth(request)
+            if signing_type != 'standard':
+                # Record the identity that actually signed a presigned
+                # request so callers can reconcile it with the validity
+                # window. Standard request signing leaves the shared request
+                # context untouched.
+                credentials = getattr(auth, 'credentials', None)
+                access_key = getattr(credentials, 'access_key', None)
+                if access_key is not None:
+                    request.context['signing_access_key'] = access_key
 
     def _resolve_identity_cache(self, kwargs, cache, cache_key):
         kwargs['identity_cache'] = cache
@@ -329,6 +743,7 @@ class RequestSigner:
         expires_in=3600,
         region_name=None,
         signing_name=None,
+        signing_identity=None,
     ):
         """Generates a presigned url
 
@@ -349,6 +764,11 @@ class RequestSigner:
         :type signing_name: str
         :param signing_name: The name to use for the service when signing.
 
+        :type signing_identity: SigningIdentity
+        :param signing_identity: An optional credential snapshot captured
+            before endpoint selection. When provided, the URL is signed with
+            this identity so it matches the endpoint that was resolved.
+
         :returns: The presigned url
         """
         request = create_request_object(request_dict)
@@ -359,6 +779,7 @@ class RequestSigner:
             'presign-url',
             expires_in,
             signing_name,
+            signing_identity=signing_identity,
         )
 
         request.prepare()
@@ -670,6 +1091,8 @@ class S3PostPresigner:
         conditions=None,
         expires_in=3600,
         region_name=None,
+        signing_identity=None,
+        now=None,
     ):
         """Generates the url and the form fields used for a presigned s3 post
 
@@ -700,6 +1123,16 @@ class S3PostPresigner:
         :type region_name: string
         :param region_name: The region name to sign the presigned post to.
 
+        :type signing_identity: SigningIdentity
+        :param signing_identity: An optional credential snapshot captured
+            before endpoint selection. When provided, the form is signed with
+            this identity so it matches the endpoint that was resolved.
+
+        :type now: datetime
+        :param now: The moment the validity window is measured from. Pre-sign
+            callers pass the same value used to compute ``expires_in`` so the
+            policy expiration and the reported window agree.
+
         :rtype: dict
         :returns: A dictionary with two elements: ``url`` and ``fields``.
             Url is the url to post to. Fields is a dictionary filled with
@@ -728,7 +1161,7 @@ class S3PostPresigner:
         policy = {}
 
         # Create an expiration date for the policy
-        datetime_now = get_current_datetime()
+        datetime_now = now if now is not None else get_current_datetime()
         expire_date = datetime_now + datetime.timedelta(seconds=expires_in)
         policy['expiration'] = expire_date.strftime(botocore.auth.ISO8601)
 
@@ -743,7 +1176,11 @@ class S3PostPresigner:
         request.context['s3-presign-post-policy'] = policy
 
         self._request_signer.sign(
-            'PutObject', request, region_name, 'presign-post'
+            'PutObject',
+            request,
+            region_name,
+            'presign-post',
+            signing_identity=signing_identity,
         )
         # Return the url and the fields for th form to post.
         return {'url': request.url, 'fields': fields}
@@ -785,61 +1222,45 @@ def generate_presigned_url(
         default, the http method is whatever is used in the method's model.
 
     :returns: The presigned url
+
+    The effective validity window is the smallest of ``ExpiresIn``, any
+    ``presign_expiration.max_expires_in`` configured for the operation, and
+    the remaining lifetime of the credentials used to sign. When
+    ``presign_expiration.strict`` is enabled, a window shorter than
+    ``presign_expiration.minimum_expires_in`` raises
+    :class:`~botocore.exceptions.PresignExpirationError` instead of issuing a
+    URL that appears valid for longer.
+
+    The returned value remains a URL string. To inspect the window that was
+    actually granted, or the identity that signed it, use
+    :meth:`~botocore.client.BaseClient.generate_presigned_url_with_metadata`.
     """
-    client_method = ClientMethod
-    params = Params
-    if params is None:
-        params = {}
-    expires_in = ExpiresIn
-    http_method = HttpMethod
-    context = {
-        'is_presign_request': True,
-        'use_global_endpoint': _should_use_global_endpoint(self),
-    }
-
-    request_signer = self._request_signer
-
-    try:
-        operation_name = self._PY_TO_OP_NAME[client_method]
-    except KeyError:
-        raise UnknownClientMethodError(method_name=client_method)
-
-    operation_model = self.meta.service_model.operation_model(operation_name)
-    params = self._emit_api_params(
-        api_params=params,
-        operation_model=operation_model,
-        context=context,
-    )
-    bucket_is_arn = ArnParser.is_arn(params.get('Bucket', ''))
-    (
-        endpoint_url,
-        additional_headers,
-        properties,
-    ) = self._resolve_endpoint_ruleset(
-        operation_model,
-        params,
-        context,
-        ignore_signing_region=(not bucket_is_arn),
+    return _presign_url(
+        self, ClientMethod, Params, ExpiresIn, HttpMethod, False
     )
 
-    request_dict = self._convert_to_request_dict(
-        api_params=params,
-        operation_model=operation_model,
-        endpoint_url=endpoint_url,
-        context=context,
-        headers=additional_headers,
-        set_user_agent_header=False,
+
+def add_generate_presigned_url_with_metadata(class_attributes, **kwargs):
+    class_attributes['generate_presigned_url_with_metadata'] = (
+        generate_presigned_url_with_metadata
     )
 
-    # Switch out the http method if user specified it.
-    if http_method is not None:
-        request_dict['method'] = http_method
 
-    # Generate the presigned url.
-    return request_signer.generate_presigned_url(
-        request_dict=request_dict,
-        expires_in=expires_in,
-        operation_name=operation_name,
+def generate_presigned_url_with_metadata(
+    self, ClientMethod, Params=None, ExpiresIn=3600, HttpMethod=None
+):
+    """Generate a presigned url and report the window it actually grants
+
+    This takes the same arguments as ``generate_presigned_url``. The return
+    value is a dictionary with ``url`` and ``expiration`` keys. The
+    ``expiration`` entry describes the effective validity window and the
+    identity that signed the URL so callers can record or reconcile it.
+
+    ``generate_presigned_url`` is unchanged and still returns only the URL
+    string.
+    """
+    return _presign_url(
+        self, ClientMethod, Params, ExpiresIn, HttpMethod, True
     )
 
 
@@ -918,77 +1339,46 @@ def generate_presigned_post(
                     'policy': 'mybase64 encoded policy'
                 }
             }
+
+    The effective validity window is the smallest of ``ExpiresIn``, any
+    ``presign_expiration.max_expires_in`` configured for the operation, and
+    the remaining lifetime of the credentials used to sign. When
+    ``presign_expiration.strict`` is enabled, a window shorter than
+    ``presign_expiration.minimum_expires_in`` raises
+    :class:`~botocore.exceptions.PresignExpirationError` instead of issuing a
+    form that appears valid for longer.
+
+    To inspect the window that was actually granted, or the identity that
+    signed it, use
+    :meth:`~botocore.client.BaseClient.generate_presigned_post_with_metadata`.
     """
-    bucket = Bucket
-    key = Key
-    fields = Fields
-    conditions = Conditions
-    expires_in = ExpiresIn
-
-    if fields is None:
-        fields = {}
-    else:
-        fields = fields.copy()
-
-    if conditions is None:
-        conditions = []
-    else:
-        conditions = conditions.copy()
-
-    context = {
-        'is_presign_request': True,
-        'use_global_endpoint': _should_use_global_endpoint(self),
-    }
-
-    post_presigner = S3PostPresigner(self._request_signer)
-
-    # We choose the CreateBucket operation model because its url gets
-    # serialized to what a presign post requires.
-    operation_model = self.meta.service_model.operation_model('CreateBucket')
-    params = self._emit_api_params(
-        api_params={'Bucket': bucket},
-        operation_model=operation_model,
-        context=context,
-    )
-    bucket_is_arn = ArnParser.is_arn(params.get('Bucket', ''))
-    (
-        endpoint_url,
-        additional_headers,
-        properties,
-    ) = self._resolve_endpoint_ruleset(
-        operation_model,
-        params,
-        context,
-        ignore_signing_region=(not bucket_is_arn),
+    return _presign_post(
+        self, Bucket, Key, Fields, Conditions, ExpiresIn, False
     )
 
-    request_dict = self._convert_to_request_dict(
-        api_params=params,
-        operation_model=operation_model,
-        endpoint_url=endpoint_url,
-        context=context,
-        headers=additional_headers,
-        set_user_agent_header=False,
+
+def add_generate_presigned_post_with_metadata(class_attributes, **kwargs):
+    class_attributes['generate_presigned_post_with_metadata'] = (
+        generate_presigned_post_with_metadata
     )
 
-    # Append that the bucket name to the list of conditions.
-    conditions.append({'bucket': bucket})
 
-    # If the key ends with filename, the only constraint that can be
-    # imposed is if it starts with the specified prefix.
-    if key.endswith('${filename}'):
-        conditions.append(["starts-with", '$key', key[: -len('${filename}')]])
-    else:
-        conditions.append({'key': key})
+def generate_presigned_post_with_metadata(
+    self, Bucket, Key, Fields=None, Conditions=None, ExpiresIn=3600
+):
+    """Build a presigned post and report the window it actually grants
 
-    # Add the key to the fields.
-    fields['key'] = key
+    This takes the same arguments as ``generate_presigned_post``. The return
+    value is a dictionary with ``url``, ``fields``, and ``expiration`` keys.
+    ``url`` and ``fields`` have the same shape as ``generate_presigned_post``.
+    ``expiration`` describes the effective validity window and the identity
+    that signed the form.
 
-    return post_presigner.generate_presigned_post(
-        request_dict=request_dict,
-        fields=fields,
-        conditions=conditions,
-        expires_in=expires_in,
+    ``generate_presigned_post`` is unchanged and still returns only ``url``
+    and ``fields``.
+    """
+    return _presign_post(
+        self, Bucket, Key, Fields, Conditions, ExpiresIn, True
     )
 
 

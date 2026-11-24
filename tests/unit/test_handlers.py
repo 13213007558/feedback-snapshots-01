@@ -2109,9 +2109,9 @@ def test_set_auth_scheme_preference_signer(
     signature_version = handlers._set_auth_scheme_preference_signer(
         context, signing_name
     )
-    assert signature_version == expected_signature_version, (
-        f"Expected '{expected_signature_version}' but got '{signature_version}'"
-    )
+    assert (
+        signature_version == expected_signature_version
+    ), f"Expected '{expected_signature_version}' but got '{signature_version}'"
 
 
 @requires_crt()
@@ -2241,9 +2241,9 @@ def test_set_auth_scheme_preference_signer_with_bearer_token(
     signature_version = handlers._set_auth_scheme_preference_signer(
         context, signing_name
     )
-    assert signature_version == expected_signature_version, (
-        f"Expected '{expected_signature_version}' but got '{signature_version}'"
-    )
+    assert (
+        signature_version == expected_signature_version
+    ), f"Expected '{expected_signature_version}' but got '{signature_version}'"
 
 
 def test_map_oauth2_errors_adds_message():
@@ -2315,3 +2315,28 @@ def test_map_oauth2_errors_preserves_body(status_code, body):
 def test_map_oauth2_errors_does_not_raise(response_dict):
     # Should silently pass on malformed inputs
     handlers._map_oauth2_errors(response_dict)
+
+
+class TestUsePresignSigningIdentityForEndpoint(unittest.TestCase):
+    def test_overrides_account_id_with_captured_identity(self):
+        builtins = {
+            handlers.EndpointResolverBuiltins.ACCOUNT_ID: '111111111111'
+        }
+        identity = mock.Mock(account_id='222222222222')
+        handlers.use_presign_signing_identity_for_endpoint(
+            builtins=builtins, context={'signing_identity': identity}
+        )
+        self.assertEqual(
+            builtins[handlers.EndpointResolverBuiltins.ACCOUNT_ID],
+            '222222222222',
+        )
+
+    def test_leaves_builtins_untouched_without_identity(self):
+        sentinel = object()
+        builtins = {handlers.EndpointResolverBuiltins.ACCOUNT_ID: sentinel}
+        handlers.use_presign_signing_identity_for_endpoint(
+            builtins=builtins, context={}
+        )
+        self.assertIs(
+            builtins[handlers.EndpointResolverBuiltins.ACCOUNT_ID], sentinel
+        )

@@ -10,6 +10,7 @@
 # distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF
 # ANY KIND, either express or implied. See the License for the specific
 # language governing permissions and limitations under the License.
+import base64
 import datetime
 import json
 
@@ -20,11 +21,18 @@ import botocore
 import botocore.auth
 import botocore.awsrequest
 import botocore.session
+from botocore.compat import parse_qs, urlsplit
 from botocore.config import Config
-from botocore.credentials import Credentials, ReadOnlyCredentials
+from botocore.credentials import (
+    Credentials,
+    ReadOnlyCredentials,
+    RefreshableCredentials,
+)
 from botocore.exceptions import (
+    InvalidPresignExpirationConfigurationError,
     NoRegionError,
     ParamValidationError,
+    PresignExpirationError,
     UnknownClientMethodError,
     UnknownSignatureVersionError,
     UnsupportedSignatureVersionError,
@@ -36,6 +44,7 @@ from botocore.signers import (
     RequestSigner,
     S3PostPresigner,
     _dsql_generate_db_auth_token,
+    _snapshot_signing_identity,
     dsql_generate_db_connect_admin_auth_token,
     dsql_generate_db_connect_auth_token,
     generate_db_auth_token,
@@ -1277,3 +1286,629 @@ def test_generate_presigned_url_content_type_removal_for_polly(
         HttpMethod=request_method,
     )
     assert 'content-type' not in url.lower()
+
+
+class _FakeRefreshableCredentials(RefreshableCredentials):
+    """Test credential source with a controllable refresh outcome."""
+
+    def __init__(self, expiry, refresh_credentials=None):
+        self._current = refresh_credentials or ReadOnlyCredentials(
+            'AKID-CURRENT', 'secret-current', 'token-current'
+        )
+        self._current_expiry = expiry
+        self._refresh_credentials = refresh_credentials
+        self.refresh_calls = 0
+        self._time_fetcher = lambda: _FIXED_NOW
+        self._refresh_lock = __import__('threading').Lock()
+        self._expiry_time = expiry
+        self._frozen_credentials = self._current
+        self._staged_expiry_time = None
+        self._account_id = None
+        self._access_key = self._current.access_key
+        self._secret_key = self._current.secret_key
+        self._token = self._current.token
+        self._refresh_using = self._refresh
+        self.method = 'fake'
+
+    def _refresh(self):
+        if not self.refresh_needed():
+            return
+        self.refresh_calls += 1
+        if self._refresh_credentials is None:
+            # Refresh is restricted: the provider cannot hand out new
+            # credentials, so the old set stays in place.
+            return
+        self._current = self._refresh_credentials
+        self._frozen_credentials = self._current
+        self._expiry_time = _FIXED_NOW + datetime.timedelta(hours=1)
+        self._access_key = self._current.access_key
+        self._secret_key = self._current.secret_key
+        self._token = self._current.token
+
+
+_FIXED_NOW = datetime.datetime(2024, 11, 7, 17, 39, 33, tzinfo=tzutc())
+
+
+def _make_s3_client(credentials, config=None):
+    session = botocore.session.get_session()
+    session.set_credentials(
+        credentials.access_key,
+        credentials.secret_key,
+        credentials.token,
+        account_id=credentials.account_id,
+    )
+    client = session.create_client(
+        's3', region_name='us-east-1', config=config
+    )
+    client._request_signer._credentials = credentials
+    return client
+
+
+class TestPresignEffectiveExpiration(unittest.TestCase):
+    def setUp(self):
+        self.time_patch = mock.patch(
+            'botocore.signers.get_current_datetime',
+            return_value=_FIXED_NOW,
+        )
+        self.time_patch.start()
+        self.epoch_patch = mock.patch(
+            'botocore.auth.time.time',
+            return_value=_FIXED_NOW.timestamp(),
+        )
+        self.epoch_patch.start()
+
+    def tearDown(self):
+        self.epoch_patch.stop()
+        self.time_patch.stop()
+
+    def _credentials(self, lifetime_seconds, refresh_credentials=None):
+        expiry = _FIXED_NOW + datetime.timedelta(seconds=lifetime_seconds)
+        return _FakeRefreshableCredentials(expiry, refresh_credentials)
+
+    def test_url_expiration_is_capped_by_credential_lifetime(self):
+        credentials = self._credentials(30)
+        client = _make_s3_client(credentials)
+        result = client.generate_presigned_url_with_metadata(
+            'get_object',
+            Params={'Bucket': 'mybucket', 'Key': 'mykey'},
+            ExpiresIn=120,
+        )
+        self.assertEqual(result['expiration']['effective_expires_in'], 30)
+        self.assertEqual(result['expiration']['requested_expires_in'], 120)
+        self.assertEqual(
+            result['expiration']['credential_expires_at'],
+            _FIXED_NOW + datetime.timedelta(seconds=30),
+        )
+        # The signature must cover the capped window, not the requested one.
+        query = parse_qs(urlsplit(result['url']).query)
+        self.assertEqual(
+            int(query['Expires'][0]),
+            int(_FIXED_NOW.timestamp()) + 30,
+        )
+
+    def test_post_expiration_is_capped_by_credential_lifetime(self):
+        credentials = self._credentials(30)
+        client = _make_s3_client(credentials)
+        result = client.generate_presigned_post_with_metadata(
+            'mybucket', 'mykey', ExpiresIn=120
+        )
+        self.assertEqual(result['expiration']['effective_expires_in'], 30)
+        self.assertEqual(result['expiration']['requested_expires_in'], 120)
+        policy = json.loads(
+            base64.b64decode(result['fields']['policy']).decode('utf-8')
+        )
+        expiration = datetime.datetime.strptime(
+            policy['expiration'], '%Y-%m-%dT%H:%M:%SZ'
+        ).replace(tzinfo=tzutc())
+        self.assertEqual(
+            expiration,
+            _FIXED_NOW + datetime.timedelta(seconds=30),
+        )
+
+    def test_refreshable_credentials_refresh_before_presigning(self):
+        new_credentials = ReadOnlyCredentials(
+            'AKID-REFRESHED', 'secret-refreshed', 'token-refreshed'
+        )
+        credentials = self._credentials(30, new_credentials)
+        client = _make_s3_client(credentials)
+        result = client.generate_presigned_url_with_metadata(
+            'get_object',
+            Params={'Bucket': 'mybucket', 'Key': 'mykey'},
+            ExpiresIn=120,
+        )
+        self.assertGreaterEqual(credentials.refresh_calls, 1)
+        # The refreshed set has an hour left, so the request may use all of
+        # its requested 120 seconds.
+        self.assertEqual(result['expiration']['effective_expires_in'], 120)
+        self.assertEqual(result['expiration']['access_key'], 'AKID-REFRESHED')
+        query = parse_qs(urlsplit(result['url']).query)
+        self.assertEqual(query['AWSAccessKeyId'], ['AKID-REFRESHED'])
+
+    def test_restricted_refresh_limits_window_and_reports_old_identity(self):
+        credentials = self._credentials(30)
+        client = _make_s3_client(credentials)
+        result = client.generate_presigned_post_with_metadata(
+            'mybucket', 'mykey', ExpiresIn=120
+        )
+        self.assertGreaterEqual(credentials.refresh_calls, 1)
+        self.assertEqual(result['expiration']['effective_expires_in'], 30)
+        self.assertEqual(result['expiration']['access_key'], 'AKID-CURRENT')
+        self.assertEqual(result['fields']['AWSAccessKeyId'], 'AKID-CURRENT')
+
+    def test_strict_mode_refuses_insufficient_window(self):
+        credentials = self._credentials(30)
+        config = Config(
+            s3={
+                'presign_expiration': {
+                    'strict': True,
+                    'minimum_expires_in': 60,
+                }
+            }
+        )
+        client = _make_s3_client(credentials, config)
+        with self.assertRaises(PresignExpirationError):
+            client.generate_presigned_url(
+                'get_object',
+                Params={'Bucket': 'mybucket', 'Key': 'mykey'},
+                ExpiresIn=120,
+            )
+
+    def test_strict_mode_refuses_insufficient_window_for_post(self):
+        credentials = self._credentials(30)
+        config = Config(
+            s3={
+                'presign_expiration': {
+                    'strict': True,
+                    'minimum_expires_in': 60,
+                }
+            }
+        )
+        client = _make_s3_client(credentials, config)
+        with self.assertRaises(PresignExpirationError):
+            client.generate_presigned_post('mybucket', 'mykey', ExpiresIn=120)
+
+    def test_strict_mode_allows_sufficient_window(self):
+        credentials = self._credentials(3600)
+        config = Config(
+            s3={
+                'presign_expiration': {
+                    'strict': True,
+                    'minimum_expires_in': 60,
+                }
+            }
+        )
+        client = _make_s3_client(credentials, config)
+        result = client.generate_presigned_url_with_metadata(
+            'get_object',
+            Params={'Bucket': 'mybucket', 'Key': 'mykey'},
+            ExpiresIn=120,
+        )
+        self.assertEqual(result['expiration']['effective_expires_in'], 120)
+
+    def test_operation_max_expires_in_caps_each_operation(self):
+        credentials = self._credentials(3600)
+        config = Config(
+            s3={
+                'presign_expiration': {
+                    'max_expires_in': {'get_object': 60, 'put_object': 90}
+                }
+            }
+        )
+        client = _make_s3_client(credentials, config)
+        get_result = client.generate_presigned_url_with_metadata(
+            'get_object',
+            Params={'Bucket': 'mybucket', 'Key': 'mykey'},
+            ExpiresIn=300,
+        )
+        self.assertEqual(get_result['expiration']['effective_expires_in'], 60)
+        post_result = client.generate_presigned_post_with_metadata(
+            'mybucket', 'mykey', ExpiresIn=300
+        )
+        self.assertEqual(post_result['expiration']['effective_expires_in'], 90)
+
+    def test_operation_max_expires_in_wildcard(self):
+        credentials = self._credentials(3600)
+        config = Config(
+            s3={'presign_expiration': {'max_expires_in': {'*': 45}}}
+        )
+        client = _make_s3_client(credentials, config)
+        result = client.generate_presigned_url_with_metadata(
+            'get_object',
+            Params={'Bucket': 'mybucket', 'Key': 'mykey'},
+            ExpiresIn=300,
+        )
+        self.assertEqual(result['expiration']['effective_expires_in'], 45)
+
+    def test_long_lived_credentials_still_bounded_by_request(self):
+        credentials = ReadOnlyCredentials('AKID-LONG', 'secret-long', None)
+        client = _make_s3_client(credentials)
+        result = client.generate_presigned_url_with_metadata(
+            'get_object',
+            Params={'Bucket': 'mybucket', 'Key': 'mykey'},
+            ExpiresIn=120,
+        )
+        self.assertEqual(result['expiration']['effective_expires_in'], 120)
+        self.assertIsNone(result['expiration']['credential_expires_at'])
+
+    def test_legacy_url_return_value_is_unchanged(self):
+        credentials = self._credentials(30)
+        client = _make_s3_client(credentials)
+        result = client.generate_presigned_url(
+            'get_object',
+            Params={'Bucket': 'mybucket', 'Key': 'mykey'},
+            ExpiresIn=120,
+        )
+        self.assertIsInstance(result, str)
+
+    def test_legacy_post_return_value_is_unchanged(self):
+        credentials = self._credentials(30)
+        client = _make_s3_client(credentials)
+        result = client.generate_presigned_post(
+            'mybucket', 'mykey', ExpiresIn=120
+        )
+        self.assertEqual(set(result), {'url', 'fields'})
+        self.assertIsInstance(result['url'], str)
+        self.assertIsInstance(result['fields'], dict)
+
+
+class TestPresignExpirationConfig(unittest.TestCase):
+    def setUp(self):
+        self.session = botocore.session.get_session()
+        self.session.set_credentials('key', 'secret')
+
+    def test_invalid_presign_expiration_type(self):
+        with self.assertRaises(InvalidPresignExpirationConfigurationError):
+            self.session.create_client(
+                's3', config=Config(s3={'presign_expiration': 'strict'})
+            )
+
+    def test_invalid_presign_expiration_option(self):
+        with self.assertRaises(InvalidPresignExpirationConfigurationError):
+            self.session.create_client(
+                's3',
+                config=Config(
+                    s3={'presign_expiration': {'unknown_option': True}}
+                ),
+            )
+
+    def test_invalid_max_expires_in_type(self):
+        with self.assertRaises(InvalidPresignExpirationConfigurationError):
+            self.session.create_client(
+                's3',
+                config=Config(
+                    s3={
+                        'presign_expiration': {
+                            'max_expires_in': {'get_object': '60'}
+                        }
+                    }
+                ),
+            )
+
+    def test_invalid_minimum_expires_in(self):
+        with self.assertRaises(InvalidPresignExpirationConfigurationError):
+            self.session.create_client(
+                's3',
+                config=Config(
+                    s3={
+                        'presign_expiration': {
+                            'strict': True,
+                            'minimum_expires_in': -1,
+                        }
+                    }
+                ),
+            )
+
+
+class TestPresignSigningIdentity(unittest.TestCase):
+    def setUp(self):
+        self.fixed = datetime.datetime(2024, 11, 7, 17, 39, 33, tzinfo=tzutc())
+        self.time_patch = mock.patch(
+            'botocore.signers.get_current_datetime', return_value=self.fixed
+        )
+        self.time_patch.start()
+        self.epoch_patch = mock.patch(
+            'botocore.auth.time.time', return_value=self.fixed.timestamp()
+        )
+        self.epoch_patch.start()
+
+    def tearDown(self):
+        self.epoch_patch.stop()
+        self.time_patch.stop()
+
+    def _client(self, credentials):
+        session = botocore.session.get_session()
+        session.set_credentials('placeholder', 'placeholder')
+        client = session.create_client('s3', region_name='us-east-1')
+        client._request_signer._credentials = credentials
+        return client
+
+    def test_identity_expiry_and_signer_receive_same_window(self):
+        credentials = _FakeRefreshableCredentials(
+            self.fixed + datetime.timedelta(seconds=30)
+        )
+        client = self._client(credentials)
+        captured = {}
+
+        original = client._request_signer.generate_presigned_url
+
+        def capture(*args, **kwargs):
+            captured['expires_in'] = kwargs.get('expires_in')
+            captured['identity'] = kwargs.get('signing_identity')
+            return original(*args, **kwargs)
+
+        with mock.patch.object(
+            client._request_signer,
+            'generate_presigned_url',
+            side_effect=capture,
+        ):
+            result = client.generate_presigned_url_with_metadata(
+                'get_object',
+                Params={'Bucket': 'mybucket', 'Key': 'mykey'},
+                ExpiresIn=120,
+            )
+
+        self.assertEqual(
+            result['expiration']['effective_expires_in'],
+            captured['expires_in'],
+        )
+        self.assertEqual(captured['identity'].access_key, 'AKID-CURRENT')
+        self.assertEqual(
+            captured['identity'].expires_at,
+            result['expiration']['credential_expires_at'],
+        )
+        self.assertEqual(
+            result['expiration']['access_key'],
+            captured['identity'].access_key,
+        )
+
+    def test_signer_receives_snapshot_not_refreshed_identity(self):
+        # The provider can refresh between capturing the identity and
+        # signing. The signer must receive the captured snapshot, so the
+        # signature cannot silently switch to a different access key than the
+        # one the validity window was computed for.
+        stale = _FakeRefreshableCredentials(
+            self.fixed + datetime.timedelta(seconds=30)
+        )
+        client = self._client(stale)
+        captured = {}
+        original = client._request_signer.generate_presigned_url
+
+        def capture(*args, **kwargs):
+            stale._current = ReadOnlyCredentials(
+                'AKID-SECOND', 'secret-second', 'token-second'
+            )
+            stale._frozen_credentials = stale._current
+            captured['identity'] = kwargs.get('signing_identity')
+            captured['expires_in'] = kwargs.get('expires_in')
+            return original(*args, **kwargs)
+
+        with mock.patch.object(
+            client._request_signer,
+            'generate_presigned_url',
+            side_effect=capture,
+        ):
+            result = client.generate_presigned_url_with_metadata(
+                'get_object',
+                Params={'Bucket': 'mybucket', 'Key': 'mykey'},
+                ExpiresIn=60,
+            )
+
+        self.assertEqual(captured['identity'].access_key, 'AKID-CURRENT')
+        self.assertEqual(captured['expires_in'], 30)
+        self.assertEqual(result['expiration']['effective_expires_in'], 30)
+        self.assertEqual(result['expiration']['access_key'], 'AKID-CURRENT')
+
+    def test_signing_identity_is_used_by_auth(self):
+        credentials = Credentials(
+            'AKID-CURRENT', 'secret-current', 'token-current'
+        )
+        signer = RequestSigner(
+            ServiceId('s3'),
+            'us-east-1',
+            's3',
+            's3v4',
+            credentials,
+            mock.Mock(),
+        )
+        request = botocore.awsrequest.AWSRequest(
+            method='GET', url='https://mybucket.s3.amazonaws.com/mykey'
+        )
+        emitter = HierarchicalEmitter()
+        signer._event_emitter = emitter
+        identity = _snapshot_signing_identity(credentials)
+        signer.sign(
+            'GetObject',
+            request,
+            signing_type='presign-url',
+            expires_in=60,
+            signing_identity=identity,
+        )
+        self.assertEqual(
+            request.context.get('signing_access_key'), 'AKID-CURRENT'
+        )
+        self.assertIn('X-Amz-Expires=60', request.url)
+        self.assertIn('AKID-CURRENT', request.url)
+
+
+class TestPresignEndpointIdentity(unittest.TestCase):
+    def setUp(self):
+        self.fixed = datetime.datetime(2024, 11, 7, 17, 39, 33, tzinfo=tzutc())
+        self.time_patch = mock.patch(
+            'botocore.signers.get_current_datetime', return_value=self.fixed
+        )
+        self.time_patch.start()
+
+    def tearDown(self):
+        self.time_patch.stop()
+
+    def _client(self, credentials):
+        session = botocore.session.get_session()
+        session.set_credentials('placeholder', 'placeholder')
+        client = session.create_client('s3', region_name='us-east-1')
+        client._request_signer._credentials = credentials
+        return client
+
+    def test_endpoint_resolution_uses_frozen_account(self):
+        credentials = _FakeRefreshableCredentials(
+            self.fixed + datetime.timedelta(seconds=30)
+        )
+        credentials._account_id = '111111111111'
+        credentials._current = ReadOnlyCredentials(
+            'AKID-CURRENT', 'secret-current', 'token-current', '111111111111'
+        )
+        credentials._frozen_credentials = credentials._current
+        client = self._client(credentials)
+
+        observed = {}
+        original = client._resolve_endpoint_ruleset
+
+        def capture(*args, **kwargs):
+            # Simulate the provider refreshing between identity capture and
+            # endpoint resolution. The account the endpoint uses must remain
+            # the captured one.
+            credentials._account_id = '222222222222'
+            request_context = args[2]
+            observed['identity'] = request_context.get('signing_identity')
+            return original(*args, **kwargs)
+
+        with mock.patch.object(
+            client, '_resolve_endpoint_ruleset', side_effect=capture
+        ):
+            client.generate_presigned_url_with_metadata(
+                'get_object',
+                Params={'Bucket': 'mybucket', 'Key': 'mykey'},
+                ExpiresIn=30,
+            )
+
+        self.assertEqual(observed['identity'].account_id, '111111111111')
+
+
+class TestPresignSignatureCoversEffectiveWindow(unittest.TestCase):
+    def setUp(self):
+        self.fixed = datetime.datetime(2024, 11, 7, 17, 39, 33, tzinfo=tzutc())
+        self.time_patch = mock.patch(
+            'botocore.signers.get_current_datetime', return_value=self.fixed
+        )
+        self.time_patch.start()
+        self.epoch_patch = mock.patch(
+            'botocore.auth.time.time', return_value=self.fixed.timestamp()
+        )
+        self.epoch_patch.start()
+
+    def tearDown(self):
+        self.epoch_patch.stop()
+        self.time_patch.stop()
+
+    def _client(self, credentials, config=None):
+        session = botocore.session.get_session()
+        session.set_credentials('placeholder', 'placeholder')
+        client = session.create_client(
+            's3',
+            region_name='us-east-1',
+            config=config or Config(signature_version='s3v4'),
+        )
+        client._request_signer._credentials = credentials
+        return client
+
+    def test_sigv4_url_expires_matches_effective_window(self):
+        credentials = _FakeRefreshableCredentials(
+            self.fixed + datetime.timedelta(seconds=30)
+        )
+        client = self._client(credentials)
+        result = client.generate_presigned_url_with_metadata(
+            'get_object',
+            Params={'Bucket': 'mybucket', 'Key': 'mykey'},
+            ExpiresIn=120,
+        )
+        query = parse_qs(urlsplit(result['url']).query)
+        self.assertEqual(query['X-Amz-Expires'], ['30'])
+        self.assertIn('AKID-CURRENT', query['X-Amz-Credential'][0])
+
+    def test_sigv4_post_policy_matches_effective_window(self):
+        credentials = _FakeRefreshableCredentials(
+            self.fixed + datetime.timedelta(seconds=30)
+        )
+        client = self._client(credentials)
+        result = client.generate_presigned_post_with_metadata(
+            'mybucket', 'mykey', ExpiresIn=120
+        )
+        policy = json.loads(
+            base64.b64decode(result['fields']['policy']).decode('utf-8')
+        )
+        self.assertEqual(policy['expiration'], '2024-11-07T17:40:03Z')
+        self.assertEqual(
+            result['fields']['x-amz-credential'].split('/')[0],
+            'AKID-CURRENT',
+        )
+        self.assertEqual(result['expiration']['access_key'], 'AKID-CURRENT')
+
+
+class TestPresignStrictAfterRefresh(unittest.TestCase):
+    def setUp(self):
+        self.fixed = datetime.datetime(2024, 11, 7, 17, 39, 33, tzinfo=tzutc())
+        self.time_patch = mock.patch(
+            'botocore.signers.get_current_datetime', return_value=self.fixed
+        )
+        self.time_patch.start()
+
+    def tearDown(self):
+        self.time_patch.stop()
+
+    def _client(self, credentials, minimum):
+        session = botocore.session.get_session()
+        session.set_credentials('placeholder', 'placeholder')
+        client = session.create_client(
+            's3',
+            region_name='us-east-1',
+            config=Config(
+                s3={
+                    'presign_expiration': {
+                        'strict': True,
+                        'minimum_expires_in': minimum,
+                    }
+                }
+            ),
+        )
+        client._request_signer._credentials = credentials
+        return client
+
+    def test_strict_refuses_when_refreshed_credentials_still_short(self):
+        # The provider refreshes successfully, but the replacement set is
+        # itself close to expiry. Strict issuance must still refuse instead of
+        # producing a link that looks valid for the requested duration.
+        replacement = ReadOnlyCredentials(
+            'AKID-NEW', 'secret-new', 'token-new'
+        )
+        credentials = _FakeRefreshableCredentials(
+            self.fixed + datetime.timedelta(seconds=20), replacement
+        )
+        # Force the successor credentials to be short lived as well.
+        original_refresh = credentials._refresh
+
+        def short_lived_refresh():
+            original_refresh()
+            credentials._expiry_time = self.fixed + datetime.timedelta(
+                seconds=20
+            )
+
+        credentials._refresh = short_lived_refresh
+        client = self._client(credentials, minimum=60)
+        with self.assertRaises(PresignExpirationError):
+            client.generate_presigned_url(
+                'get_object',
+                Params={'Bucket': 'mybucket', 'Key': 'mykey'},
+                ExpiresIn=120,
+            )
+
+    def test_non_strict_issues_capped_window_after_restricted_refresh(self):
+        credentials = _FakeRefreshableCredentials(
+            self.fixed + datetime.timedelta(seconds=20)
+        )
+        client = self._client(credentials, minimum=60)
+        client.meta.config.s3['presign_expiration']['strict'] = False
+        result = client.generate_presigned_url_with_metadata(
+            'get_object',
+            Params={'Bucket': 'mybucket', 'Key': 'mykey'},
+            ExpiresIn=120,
+        )
+        self.assertEqual(result['expiration']['effective_expires_in'], 20)

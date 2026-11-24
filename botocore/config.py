@@ -16,6 +16,7 @@ from botocore.compat import OrderedDict
 from botocore.endpoint import DEFAULT_TIMEOUT, MAX_POOL_CONNECTIONS
 from botocore.exceptions import (
     InvalidMaxRetryAttemptsError,
+    InvalidPresignExpirationConfigurationError,
     InvalidRetryConfigurationError,
     InvalidRetryModeError,
     InvalidS3AddressingStyleError,
@@ -136,6 +137,29 @@ class Config:
         * ``s3_disable_express_session_auth`` -- Refers to whether to use S3
           Express session authentication. The value must be a boolean. If True, the
           client will NOT use S3 Express session authentication.
+
+          Defaults to None.
+
+        * ``presign_expiration`` -- Controls how the validity window of
+          presigned URLs and POST forms is computed. Valid keys are:
+
+          * ``strict`` -- When True, refuse to issue a presigned request
+            whose effective validity window is shorter than
+            ``minimum_expires_in`` instead of silently issuing something
+            that looks valid for longer. Defaults to False.
+
+          * ``minimum_expires_in`` -- The shortest effective validity
+            window, in seconds, that a presigned request may have while
+            ``strict`` is enabled. Defaults to 1.
+
+          * ``max_expires_in`` -- A mapping of client method names (for
+            example ``get_object`` or ``put_object``) to the maximum
+            validity, in seconds, that may be requested for that operation.
+            The special key ``*`` sets a maximum for all operations.
+
+          The effective validity window is always the smallest of the
+          requested ``ExpiresIn``, any operation maximum configured here,
+          and the remaining lifetime of the signing credentials.
 
           Defaults to None.
 
@@ -437,6 +461,76 @@ class Config:
                 raise InvalidS3AddressingStyleError(
                     s3_addressing_style=addressing_style
                 )
+            self._validate_presign_expiration_configuration(
+                s3.get('presign_expiration')
+            )
+
+    def _validate_presign_expiration_configuration(self, presign_expiration):
+        if presign_expiration is None:
+            return
+        if not isinstance(presign_expiration, dict):
+            raise InvalidPresignExpirationConfigurationError(
+                config_option='presign_expiration',
+                error_msg='the value must be a dictionary',
+            )
+        valid_options = {'strict', 'minimum_expires_in', 'max_expires_in'}
+        unknown_options = set(presign_expiration) - valid_options
+        if unknown_options:
+            raise InvalidPresignExpirationConfigurationError(
+                config_option='presign_expiration',
+                error_msg=(
+                    'unknown options '
+                    f'{sorted(unknown_options)}; valid options are '
+                    f'{sorted(valid_options)}'
+                ),
+            )
+        strict = presign_expiration.get('strict', False)
+        if not isinstance(strict, bool):
+            raise InvalidPresignExpirationConfigurationError(
+                config_option='presign_expiration.strict',
+                error_msg='the value must be a boolean',
+            )
+        minimum = presign_expiration.get('minimum_expires_in', 1)
+        if not isinstance(minimum, int) or isinstance(minimum, bool):
+            raise InvalidPresignExpirationConfigurationError(
+                config_option='presign_expiration.minimum_expires_in',
+                error_msg='the value must be an integer',
+            )
+        if minimum < 0:
+            raise InvalidPresignExpirationConfigurationError(
+                config_option='presign_expiration.minimum_expires_in',
+                error_msg='the value must be greater than or equal to 0',
+            )
+        max_expires_in = presign_expiration.get('max_expires_in')
+        if max_expires_in is not None:
+            if not isinstance(max_expires_in, dict):
+                raise InvalidPresignExpirationConfigurationError(
+                    config_option='presign_expiration.max_expires_in',
+                    error_msg='the value must be a dictionary',
+                )
+            for operation, value in max_expires_in.items():
+                if not isinstance(operation, str) or not operation:
+                    raise InvalidPresignExpirationConfigurationError(
+                        config_option='presign_expiration.max_expires_in',
+                        error_msg=(
+                            'operation names must be non-empty strings, '
+                            f'got {operation!r}'
+                        ),
+                    )
+                if not isinstance(value, int) or isinstance(value, bool):
+                    raise InvalidPresignExpirationConfigurationError(
+                        config_option=(
+                            f'presign_expiration.max_expires_in[{operation!r}]'
+                        ),
+                        error_msg='the value must be an integer',
+                    )
+                if value < 1:
+                    raise InvalidPresignExpirationConfigurationError(
+                        config_option=(
+                            f'presign_expiration.max_expires_in[{operation!r}]'
+                        ),
+                        error_msg='the value must be greater than or equal to 1',
+                    )
 
     def _validate_retry_configuration(self, retries):
         valid_options = ('max_attempts', 'mode', 'total_max_attempts')

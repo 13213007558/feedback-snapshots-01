@@ -65,7 +65,9 @@ from botocore.signers import (
     add_dsql_generate_db_auth_token_methods,
     add_generate_db_auth_token,
     add_generate_presigned_post,
+    add_generate_presigned_post_with_metadata,
     add_generate_presigned_url,
+    add_generate_presigned_url_with_metadata,
 )
 from botocore.useragent import register_feature_id
 from botocore.utils import (
@@ -1218,6 +1220,20 @@ def customize_endpoint_resolver_builtins(
         builtins[EndpointResolverBuiltins.AWS_S3_USE_GLOBAL_ENDPOINT] = True
 
 
+def use_presign_signing_identity_for_endpoint(builtins, context, **kwargs):
+    """Route account-based endpoints with the presigned request's identity.
+
+    Presigning captures one credential snapshot before endpoint resolution.
+    Overriding the account ID builtin with that snapshot keeps endpoint
+    selection from observing a different account than the one that will sign
+    the request if the credential provider refreshes mid-request.
+    """
+    signing_identity = context.get('signing_identity')
+    if signing_identity is None:
+        return
+    builtins[EndpointResolverBuiltins.ACCOUNT_ID] = signing_identity.account_id
+
+
 def remove_content_type_header_for_presigning(request, **kwargs):
     if (
         request.context.get('is_presign_request') is True
@@ -1520,7 +1536,15 @@ BUILTIN_HANDLERS = [
         REGISTER_LAST,
     ),
     ('creating-client-class', add_generate_presigned_url),
+    (
+        'creating-client-class',
+        add_generate_presigned_url_with_metadata,
+    ),
     ('creating-client-class.s3', add_generate_presigned_post),
+    (
+        'creating-client-class.s3',
+        add_generate_presigned_post_with_metadata,
+    ),
     ('creating-client-class.iot-data', check_openssl_supports_tls_version_1_2),
     ('creating-client-class.lex-runtime-v2', remove_lex_v2_start_conversation),
     ('creating-client-class.qbusiness', remove_qbusiness_chat),
@@ -1586,6 +1610,10 @@ BUILTIN_HANDLERS = [
     ('docs.response-example.s3.*.complete-section', document_expires_shape),
     ('docs.response-params.s3.*.complete-section', document_expires_shape),
     ('before-endpoint-resolution.s3', customize_endpoint_resolver_builtins),
+    (
+        'before-endpoint-resolution.s3',
+        use_presign_signing_identity_for_endpoint,
+    ),
     ('before-call', add_recursion_detection_header),
     ('before-call.s3', add_expect_header),
     ('before-call.glacier', add_glacier_version),

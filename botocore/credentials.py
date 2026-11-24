@@ -378,6 +378,16 @@ class Credentials:
             self.access_key, self.secret_key, self.token, self.account_id
         )
 
+    def get_frozen_credentials_with_expiry(self):
+        """Return an immutable credential set and its expiration time.
+
+        The returned tuple is a consistent snapshot: the credential values
+        and the expiration time always come from the same credential set.
+        Credentials without a known expiration return ``None`` as the
+        expiration time.
+        """
+        return self.get_frozen_credentials(), None
+
     def get_deferred_property(self, property_name):
         def get_property():
             return getattr(self, property_name, None)
@@ -706,6 +716,15 @@ class RefreshableCredentials(Credentials):
         """
         self._refresh()
         return self._frozen_credentials
+
+    def get_frozen_credentials_with_expiry(self):
+        self._refresh()
+        # The credential values and the expiration time are published
+        # together while holding this lock, so reading both while holding it
+        # guarantees they come from the same credential set, even if another
+        # thread refreshes concurrently.
+        with self._refresh_lock:
+            return self._frozen_credentials, self._expiry_time
 
 
 class DeferredRefreshableCredentials(RefreshableCredentials):

@@ -592,6 +592,29 @@ class InvalidS3AddressingStyleError(BotoCoreError):
     )
 
 
+class InvalidPresignExpirationConfigurationError(BotoCoreError):
+    """Error when invalid presigned expiration configuration is specified"""
+
+    fmt = (
+        'Invalid presigned expiration configuration for '
+        '"{config_option}": {error_msg}'
+    )
+
+
+class PresignExpirationError(BotoCoreError):
+    """Error raised when a presigned request cannot honor its validity window.
+
+    This is raised in strict issuance mode when the effective validity window
+    is shorter than the configured minimum. It is also raised when a validity
+    window cannot be determined from the signing identity.
+    """
+
+    fmt = (
+        'Cannot issue a presigned {presign_type} with a validity of '
+        '{requested_expires_in} seconds: {reason}'
+    )
+
+
 class UnsupportedS3ArnError(BotoCoreError):
     """Error when S3 ARN provided to Bucket parameter is not supported"""
 
