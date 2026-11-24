@@ -11,6 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `HTTP.nodelay` (and `HTTP::Session#nodelay`) now accepts an optional boolean,
   so `HTTP.nodelay(false)` disables `TCP_NODELAY` for a session. ([#863])
+- Digest authentication now supports the `auth-int` quality of protection,
+  binding the digest response to the exact request body bytes, and retries a
+  `stale=true` challenge once with the server's fresh nonce. Authenticated
+  retries replay the identical body; one-shot bodies (pipes, enumerables) that
+  cannot be rewound or buffered raise `HTTP::UnrewindableBodyError` instead of
+  being silently truncated. `HTTP::Request::Body` gains `#rewindable?` and
+  `#read_all` to back these contracts.
 
 ### Changed
 

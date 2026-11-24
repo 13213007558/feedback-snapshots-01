@@ -17,6 +17,11 @@ module HTTP
   # Generic Request error
   class RequestError < Error; end
 
+  # Raised when a request body must be replayed (for an authenticated
+  # retry, or a body-integrity digest) but its source cannot be read more
+  # than once. Rewind the IO or buffer the body before sending.
+  class UnrewindableBodyError < RequestError; end
+
   # Generic Response error
   class ResponseError < Error; end
 

@@ -315,4 +315,78 @@ class HTTPRequestBodyTest < Minitest::Test
 
     assert_equal 12, result
   end
+  # #rewindable?
+
+  def test_rewindable_when_body_is_nil_returns_true
+    assert_predicate build_body(nil), :rewindable?
+  end
+
+  def test_rewindable_when_body_is_a_string_returns_true
+    assert_predicate build_body("payload"), :rewindable?
+  end
+
+  def test_rewindable_when_body_is_a_seekable_io_returns_true_and_rewinds_it
+    io = StringIO.new("payload")
+    io.read(3)
+
+    assert_predicate build_body(io), :rewindable?
+    assert_equal 0, io.pos
+  end
+
+  def test_rewindable_when_body_is_a_pipe_returns_false
+    reader, writer = IO.pipe
+    writer << "data"
+
+    refute_predicate build_body(reader), :rewindable?
+  ensure
+    reader&.close
+    writer&.close
+  end
+
+  def test_rewindable_when_body_is_an_enumerable_returns_false
+    refute_predicate build_body(%w[bees cows]), :rewindable?
+  end
+
+  def test_rewindable_when_io_rewind_raises_other_error_propagates
+    io = Object.new
+    def io.read(*) = ""
+    def io.rewind
+      raise IOError, "closed stream"
+    end
+
+    assert_raises(IOError) { build_body(io).rewindable? }
+  end
+
+  # #read_all
+
+  def test_read_all_when_body_is_nil_returns_empty_string
+    assert_equal "", build_body(nil).read_all
+  end
+
+  def test_read_all_when_body_is_a_string_returns_a_copy
+    source = "payload"
+    result = build_body(source).read_all
+
+    assert_equal "payload", result
+    refute_same source, result
+  end
+
+  def test_read_all_when_body_is_a_seekable_io_returns_content_and_rewinds
+    io = StringIO.new("payload")
+    subject = build_body(io)
+
+    assert_equal "payload", subject.read_all
+    assert_equal 0, io.pos
+    assert_equal "payload", subject.read_all
+  end
+
+  def test_read_all_when_body_is_an_enumerable_concatenates_chunks
+    assert_equal "beescows", build_body(%w[bees cows]).read_all
+  end
+
+  def test_read_all_returns_binary_encoded_string
+    result = build_body("héllo").read_all
+
+    assert_equal Encoding::BINARY, result.encoding
+  end
 end

@@ -99,6 +99,58 @@ module HTTP
         self
       end
 
+      # Whether the source can be safely consumed more than once
+      #
+      # Strings and empty bodies are always replayable. An IO is replayable
+      # only when it actually rewinds (pipes and other non-seekable streams
+      # respond to `#rewind` but raise *ESPIPE*/*EPIPE*). Enumerables and other
+      # one-shot sources are never replayable: even though an Enumerator
+      # responds to `#rewind`, doing so only resets its internal cursor and
+      # cannot restore bytes that were already consumed.
+      #
+      # A successful check leaves seekable IOs positioned at the start.
+      #
+      # @example
+      #   body.rewindable? # => true
+      #
+      # @return [Boolean]
+      # @api public
+      def rewindable?
+        return true if @source.nil? || @source.is_a?(String)
+        return false unless @source.respond_to?(:read) && @source.respond_to?(:rewind)
+
+        @source.rewind
+        true
+      rescue Errno::ESPIPE, Errno::EPIPE
+        false
+      end
+
+      # Reads the complete body into a binary String
+      #
+      # Seekable IO sources are rewound after reading so the same bytes can
+      # be streamed again. Only call this for bodies where {#rewindable?} is
+      # true, since one-shot sources cannot be restored afterwards.
+      #
+      # @example
+      #   body.read_all # => "full request payload"
+      #
+      # @return [String]
+      # @api public
+      def read_all
+        return "".b if @source.nil?
+        return @source.dup.force_encoding(Encoding::BINARY) if @source.is_a?(String)
+
+        if @source.respond_to?(:read)
+          data = @source.read
+          rewind(@source)
+          return data.to_s.force_encoding(Encoding::BINARY)
+        end
+
+        buffer = "".b
+        @source.each { |chunk| buffer << chunk }
+        buffer
+      end
+
       # Check equality based on source
       #
       # @example

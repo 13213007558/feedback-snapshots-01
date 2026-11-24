@@ -551,6 +551,7 @@ module HTTP
     class DigestAuth < Feature
       ALGORITHMS: Hash[String, singleton(Digest::MD5) | singleton(Digest::SHA256)]
       WWW_AUTHENTICATE: String
+      MAX_AUTH_ATTEMPTS: Integer
 
       @user: String
       @pass: String
@@ -562,12 +563,14 @@ module HTTP
 
       def digest_challenge?: (Response response) -> bool
       def authorize: (Request request, Response response) -> Request
+      def ensure_replayable!: (Request request, String? qop) -> void
       def parse_challenge: (String header) -> Hash[String, String]
-      def build_auth: (Request request, Hash[String, String] challenge) -> String
+      def build_auth: (Request request, Hash[String, String] challenge, ?String? qop) -> String
+      def entity_hash: (String algorithm, Request request, String? qop) -> String?
       def compute_auth_header: (algorithm: String, qop: String?, nonce: String, cnonce: String, nonce_count: String, uri: String, ha1: String, ha2: String, challenge: Hash[String, String]) -> String
       def select_qop: (String? qop_str) -> String?
       def compute_ha1: (String algorithm, String realm, String nonce, String cnonce) -> String
-      def compute_ha2: (String algorithm, String method, String uri) -> String
+      def compute_ha2: (String algorithm, String method, String uri, ?entity_hash: String?) -> String
       def compute_response: (String algorithm, String ha1, String ha2, nonce: String, nonce_count: String, cnonce: String, qop: String?) -> String
       def hex_digest: (String algorithm, String data) -> String
       def build_header: (username: String, realm: String, nonce: String, uri: String, qop: String?, nonce_count: String, cnonce: String, response: String, opaque: String?, algorithm: String) -> String
@@ -902,6 +905,8 @@ module HTTP
       def loggable?: () -> bool
       def size: () -> Integer
       def each: () { (String) -> void } -> self
+      def rewindable?: () -> bool
+      def read_all: () -> String
       def ==: (untyped other) -> bool
 
       private
@@ -1462,6 +1467,9 @@ module HTTP
   end
 
   class RequestError < Error
+  end
+
+  class UnrewindableBodyError < RequestError
   end
 
   class ResponseError < Error

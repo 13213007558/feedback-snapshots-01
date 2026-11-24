@@ -993,4 +993,124 @@ class HTTPFeaturesDigestAuthTest < Minitest::Test
   def test_feature_registration_is_a_feature
     assert_kind_of HTTP::Feature, feature
   end
+
+  # -- authenticated retry loop and attempt bound --
+
+  def test_around_request_retries_once_with_a_fresh_nonce_when_stale
+    stale_challenge = 'Digest realm="test", nonce="oldnonce", qop="auth", stale=true'
+    fresh_challenge = 'Digest realm="test", nonce="newnonce", qop="auth"'
+    seen = []
+    call_count = 0
+
+    feature.around_request(request) do |req|
+      call_count += 1
+      seen << req.headers["Authorization"]
+      case call_count
+      when 1
+        build_response(status: 401, headers: { "WWW-Authenticate" => stale_challenge })
+      when 2
+        build_response(status: 401, headers: { "WWW-Authenticate" => fresh_challenge })
+      else
+        build_response(status: 200)
+      end
+    end
+
+    assert_nil seen[0]
+    assert_includes seen[1], 'nonce="oldnonce"'
+    assert_includes seen[2], 'nonce="newnonce"'
+    assert_equal 3, call_count
+  end
+
+  def test_around_request_raises_state_error_after_max_authenticated_attempts
+    challenge = 'Digest realm="test", nonce="n", qop="auth"'
+    call_count = 0
+
+    assert_raises(HTTP::StateError) do
+      feature.around_request(request) do |_req|
+        call_count += 1
+        build_response(status: 401, headers: { "WWW-Authenticate" => challenge })
+      end
+    end
+
+    # Initial attempt plus the bounded number of authenticated attempts.
+    assert_equal 1 + HTTP::Features::DigestAuth::MAX_AUTH_ATTEMPTS, call_count
+  end
+
+  # -- one-shot body contract --
+
+  def test_authorize_blocks_a_pipe_body_from_being_replayed
+    reader, writer = IO.pipe
+    writer.write("data")
+    writer.close
+    post = HTTP::Request.new(verb: :post, uri: "http://example.com/upload", body: reader)
+    response = build_response(status: 401, headers: { "WWW-Authenticate" => challenge_header })
+
+    error = assert_raises(HTTP::UnrewindableBodyError) do
+      feature.around_request(post) { |_req| response }
+    end
+
+    assert_match(/one-shot request body/, error.message)
+  ensure
+    reader&.close
+  end
+
+  def test_authorize_blocks_a_pipe_body_from_auth_int_hash
+    reader, writer = IO.pipe
+    writer.write("data")
+    writer.close
+    post = HTTP::Request.new(verb: :post, uri: "http://example.com/upload", body: reader)
+    header = 'Digest realm="test", nonce="abc", qop="auth-int"'
+    response = build_response(status: 401, headers: { "WWW-Authenticate" => header })
+
+    error = assert_raises(HTTP::UnrewindableBodyError) do
+      feature.around_request(post) { |_req| response }
+    end
+
+    assert_match(/auth-int body hash/, error.message)
+  ensure
+    reader&.close
+  end
+
+  def test_authorize_allows_a_rewindable_io_body_to_be_authorized
+    require "stringio"
+    post = HTTP::Request.new(
+      verb: :post, uri: "http://example.com/upload", body: StringIO.new("data")
+    )
+    retried = perform_digest_challenge(feature, post, challenge_header)
+
+    assert_includes retried.headers["Authorization"], "Digest "
+  end
+
+  # -- auth-int quality of protection --
+
+  def test_auth_int_ha2_includes_the_entity_body_hash
+    body_hash = Digest::MD5.hexdigest("data")
+    expected = Digest::MD5.hexdigest("POST:/upload:#{body_hash}")
+    ha2 = feature.send(:compute_ha2, "MD5", "POST", "/upload", entity_hash: body_hash)
+
+    assert_equal expected, ha2
+  end
+
+  def test_auth_int_builds_response_over_the_request_body
+    require "stringio"
+    post = HTTP::Request.new(
+      verb: :post, uri: "http://example.com/upload", body: StringIO.new("data")
+    )
+    header = 'Digest realm="test", nonce="abc", qop="auth-int"'
+
+    SecureRandom.stub(:hex, "fixedcnonce0000x") do
+      retried = perform_digest_challenge(feature, post, header)
+      auth = retried.headers["Authorization"]
+
+      assert_match(/qop=auth-int,/, auth)
+      entity = Digest::MD5.hexdigest("data")
+      ha1 = Digest::MD5.hexdigest("admin:test:secret")
+      ha2 = Digest::MD5.hexdigest("POST:/upload:#{entity}")
+      expected = Digest::MD5.hexdigest(
+        "#{ha1}:abc:00000001:fixedcnonce0000x:auth-int:#{ha2}"
+      )
+
+      assert_includes auth, %(response="#{expected}")
+    end
+  end
 end
