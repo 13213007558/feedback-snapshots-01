@@ -36,6 +36,11 @@ class DuplicateFilter(logging.Filter):
     Currently applied to `logger`s on the export logs path to prevent endlessly logging the same log
     in cases where logging itself is failing."""
 
+    def __init__(self) -> None:
+        super().__init__()
+        self._lock = threading.Lock()
+        self.last_log: tuple[object, ...] | None = None
+
     def filter(self, record):
         current_log = (
             record.module,
@@ -46,11 +51,12 @@ class DuplicateFilter(logging.Filter):
             # it filters out useful logs.
             time.time() // 20,
         )
-        if current_log != getattr(self, "last_log", None):
-            self.last_log = current_log  # pylint: disable=attribute-defined-outside-init
-            return True
-        # False means python's `logging` module will no longer process this log.
-        return False
+        with self._lock:
+            if current_log == self.last_log:
+                # False means python's `logging` module will no longer process this log.
+                return False
+            self.last_log = current_log
+        return True
 
 
 class BatchExportStrategy(enum.Enum):
@@ -74,6 +80,8 @@ class Exporter(Protocol[Telemetry]):
 
 _logger = logging.getLogger(__name__)
 _logger.addFilter(DuplicateFilter())
+
+_MAX_EXPORT_ATTEMPTS = 3
 
 
 class BatchProcessor(Generic[Telemetry]):
@@ -189,10 +197,16 @@ class BatchProcessor(Generic[Telemetry]):
                 # Record on submission to the exporter.
                 self._metrics.finish_items(count)
                 try:
-                    self._exporter.export(batch)
-                except Exception:  # pylint: disable=broad-exception-caught
-                    _logger.exception("Exception while exporting %s.", self._exporting)
-                detach(token)
+                    for attempt in range(_MAX_EXPORT_ATTEMPTS):
+                        try:
+                            self._exporter.export(batch)
+                            break
+                        except Exception:  # pylint: disable=broad-exception-caught
+                            _logger.exception("Exception while exporting %s.", self._exporting)
+                            if attempt + 1 == _MAX_EXPORT_ATTEMPTS or self._shutdown_timeout_exceeded:
+                                break
+                finally:
+                    detach(token)
 
     def emit(self, data: Telemetry) -> None:
         if self._shutdown:

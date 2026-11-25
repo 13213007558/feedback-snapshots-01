@@ -35,6 +35,10 @@ from opentelemetry.sdk._logs.export import (
     LogRecordExportResult,
     SimpleLogRecordProcessor,
 )
+from opentelemetry.sdk._shared_internal import (
+    _logger as shared_batch_logger,
+    DuplicateFilter,
+)
 from opentelemetry.sdk.environment_variables import (
     OTEL_BLRP_EXPORT_TIMEOUT,
     OTEL_BLRP_MAX_EXPORT_BATCH_SIZE,
@@ -519,6 +523,122 @@ class TestBatchLogRecordProcessor(unittest.TestCase):
         # Wait a bit for logs to flush.
         time.sleep(2)
         assert len(exporter.get_finished_logs()) == total_expected_logs
+
+    def test_export_failure_diagnostic_loop_is_isolated_across_threads(self):
+        acceptance_lock = threading.Lock()
+        acceptance_record = {"diagnostics": [], "export_batches": []}
+        first_export_started = threading.Event()
+        release_first_export = threading.Event()
+
+        class FailTwiceExporter(InMemoryLogRecordExporter):
+            def __init__(self):
+                super().__init__()
+                self.failures = 0
+
+            def export(self, batch):
+                bodies = [record.log_record.body for record in batch]
+                with acceptance_lock:
+                    acceptance_record["export_batches"].append(bodies)
+                    export_attempt = len(acceptance_record["export_batches"])
+                if export_attempt == 1:
+                    first_export_started.set()
+                    if not release_first_export.wait(5):
+                        raise TimeoutError("test did not release the first export")
+                if self.failures < 2:
+                    self.failures += 1
+                    raise RuntimeError("controlled export failure")
+                return super().export(batch)
+
+        class DiagnosticRecorder(logging.Handler):
+            def emit(self, record):
+                with acceptance_lock:
+                    acceptance_record["diagnostics"].append(record.getMessage())
+
+        exporter = FailTwiceExporter()
+        provider = LoggerProvider()
+        processor = BatchLogRecordProcessor(
+            exporter,
+            schedule_delay_millis=30000,
+            max_export_batch_size=1,
+            max_queue_size=20,
+        )
+        provider.add_log_record_processor(processor)
+        otel_handler = LoggingHandler(level=logging.INFO, logger_provider=provider)
+        diagnostic_handler = DiagnosticRecorder(level=logging.ERROR)
+        business_logger = logging.getLogger("acceptance.export_failure_loop")
+        duplicate_filter = next(
+            candidate for candidate in shared_batch_logger.filters if isinstance(candidate, DuplicateFilter)
+        )
+        duplicate_filter.last_log = None
+        old_propagate = business_logger.propagate
+        old_level = business_logger.level
+        business_logger.propagate = False
+        business_logger.setLevel(logging.INFO)
+        business_logger.addHandler(otel_handler)
+        shared_batch_logger.addHandler(otel_handler)
+        shared_batch_logger.addHandler(diagnostic_handler)
+
+        try:
+            business_logger.warning("business-trigger")
+            assert first_export_started.wait(5)
+
+            def record_from_other_thread():
+                business_logger.warning("independent-business-event")
+
+            worker = threading.Thread(target=record_from_other_thread)
+            worker.start()
+            worker.join(5)
+            assert not worker.is_alive()
+            release_first_export.set()
+
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                bodies = [record.log_record.body for record in exporter.get_finished_logs()]
+                if "business-trigger" in bodies and "independent-business-event" in bodies:
+                    break
+                time.sleep(0.01)
+            else:
+                self.fail("business records were not exported after recovery")
+
+            assert provider.force_flush(5000)
+            deadline = time.time() + 5
+            while time.time() < deadline and processor._batch_processor._queue:
+                time.sleep(0.01)
+            assert not processor._batch_processor._queue
+        finally:
+            release_first_export.set()
+            business_logger.removeHandler(otel_handler)
+            shared_batch_logger.removeHandler(otel_handler)
+            shared_batch_logger.removeHandler(diagnostic_handler)
+            business_logger.propagate = old_propagate
+            business_logger.setLevel(old_level)
+            provider.shutdown()
+
+        finished_records = exporter.get_finished_logs()
+        business_records = [
+            record
+            for record in finished_records
+            if record.instrumentation_scope is not None and record.instrumentation_scope.name == business_logger.name
+        ]
+        diagnostic_records = [
+            record
+            for record in finished_records
+            if record.instrumentation_scope is not None
+            and record.instrumentation_scope.name == shared_batch_logger.name
+        ]
+        business_bodies = [record.log_record.body for record in business_records]
+
+        assert business_bodies == ["business-trigger", "independent-business-event"]
+        assert len(diagnostic_records) == 1
+        assert diagnostic_records[0].log_record.body == "Exception while exporting Log."
+        assert len(acceptance_record["diagnostics"]) == 1
+        assert exporter.failures == 2
+        assert not processor._batch_processor._queue
+        assert acceptance_record["export_batches"][:3] == [
+            ["business-trigger"],
+            ["business-trigger"],
+            ["business-trigger"],
+        ]
 
     def test_args(self):
         exporter = InMemoryLogRecordExporter()

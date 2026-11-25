@@ -27,6 +27,7 @@ from opentelemetry.sdk._logs.export import (
     BatchLogRecordProcessor,
 )
 from opentelemetry.sdk._shared_internal import (
+    _MAX_EXPORT_ATTEMPTS,
     DuplicateFilter,
 )
 from opentelemetry.sdk.trace import ReadableSpan
@@ -303,6 +304,43 @@ class TestBatchProcessor:
         os.close(r_fd)
 
         assert "TypeError" not in child_stderr
+
+    def test_failed_export_batch_is_retried_until_recovery(self, batch_processor_class, telemetry):
+        exporter = Mock()
+        exporter.export.side_effect = [RuntimeError("first failure"), RuntimeError("second failure"), None]
+        processor = batch_processor_class(
+            exporter,
+            max_queue_size=10,
+            max_export_batch_size=1,
+            schedule_delay_millis=30000,
+        )
+        processor._batch_processor._queue.append(telemetry)
+
+        processor._batch_processor.force_flush()
+
+        assert exporter.export.call_count == 3
+        exported_batch = exporter.export.call_args_list[0].args[0]
+        for call in exporter.export.call_args_list:
+            assert call.args[0] is exported_batch
+        assert len(processor._batch_processor._queue) == 0
+        processor.shutdown()
+
+    def test_persistent_export_failure_has_bounded_retries(self, batch_processor_class, telemetry):
+        exporter = Mock()
+        exporter.export.side_effect = RuntimeError("persistent failure")
+        processor = batch_processor_class(
+            exporter,
+            max_queue_size=10,
+            max_export_batch_size=1,
+            schedule_delay_millis=30000,
+        )
+        processor._batch_processor._queue.append(telemetry)
+
+        processor._batch_processor.force_flush()
+
+        assert exporter.export.call_count == _MAX_EXPORT_ATTEMPTS
+        assert len(processor._batch_processor._queue) == 0
+        processor.shutdown()
 
     def test_shutdown_allows_1_export_to_finish(self, batch_processor_class, telemetry):
         # This exporter throws an exception if it's export sleep cannot finish.
