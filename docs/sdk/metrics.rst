@@ -6,6 +6,7 @@ Submodules
 
 .. toctree::
 
+   metrics.cardinality_accounting
    metrics.export
    metrics.view
 
