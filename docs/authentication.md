@@ -159,6 +159,42 @@ client = await kr8s.asyncio.api(context="foo-context")
 
 `````
 
+#### Atomic endpoint, CA and credential rotation
+
+A cluster migration can change the server URL, certificate authority and user source together. Treat those values as one revision: write a complete candidate kubeconfig to a temporary file in the same directory, validate it against the new cluster, then use `os.replace()` (or `mv -f`) to promote it atomically. A direct in-place write can allow kr8s to read a partially written YAML file.
+
+kr8s loads the kubeconfig when a client is created and when reauthentication runs. A healthy HTTP session keeps its base URL, authorization header and TLS context until that session is recreated, so an already-running caller continues using the old complete configuration until you restart it or call `reauthenticate()`. Reauthentication builds a complete candidate snapshot before publishing it; if loading fails, the last successful snapshot remains active.
+
+`````{tab-set}
+
+````{tab-item} Sync
+:sync: sync
+```python
+import kr8s
+
+client = kr8s.api(kubeconfig="/path/to/kube/config")
+# Atomically promote the validated candidate, then:
+client.reauthenticate()
+```
+````
+
+````{tab-item} Async
+:sync: async
+```python
+import kr8s.asyncio
+
+client = await kr8s.asyncio.api(kubeconfig="/path/to/kube/config")
+# Atomically promote the validated candidate, then:
+await client.reauthenticate()
+```
+````
+
+`````
+
+If `KUBECONFIG` contains multiple paths, replacing those files separately is not one atomic transaction. Put the migrated context, cluster and user in one kubeconfig file for the cutover, or change the client's explicit `kubeconfig` argument and create a new client/process.
+
+A repeatable, port-free `httpx.MockTransport` timing check is available at `scripts/verify_kubeconfig_migration.py`. It records when requests use the old revision, when they use the new revision, and how a corrupt promoted file is restored.
+
 ### Service Account
 
 When running inside a Pod with a service account, credentials will be mounted into `/var/run/secrets/kubernetes.io/serviceaccount` so `kr8s` will also check there. However you can specify an alternate path if you know that service account style credentials are stored elsewhere.

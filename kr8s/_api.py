@@ -93,6 +93,7 @@ class Api:
             namespace=kwargs.get("namespace"),
             context=kwargs.get("context"),
         )
+        self._auth_snapshot = self.auth.snapshot
         thread_id = threading.get_ident()
         try:
             loop_id = id(asyncio.get_running_loop())
@@ -122,22 +123,25 @@ class Api:
         if self._session:
             self._session.timeout = value
 
-    async def _create_session(self) -> None:
+    async def _create_session(self) -> httpx.AsyncClient:
+        auth = await self.auth.consistent_snapshot()
+        self._auth_snapshot = auth
         headers = {"User-Agent": self.__version__, "content-type": "application/json"}
-        if self.auth.token:
-            headers["Authorization"] = f"Bearer {self.auth.token}"
+        if auth.token:
+            headers["Authorization"] = f"Bearer {auth.token}"
         if self._session:
             with contextlib.suppress(RuntimeError):
                 await self._session.aclose()
             self._session = None
         self._session = httpx.AsyncClient(
-            base_url=self.auth.server,
+            base_url=auth.server,
             headers=headers,
-            verify=await self.auth.ssl_context(),
+            verify=await auth.ssl_context(),
             timeout=self._timeout,
             follow_redirects=True,
-            proxy=self.auth.proxy,
+            proxy=auth.proxy_url,
         )
+        return self._session
 
     def _construct_url(
         self,
@@ -174,19 +178,26 @@ class Api:
         **kwargs,
     ) -> AsyncGenerator[httpx.Response]:
         """Make a Kubernetes API request."""
-        if not self._session or self._session.is_closed:
-            await self._create_session()
+        session = self._session
+        if not session or session.is_closed:
+            session = await self._create_session()
         url = self._construct_url(version, base, namespace, url)
         kwargs.update(url=url, method=method)
-        if self.auth.tls_server_name:
-            kwargs["extensions"] = {"sni_hostname": self.auth.tls_server_name}
+        auth_snapshot = self._auth_snapshot
+        base_extensions = dict(kwargs.get("extensions") or {})
         auth_attempts = 0
         ssl_attempts = 0
         while True:
+            request_extensions = dict(base_extensions)
+            if auth_snapshot.tls_server_name:
+                request_extensions["sni_hostname"] = auth_snapshot.tls_server_name
+            if request_extensions:
+                kwargs["extensions"] = request_extensions
+            else:
+                kwargs.pop("extensions", None)
             try:
                 if stream:
-                    assert self._session
-                    async with self._session.stream(**kwargs) as response:
+                    async with session.stream(**kwargs) as response:
                         if response.is_error and raise_for_status:
                             # NOTE: Avoid `httpx.ResponseNotRead` w/ streaming requests
                             # https://github.com/encode/httpx/discussions/1856#discussioncomment-1316674
@@ -194,8 +205,7 @@ class Api:
                             response.raise_for_status()
                         yield response
                 else:
-                    assert self._session
-                    response = await self._session.request(**kwargs)
+                    response = await session.request(**kwargs)
                     if raise_for_status:
                         response.raise_for_status()
                     yield response
@@ -208,7 +218,8 @@ class Api:
                     )
                     auth_attempts += 1
                     await self.auth.reauthenticate()
-                    await self._create_session()
+                    session = await self._create_session()
+                    auth_snapshot = self._auth_snapshot
                     continue
                 else:
                     if e.response.status_code >= 400 and e.response.status_code < 500:
@@ -234,7 +245,8 @@ class Api:
                 if ssl_attempts < 3:
                     ssl_attempts += 1
                     await self.auth.reauthenticate()
-                    await self._create_session()
+                    session = await self._create_session()
+                    auth_snapshot = self._auth_snapshot
                     continue
                 else:
                     raise
@@ -254,18 +266,26 @@ class Api:
         **kwargs,
     ) -> AsyncGenerator[httpx_ws.AsyncWebSocketSession]:
         """Open a websocket connection to a Kubernetes API endpoint."""
-        if not self._session or self._session.is_closed:
-            await self._create_session()
+        session = self._session
+        if not session or session.is_closed:
+            session = await self._create_session()
         url = self._construct_url(version, base, namespace, url)
         kwargs.update(url=url)
-        if self.auth.tls_server_name:
-            kwargs["extensions"] = {"sni_hostname": self.auth.tls_server_name}
+        auth_snapshot = self._auth_snapshot
+        base_extensions = dict(kwargs.get("extensions") or {})
         auth_attempts = 0
         while True:
+            request_extensions = dict(base_extensions)
+            if auth_snapshot.tls_server_name:
+                request_extensions["sni_hostname"] = auth_snapshot.tls_server_name
+            if request_extensions:
+                kwargs["extensions"] = request_extensions
+            else:
+                kwargs.pop("extensions", None)
             try:
                 with _httpx_ws_exception_fixer():
                     async with httpx_ws.aconnect_ws(
-                        client=self._session, **kwargs
+                        client=session, **kwargs
                     ) as response:
                         yield response
             except httpx_ws.WebSocketDisconnect as e:
@@ -273,6 +293,8 @@ class Api:
                     if e.code in (401, 403) and auth_attempts < 3:
                         auth_attempts += 1
                         await self.auth.reauthenticate()
+                        session = await self._create_session()
+                        auth_snapshot = self._auth_snapshot
                         continue
                     else:
                         raise
@@ -330,7 +352,9 @@ class Api:
         return await self.async_reauthenticate()
 
     async def async_reauthenticate(self) -> None:
+        """Reload credentials and make the next request use the new snapshot."""
         await self.auth.reauthenticate()
+        await self._create_session()
 
     async def whoami(self):
         """Retrieve the subject that's currently authenticated.

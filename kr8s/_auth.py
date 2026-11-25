@@ -7,6 +7,7 @@ import logging
 import os
 import pathlib
 import ssl
+from dataclasses import dataclass
 from typing import Optional, Union
 
 import anyio
@@ -16,6 +17,44 @@ from ._config import KubeConfigSet
 from ._types import PathType
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class AuthSnapshot:
+    """An immutable set of connection settings loaded from one config revision."""
+
+    server: str = ""
+    token: Optional[str] = None
+    client_cert_file: Optional[PathType] = None
+    client_key_file: Optional[PathType] = None
+    server_ca_file: Optional[PathType] = None
+    tls_server_name: Optional[str] = None
+    insecure_skip_tls_verify: bool = False
+    proxy_url: Optional[str] = None
+
+    async def ssl_context(self) -> Union[bool, ssl.SSLContext]:
+        """Build the TLS context for this snapshot."""
+        if (
+            not self.client_key_file
+            and not self.client_cert_file
+            and not self.server_ca_file
+            and not self.insecure_skip_tls_verify
+        ):
+            # If no cert information is provided, fall back to default verification
+            return True
+        sslcontext = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        if self.insecure_skip_tls_verify:
+            sslcontext.check_hostname = False
+            sslcontext.verify_mode = ssl.CERT_NONE
+        if self.client_key_file and self.client_cert_file:
+            sslcontext.load_cert_chain(
+                certfile=self.client_cert_file,
+                keyfile=self.client_key_file,
+                password=None,
+            )
+        if self.server_ca_file:
+            sslcontext.load_verify_locations(cafile=self.server_ca_file)
+        return sslcontext
 
 
 class KubeAuth:
@@ -60,6 +99,58 @@ class KubeAuth:
             )
 
         self.__auth_lock: anyio.Lock = anyio.Lock()
+        self._snapshot = AuthSnapshot()
+
+    @property
+    def snapshot(self) -> AuthSnapshot:
+        """Return the last successfully loaded, coherent connection settings."""
+        return self._snapshot
+
+    async def consistent_snapshot(self) -> AuthSnapshot:
+        """Build a coherent snapshot from the currently published attributes."""
+        async with self.__auth_lock:
+            self._snapshot = self._make_snapshot()
+            return self._snapshot
+
+    def _make_snapshot(self) -> AuthSnapshot:
+        return AuthSnapshot(
+            server=self.server,
+            token=self.token,
+            client_cert_file=self.client_cert_file,
+            client_key_file=self.client_key_file,
+            server_ca_file=self.server_ca_file,
+            tls_server_name=self.tls_server_name,
+            insecure_skip_tls_verify=self._insecure_skip_tls_verify,
+            proxy_url=self.proxy,
+        )
+
+    def _candidate(self) -> "KubeAuth":
+        candidate = KubeAuth(
+            url=self._url or None,
+            serviceaccount=self._serviceaccount,
+            namespace=self._namespace,
+            context=self._use_context,
+        )
+        candidate._kubeconfig_path_or_dict = self._kubeconfig_path_or_dict
+        return candidate
+
+    def _adopt(self, candidate: "KubeAuth") -> None:
+        self.server = candidate.server
+        self.client_cert_file = candidate.client_cert_file
+        self.client_key_file = candidate.client_key_file
+        self.server_ca_file = candidate.server_ca_file
+        self.token = candidate.token
+        self._namespace = candidate._namespace
+        self.active_context = candidate.active_context
+        if hasattr(candidate, "kubeconfig"):
+            self.kubeconfig = candidate.kubeconfig
+        self.tls_server_name = candidate.tls_server_name
+        self._insecure_skip_tls_verify = candidate._insecure_skip_tls_verify
+        self._context = candidate._context
+        self._cluster = candidate._cluster
+        self._user = candidate._user
+        self._serviceaccount = candidate._serviceaccount
+        self._snapshot = candidate._snapshot
 
     def __await__(self):
         async def f():
@@ -69,46 +160,32 @@ class KubeAuth:
         return f().__await__()
 
     async def reauthenticate(self) -> None:
-        """Reauthenticate with the server."""
+        """Load and atomically publish a complete set of credentials."""
         logger.debug("Reloading credentials")
         async with self.__auth_lock:
-            self.server = ""
-            if self._url:
-                logger.debug("URL specified manually")
-                if self._kubeconfig_path_or_dict is not False:
-                    await self._load_kubeconfig()
-                self.server = self._url
-            else:
-                if self._kubeconfig_path_or_dict is not False:
-                    await self._load_kubeconfig()
-                if self._serviceaccount and not self.server:
-                    await self._load_service_account()
-            if not self.server:
-                raise ValueError("Unable to find valid credentials")
+            candidate = self._candidate()
+            await candidate._reload()
+            self._adopt(candidate)
+
+    async def _reload(self) -> None:
+        self.server = ""
+        if self._url:
+            logger.debug("URL specified manually")
+            if self._kubeconfig_path_or_dict is not False:
+                await self._load_kubeconfig()
+            self.server = self._url
+        else:
+            if self._kubeconfig_path_or_dict is not False:
+                await self._load_kubeconfig()
+            if self._serviceaccount and not self.server:
+                await self._load_service_account()
+        if not self.server:
+            raise ValueError("Unable to find valid credentials")
+        self._snapshot = self._make_snapshot()
 
     async def ssl_context(self):
-        async with self.__auth_lock:
-            if (
-                not self.client_key_file
-                and not self.client_cert_file
-                and not self.server_ca_file
-                and not self._insecure_skip_tls_verify
-            ):
-                # If no cert information is provided, fall back to default verification
-                return True
-            sslcontext = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-            if self._insecure_skip_tls_verify:
-                sslcontext.check_hostname = False
-                sslcontext.verify_mode = ssl.CERT_NONE
-            if self.client_key_file and self.client_cert_file:
-                sslcontext.load_cert_chain(
-                    certfile=self.client_cert_file,
-                    keyfile=self.client_key_file,
-                    password=None,
-                )
-            if self.server_ca_file:
-                sslcontext.load_verify_locations(cafile=self.server_ca_file)
-            return sslcontext
+        snapshot = await self.consistent_snapshot()
+        return await snapshot.ssl_context()
 
     @property
     def namespace(self) -> str:
@@ -293,6 +370,7 @@ class KubeAuth:
                 os.path.join(self._serviceaccount, "namespace")
             ) as f:
                 self.namespace = await f.read()
+        self._snapshot = self._make_snapshot()
 
     @staticmethod
     def _format_server_address(host, port):
