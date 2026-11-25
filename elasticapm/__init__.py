@@ -51,6 +51,23 @@ from elasticapm.utils.disttracing import trace_parent_from_headers, trace_parent
 
 _activation_method = None
 
+
+def get_error_diagnostic(event_id, consume=False):
+    """
+    Return the retained in-process diagnostic for a captured error event.
+
+    The snapshot is taken at capture time and never sent to APM Server. The
+    outbound event is a separately derived, redacted projection.
+
+    :param event_id: the ID returned by ``Client.capture_exception``/``capture_message``
+    :param consume: if True, remove the retained copy after reading it
+    """
+    client = get_client()
+    if client is None:
+        return None
+    return client.get_error_diagnostic(event_id, consume=consume)
+
+
 try:
     try:
         VERSION = __import__("importlib.metadata").metadata.version("elastic-apm")
@@ -72,6 +89,7 @@ __all__ = (
     "capture_serverless",
     "capture_span",
     "get_client",
+    "get_error_diagnostic",
     "get_span_id",
     "get_trace_id",
     "get_trace_parent_header",

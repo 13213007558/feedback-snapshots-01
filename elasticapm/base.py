@@ -49,6 +49,7 @@ from typing import Optional, Sequence, Tuple
 import elasticapm
 from elasticapm.conf import Config, VersionedConfig, constants
 from elasticapm.conf.constants import ERROR
+from elasticapm.diagnostics import ErrorDiagnosticStore, get_error_diagnostic, retain_error_diagnostic
 from elasticapm.metrics.base_metrics import MetricsRegistry
 from elasticapm.traces import DroppedSpan, Tracer, execution_context
 from elasticapm.utils import cgroup, cloud, compat, is_master_process, stacks, varmap
@@ -127,6 +128,7 @@ class Client(object):
                 "SERVICE_NAME cannot be whitespace-only. Please set the SERVICE_NAME to a useful identifier."
             )
         self.config = VersionedConfig(config, version=None)
+        self.error_diagnostics = ErrorDiagnosticStore(config.error_diagnostic_capacity)
 
         # Insert the log_record_factory into the logging library
         if not self.config.disable_log_record_factory:
@@ -258,9 +260,26 @@ class Client(object):
         )
 
         if data:
+            # Retain a full-fidelity copy before processors run on the queued
+            # event. This is the in-process diagnostic view; the transport
+            # derives a separate redacted projection for the outbound payload.
+            if event_type in ("Exception", "Message"):
+                retain_error_diagnostic(self, data)
             # queue data, and flush the queue if this is an unhandled exception
             self.queue(ERROR, data, flush=not handled)
             return data["id"]
+
+    def get_error_diagnostic(self, event_id, consume=False):
+        """
+        Return the retained in-process view of an error event.
+
+        The returned event is a copy taken at capture time, before any
+        processor or serializer ran. It is never sent to APM Server.
+
+        :param event_id: the ID returned by ``capture_exception``/``capture_message``
+        :param consume: if True, remove the retained copy after reading it
+        """
+        return get_error_diagnostic(self, event_id, consume=consume)
 
     def capture_message(self, message=None, param_message=None, **kwargs):
         """
@@ -337,6 +356,8 @@ class Client(object):
             with self._thread_starter_lock:
                 for _, manager in sorted(self._thread_managers.items(), key=lambda item: item[1].start_stop_order):
                     manager.stop_thread()
+        if getattr(self, "error_diagnostics", None) is not None:
+            self.error_diagnostics.clear()
         global CLIENT_SINGLETON
         CLIENT_SINGLETON = None
 

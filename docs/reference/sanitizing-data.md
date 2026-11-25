@@ -85,3 +85,22 @@ We recommend to use the above list of fields to sanitize various parts of the ev
 
 When choosing fields names to sanitize, you can specify values that will match certain wildcards. For example, passing `base` as a field name to be sanitized will also sanitize all fields whose names match the regex pattern `\*base*`.
 
+## Outbound and in-process error views [error-views]
+
+Error events are captured and queued before processors and serialization run. The agent keeps two separate views of an error so that local debugging does not depend on, and cannot leak through, the outbound payload:
+
+* The **outbound view** is derived when an event is serialized for the APM Server. It is built from a copy of the processed event and applies the configured `sanitize_field_names` to request and response headers, cookies, URL query strings, form/JSON/Python-dict request and response bodies, `custom` and `tags` context, and captured stack frame locals. Because this projection runs after all processors, a custom processor that forgets a field or re-adds a retained value still cannot leak it into the payload.
+* The **in-process diagnostic view** is a full-fidelity snapshot taken at capture time, before processors run. It keeps the original values for local troubleshooting and is never serialized. It is bounded by `error_diagnostic_capacity` and is read by ID:
+
+```python
+event_id = elasticapm.get_client().capture_exception()
+diagnostic = elasticapm.get_error_diagnostic(event_id)
+print(diagnostic["exception"]["stacktrace"][0]["vars"])
+```
+
+Request bodies are only captured when `capture_body` is enabled; the outbound view masks sensitive keys whether the body is a form-encoded string, a parsed mapping, a JSON document, or a Python dict representation. Approved trace correlation (`trace_id`, `transaction_id`, and `parent_id`) is preserved in the outbound error event.
+
+::::{note}
+The in-process diagnostic contains unsanitized data. Do not log it, forward it to another system, or include it in support bundles without applying your own access controls.
+:::
+

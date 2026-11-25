@@ -661,6 +661,15 @@ We recommend always including the default set of validators if you customize thi
 
 
 
+### `error_diagnostic_capacity` [config-error-diagnostic-capacity]
+
+| Environment | Django/Flask | Default |
+| --- | --- | --- |
+| `ELASTIC_APM_ERROR_DIAGNOSTIC_CAPACITY` | `ERROR_DIAGNOSTIC_CAPACITY` | `1000` |
+
+The maximum number of in-process error diagnostic snapshots to retain. Snapshots are taken at capture time, before processors redact the queued event, and are only available through `elasticapm.get_error_diagnostic(event_id)`. They are never sent to APM Server. When the limit is reached, the oldest snapshot is discarded. See [Sanitizing data](sanitizing-data.md#error-views).
+
+
 ### `sanitize_field_names` [config-sanitize-field-names]
 
 [![dynamic config](images/dynamic-config.svg "") ](#dynamic-configuration)

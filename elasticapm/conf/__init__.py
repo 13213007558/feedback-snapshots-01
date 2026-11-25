@@ -639,6 +639,7 @@ class Config(_ConfigBase):
     sanitize_field_names = _ListConfigValue(
         "SANITIZE_FIELD_NAMES", type=starmatch_to_regex, default=BASE_SANITIZE_FIELD_NAMES
     )
+    error_diagnostic_capacity = _ConfigValue("ERROR_DIAGNOSTIC_CAPACITY", type=int, default=1000)
     metrics_sets = _ListConfigValue(
         "METRICS_SETS",
         default=[

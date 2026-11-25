@@ -41,6 +41,7 @@ import time
 import timeit
 from collections import defaultdict
 
+from elasticapm.redaction import project_event_for_export
 from elasticapm.utils import json_encoder
 from elasticapm.utils.logging import get_logger
 from elasticapm.utils.threading import ThreadManager
@@ -146,12 +147,25 @@ class Transport(ThreadManager):
             if data is not None:
                 data = self._process_event(event_type, data)
                 if data is not None:
-                    if not buffer_written:
-                        # Write metadata just in time to allow for late metadata changes (such as in lambda)
-                        self._write_metadata(buffer)
-                    buffer.write((self._json_serializer({event_type: data}) + "\n").encode("utf-8"))
-                    buffer_written = True
-                    self._counts[event_type] += 1
+                    # The outbound view is derived from the processed event at
+                    # the moment of serialization. Keeping this projection here
+                    # (rather than mutating the queued event in a processor)
+                    # guarantees nothing retained for in-process diagnostics or
+                    # redacted by an earlier pass can leak into the payload.
+                    try:
+                        data = project_event_for_export(self.client, event_type, data)
+                    except Exception:
+                        # Failing closed is safer than sending an event whose
+                        # projection did not complete.
+                        logger.warning("Dropped event of type %s: outbound redaction failed", event_type, exc_info=True)
+                        data = None
+                    if data is not None:
+                        if not buffer_written:
+                            # Write metadata just in time to allow for late metadata changes (such as in lambda)
+                            self._write_metadata(buffer)
+                        buffer.write((self._json_serializer({event_type: data}) + "\n").encode("utf-8"))
+                        buffer_written = True
+                        self._counts[event_type] += 1
 
             queue_size = 0 if buffer.fileobj is None else buffer.fileobj.tell()
 
@@ -261,8 +275,8 @@ class Transport(ThreadManager):
                 self.handle_transport_success()
             except Exception as e:
                 self.handle_transport_fail(e)
-
-            data.release()
+            finally:
+                data.release()
 
     def start_thread(self, pid=None) -> None:
         super(Transport, self).start_thread(pid=pid)
