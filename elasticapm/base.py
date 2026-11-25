@@ -47,6 +47,7 @@ from datetime import timedelta
 from typing import Optional, Sequence, Tuple
 
 import elasticapm
+from elasticapm import disclosure
 from elasticapm.conf import Config, VersionedConfig, constants
 from elasticapm.conf.constants import ERROR
 from elasticapm.metrics.base_metrics import MetricsRegistry
@@ -623,6 +624,10 @@ class Client(object):
                 "type": transaction.transaction_type,
                 "name": transaction.name,
             }
+            # Errors/log lines that belong to a transaction inherit its
+            # disclosure snapshot so that they are filtered by the same policy
+            # as the transaction itself.
+            return disclosure.annotate(event_data, getattr(transaction, "config_disclosure", None))
 
         return event_data
 

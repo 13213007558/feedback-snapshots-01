@@ -42,6 +42,7 @@ from typing import Optional, TypeVar
 from urllib.parse import urlencode
 
 import elasticapm
+from elasticapm import disclosure
 from elasticapm.base import Client, get_client
 from elasticapm.conf import constants
 from elasticapm.traces import execution_context
@@ -466,8 +467,19 @@ class _lambda_transaction(object):
             transaction = execution_context.get_transaction()
             transport = self.client._transport
             logger.debug("Sending partial transaction and early metadata to the lambda extension...")
+            transaction_data = transaction.to_dict()
+            ceiling = getattr(self.client.config, "disclosure_ceiling", None)
+            if ceiling:
+                transaction_data = disclosure.filter_event(
+                    constants.TRANSACTION,
+                    transaction_data,
+                    disclosure.stricter_values(
+                        getattr(transaction_data, "disclosure", None) or transaction.config_disclosure,
+                        ceiling,
+                    ),
+                )
             data = transport._json_serializer({"metadata": self.client.build_metadata()}) + "\n"
-            data += transport._json_serializer({"transaction": transaction.to_dict()})
+            data += transport._json_serializer({"transaction": transaction_data})
             partial_transaction_url = urllib.parse.urljoin(
                 (
                     self.client.config.server_url

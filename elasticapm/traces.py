@@ -42,6 +42,7 @@ from types import TracebackType
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Type, TypeVar, Union
 
 import elasticapm
+from elasticapm import disclosure
 from elasticapm.conf import constants
 from elasticapm.conf.constants import LABEL_RE, SPAN, TRANSACTION
 from elasticapm.context import init_execution_context
@@ -231,6 +232,10 @@ class Transaction(BaseSpan):
         self.config_span_compression_same_kind_max_duration = tracer.config.span_compression_same_kind_max_duration
         self.config_exit_span_min_duration = tracer.config.exit_span_min_duration
         self.config_transaction_max_spans = tracer.config.transaction_max_spans
+        # The disclosure policy in effect when the transaction started. It is
+        # carried with the transaction's events so that a later, stricter
+        # ceiling can still be applied before egress.
+        self.config_disclosure = disclosure.snapshot(tracer.config)
 
         self.dropped_spans: int = 0
         self.context: Dict[str, Any] = {}
@@ -451,7 +456,7 @@ class Transaction(BaseSpan):
                 result["context"]["tags"][key] = value
         if self.is_sampled:
             result["context"] = context
-        return result
+        return disclosure.annotate(result, self.config_disclosure)
 
     def track_span_duration(self, span_type, span_subtype, self_duration) -> None:
         # TODO: once asynchronous spans are supported, we should check if the transaction is already finished
@@ -634,7 +639,7 @@ class Span(BaseSpan):
                 "sum": self.composite["sum"].total_seconds() * 1000,
                 "count": self.composite["count"],
             }
-        return result
+        return disclosure.annotate(result, self.transaction.config_disclosure)
 
     def is_same_kind(self, other_span: SpanType) -> bool:
         """

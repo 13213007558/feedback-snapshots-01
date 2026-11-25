@@ -48,6 +48,22 @@ Configuration options marked with the ![dynamic config](images/dynamic-config.sv
 
 The Python Agent supports [Central configuration](docs-content://solutions/observability/apm/apm-agent-central-configuration.md), which allows you to fine-tune certain configurations from in the APM app. This feature is enabled in the Agent by default with [`central_config`](#config-central_config).
 
+### Local disclosure ceiling [local-disclosure-ceiling]
+
+Some central configuration options control how much diagnostic data the agent captures and exports: request bodies and headers, local variables, source line excerpts, stack trace depth, and span stack traces. Deployments can define a local disclosure ceiling for these options through their startup configuration (environment, framework configuration, or inline client arguments).
+
+The local startup configuration acts as a ceiling, not as a value that central configuration may override in either direction. For every such option, the effective value is the *more restrictive* combination of the local value and the central value:
+
+* A central value that widens collection (for example `capture_body: all` when the local value is `errors`) is clamped to the local ceiling.
+* A central value that narrows collection (for example `capture_headers: false`) still takes effect.
+* Redaction settings such as `sanitize_field_names` are combined as a union, so central configuration can add but never remove locally required redactions.
+
+The same effective value is used for the shared configuration, for the snapshot taken when a transaction starts, and for the final re-check performed on every event immediately before it is sent. If the local ceiling becomes stricter after a transaction has started, events that are still buffered are re-checked before egress. Values received from central configuration while the agent was offline are also subject to the ceiling when they are applied.
+
+The following options participate in the ceiling: [`capture_body`](#config-capture-body), [`capture_headers`](#config-capture-headers), [`collect_local_variables`](#config-collect-local-variables), [`sanitize_field_names`](#config-sanitize-field-names), `local_var_max_length`, `local_var_list_max_length`, `local_var_dict_max_length`, `source_lines_error_app_frames`, `source_lines_error_library_frames`, `source_lines_span_app_frames`, `source_lines_span_library_frames`, [`stack_trace_limit`](#config-stack-trace-limit), [`span_stack_trace_min_duration`](#config-span-stack-trace-min-duration), and `span_frames_min_duration`.
+
+You can audit which central values were clamped with `client.config.disclosure_report()`, which reports the local value, the requested central value, the effective value, and whether the option was clamped for each participating option.
+
 
 ## Django [django-configuration]
 

@@ -29,7 +29,6 @@
 #  OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 
 
-import _hashlib
 import logging
 import logging.handlers
 import math
@@ -38,6 +37,9 @@ import re
 import threading
 from datetime import timedelta
 
+import _hashlib
+
+from elasticapm import disclosure
 from elasticapm.conf.constants import BASE_SANITIZE_FIELD_NAMES, TRACE_CONTINUATION_STRATEGY
 from elasticapm.utils import compat, starmatch_to_regex
 from elasticapm.utils.logging import get_logger
@@ -196,6 +198,20 @@ class _ListConfigValue(_ConfigValue):
             value = list(value)
         if value:
             value = [self.type(item) for item in value]
+        self._callback_if_changed(instance, value)
+        instance._values[self.dict_key] = value
+
+
+class _RegexListConfigValue(_ListConfigValue):
+    """A list of starmatch patterns that also accepts compiled patterns."""
+
+    def __set__(self, instance, value) -> None:
+        if isinstance(value, str):
+            value = value.split(self.list_separator)
+        elif value is not None:
+            value = list(value)
+        if value:
+            value = [self.type(item) if isinstance(item, str) else item for item in value]
         self._callback_if_changed(instance, value)
         instance._values[self.dict_key] = value
 
@@ -636,7 +652,7 @@ class Config(_ConfigBase):
             "elasticapm.processors.sanitize_http_request_body",
         ],
     )
-    sanitize_field_names = _ListConfigValue(
+    sanitize_field_names = _RegexListConfigValue(
         "SANITIZE_FIELD_NAMES", type=starmatch_to_regex, default=BASE_SANITIZE_FIELD_NAMES
     )
     metrics_sets = _ListConfigValue(
@@ -755,6 +771,10 @@ class Config(_ConfigBase):
 class VersionedConfig(ThreadManager):
     """
     A thin layer around Config that provides versioning
+
+    The initial configuration doubles as the local disclosure ceiling: values
+    received later (for example from central configuration) are combined with
+    the local value so that they can tighten diagnostics but never widen them.
     """
 
     __slots__ = (
@@ -763,6 +783,8 @@ class VersionedConfig(ThreadManager):
         "_first_config",
         "_first_version",
         "_lock",
+        "_ceiling",
+        "_requested",
         "transport",
         "_update_thread",
         "pid",
@@ -777,28 +799,170 @@ class VersionedConfig(ThreadManager):
         """
         self._config = self._first_config = config_object
         self._version = self._first_version = version
+        self._ceiling = disclosure.values_from_config(config_object)
+        self._requested = {}
         self.transport = transport
         self._lock = threading.Lock()
         self._update_thread = None
         super(VersionedConfig, self).__init__()
 
+    @property
+    def disclosure_ceiling(self):
+        """The locally enforced maximum for disclosure-relevant options."""
+        return dict(self._ceiling)
+
+    @property
+    def disclosure_requested(self):
+        """The values last requested by central configuration."""
+        return dict(self._requested)
+
+    def disclosure_snapshot(self):
+        """The effective disclosure values used for newly started transactions."""
+        return disclosure.values_from_config(self._config)
+
+    def disclosure_report(self):
+        """An auditable report of local ceilings and any clamped central values."""
+        return disclosure.disclosure_report(self._ceiling, self._requested, self.disclosure_snapshot())
+
+    def _effective_values(self, ceiling, overrides=None):
+        """Compute effective disclosure values for a given ceiling.
+
+        The current effective values are used as a base so that options which
+        only ever came from local configuration keep their value.  Options with
+        a recorded central request are re-combined with the ceiling, which lets
+        a loosened local ceiling reopen a value that was previously clamped.
+        """
+        base = self.disclosure_snapshot()
+        for option in disclosure.DISCLOSURE_OPTIONS:
+            if option in self._requested:
+                base[option] = disclosure.combine_values(option, ceiling[option], self._requested[option])
+        effective = disclosure.stricter_values(base, ceiling)
+        if overrides:
+            for option in disclosure.DISCLOSURE_OPTIONS:
+                if option in overrides:
+                    effective[option] = overrides[option]
+        return effective
+
+    def tighten_ceiling(self, **config) -> None:
+        """Tighten the local ceiling without changing central requests.
+
+        This is used when the local deployment becomes stricter after startup,
+        including a late local change during an offline restore.  The effective
+        configuration is immediately re-derived from the local ceiling and the
+        last centrally requested values, so a value that arrives later can
+        never widen disclosure beyond the new ceiling.
+        """
+        ceiling = dict(self._ceiling)
+        for option in disclosure.DISCLOSURE_OPTIONS:
+            if option not in config:
+                continue
+            value = disclosure.coerce_value(option, config[option])
+            ceiling[option] = disclosure.combine_values(option, ceiling[option], value)
+        return self._apply_disclosure_values(ceiling, self._effective_values(ceiling))
+
+    def _apply_disclosure_values(self, ceiling, values):
+        inline = {
+            option: disclosure.serialize_value(option, values[option])
+            for option in disclosure.DISCLOSURE_OPTIONS
+            if option in values
+        }
+        new_config = self._config.copy()
+        new_config.update(inline_dict=inline, env_dict={})
+        if new_config.errors:
+            return new_config.errors
+        with self._lock:
+            self._ceiling = ceiling
+            self._config = new_config
+        return None
+
+    def _apply_local_values(self, inline) -> None:
+        """Apply a local (authoritative) config change.
+
+        Local programmatic changes define the disclosure ceiling.  They may both
+        tighten and loosen it, because the deployment itself is the authority
+        for the local ceiling.  Central configuration never takes this path.
+        """
+        new_config = self._config.copy()
+        new_config.update(inline_dict=inline, env_dict={})
+        if new_config.errors:
+            return new_config.errors
+
+        ceiling = dict(self._ceiling)
+        overrides = {}
+        for option in disclosure.DISCLOSURE_OPTIONS:
+            if option in inline and hasattr(new_config, option):
+                ceiling[option] = disclosure.coerce_value(option, getattr(new_config, option))
+                overrides[option] = ceiling[option]
+
+        if not overrides:
+            with self._lock:
+                self._config = new_config
+            return None
+
+        effective = self._effective_values(ceiling, overrides)
+        extra = {}
+        for option in disclosure.DISCLOSURE_OPTIONS:
+            if option not in effective or not hasattr(new_config, option):
+                continue
+            if getattr(new_config, option) != effective[option]:
+                extra[option] = disclosure.serialize_value(option, effective[option])
+        if extra:
+            new_config.update(inline_dict=extra, env_dict={})
+            if new_config.errors:
+                return new_config.errors
+
+        with self._lock:
+            self._config = new_config
+            self._ceiling = ceiling
+        return None
+
+    def _apply_central_values(self, version, inline) -> None:
+        """Apply central configuration, clamped to the local ceiling."""
+        requested = dict(self._requested)
+        clamped = dict(inline)
+        ceiling = dict(self._ceiling)
+        for option in disclosure.DISCLOSURE_OPTIONS:
+            if option not in inline:
+                continue
+            value = disclosure.coerce_value(option, inline[option])
+            requested[option] = value
+            clamped[option] = disclosure.combine_values(option, ceiling[option], value)
+        new_config = self._config.copy()
+        new_config.update(inline_dict=clamped, env_dict={})
+        if new_config.errors:
+            return new_config.errors
+        with self._lock:
+            self._version = version
+            self._config = new_config
+            self._requested = requested
+        return None
+
     def update(self, version: str, **config):
         """
-        Update the configuration version
+        Update the configuration version with local configuration values.
+
+        Local values are authoritative: they define the disclosure ceiling and
+        take effect as-is.  Use :meth:`update_central` (or the transport driven
+        :meth:`update_config`) for values received from central configuration.
+
         :param version: version identifier for the new configuration
         :param config: a key/value map of new configuration
         :return: configuration errors, if any
         """
-        new_config = self._config.copy()
+        errors = self._apply_local_values(config)
+        if errors:
+            return errors
+        with self._lock:
+            self._version = version
 
-        # pass an empty env dict to ensure the environment doesn't get precedence
-        new_config.update(inline_dict=config, env_dict={})
-        if not new_config.errors:
-            with self._lock:
-                self._version = version
-                self._config = new_config
-        else:
-            return new_config.errors
+    def update_central(self, version: str, **config):
+        """Apply values received from central configuration.
+
+        Values are clamped to the local disclosure ceiling.  Central
+        configuration can still tighten diagnostics or select any value within
+        the locally allowed range.
+        """
+        return self._apply_central_values(version, config)
 
     def reset(self) -> None:
         """
@@ -817,6 +981,8 @@ class VersionedConfig(ThreadManager):
         with self._lock:
             self._version = self._first_version
             self._config = self._first_config
+            self._ceiling = disclosure.values_from_config(self._first_config)
+            self._requested = {}
 
         self._config.callbacks_queue.extend(callbacks)
         self._config.call_pending_callbacks()
@@ -848,7 +1014,7 @@ class VersionedConfig(ThreadManager):
             keys["service"]["environment"] = self.environment
         new_version, new_config, next_run = self.transport.get_config(self.config_version, keys)
         if new_version and new_config:
-            errors = self.update(new_version, **new_config)
+            errors = self.update_central(new_version, **new_config)
             if errors:
                 logger.error("Error applying new configuration: %s", repr(errors))
             else:

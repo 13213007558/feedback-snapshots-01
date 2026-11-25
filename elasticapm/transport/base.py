@@ -41,6 +41,7 @@ import time
 import timeit
 from collections import defaultdict
 
+from elasticapm import disclosure
 from elasticapm.utils import json_encoder
 from elasticapm.utils.logging import get_logger
 from elasticapm.utils.threading import ThreadManager
@@ -115,6 +116,7 @@ class Transport(ThreadManager):
 
         buffer = self._init_buffer()
         buffer_written = False
+        pending = []
         # add some randomness to timeout to avoid stampedes of several workers that are booted at the same time
         max_flush_time = (
             self._max_flush_time_seconds * random.uniform(0.9, 1.1) if self._max_flush_time_seconds else None
@@ -134,7 +136,7 @@ class Transport(ThreadManager):
             if event_type == "close":
                 if buffer_written:
                     try:
-                        self._flush(buffer)
+                        self._flush(self._refilter_pending(buffer, pending))
                     except Exception as exc:
                         logger.error(
                             "Exception occurred while flushing the buffer "
@@ -146,11 +148,14 @@ class Transport(ThreadManager):
             if data is not None:
                 data = self._process_event(event_type, data)
                 if data is not None:
+                    policy = self._disclosure_policy_for(data)
+                    data = disclosure.filter_event(event_type, data, policy)
                     if not buffer_written:
                         # Write metadata just in time to allow for late metadata changes (such as in lambda)
                         self._write_metadata(buffer)
                     buffer.write((self._json_serializer({event_type: data}) + "\n").encode("utf-8"))
                     buffer_written = True
+                    pending.append((event_type, data, self._policy_signature(policy)))
                     self._counts[event_type] += 1
 
             queue_size = 0 if buffer.fileobj is None else buffer.fileobj.tell()
@@ -175,7 +180,7 @@ class Transport(ThreadManager):
                 flush = True
             if flush:
                 if buffer_written:
-                    self._flush(buffer, forced_flush=forced_flush)
+                    self._flush(self._refilter_pending(buffer, pending), forced_flush=forced_flush)
                 elif forced_flush and any(x in self.client.config.server_url for x in ("/localhost:", "/127.0.0.1:")):
                     # No data on buffer, but due to manual flush we should send
                     # an empty payload with flushed=true query param, but only
@@ -188,10 +193,69 @@ class Transport(ThreadManager):
                 self._last_flush = timeit.default_timer()
                 buffer = self._init_buffer()
                 buffer_written = False
+                pending = []
                 max_flush_time = (
                     self._max_flush_time_seconds * random.uniform(0.9, 1.1) if self._max_flush_time_seconds else None
                 )
                 self._flushed.set()
+
+    def _policy_signature(self, policy):
+        if not policy:
+            return ()
+        signature = []
+        for option in sorted(disclosure.DISCLOSURE_OPTIONS):
+            if option not in policy:
+                continue
+            value = policy[option]
+            if isinstance(value, (list, tuple)):
+                value = tuple(disclosure.pattern_text(item) for item in value)
+            signature.append((option, repr(value)))
+        return tuple(signature)
+
+    def _disclosure_policy_for(self, data):
+        """Return the disclosure values allowed for this event right now.
+
+        The policy is the attribute snapshot taken when the transaction
+        started, narrowed by the current local ceiling.  This means a ceiling
+        that becomes stricter after the transaction started is still enforced
+        on data that is already waiting in the pipeline.
+        """
+        snapshot = getattr(data, "disclosure", None)
+        if not self.client:
+            return snapshot
+        config = self.client.config
+        ceiling = getattr(config, "disclosure_ceiling", None)
+        if ceiling is None:
+            return snapshot
+        if snapshot is None:
+            return disclosure.stricter_values(disclosure.values_from_config(config), ceiling)
+        return disclosure.stricter_values(snapshot, ceiling)
+
+    def _refilter_pending(self, buffer, pending):
+        """Re-check buffered events against the current ceiling.
+
+        The initial write already applied the policy in effect at queue time.
+        If the local ceiling tightened since then, the buffer is rebuilt from
+        the retained event data and the stricter policy, just before egress.
+        """
+        if not pending or not self.client:
+            return buffer
+        needs_rebuild = False
+        for event_type, data, signature in pending:
+            if self._policy_signature(self._disclosure_policy_for(data)) != signature:
+                needs_rebuild = True
+                break
+        if not needs_rebuild:
+            return buffer
+
+        buffer.close()
+        rebuilt = self._init_buffer()
+        self._write_metadata(rebuilt)
+        for event_type, data, _ in pending:
+            policy = self._disclosure_policy_for(data)
+            data = disclosure.filter_event(event_type, data, policy)
+            rebuilt.write((self._json_serializer({event_type: data}) + "\n").encode("utf-8"))
+        return rebuilt
 
     def _process_event(self, event_type, data):
         # Run the data through processors
