@@ -137,4 +137,6 @@ end
 
 require "sidekiq/web/router"
 require "sidekiq/web/action"
+require "sidekiq/web/confirmation"
+require "sidekiq/web/action_controls"
 require "sidekiq/web/application"

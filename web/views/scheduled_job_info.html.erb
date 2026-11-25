@@ -1,8 +1,9 @@
 <%= erb :_job_info, locals: { job: @job, type: :scheduled } %>
 
-<form action="<%= root_path %>scheduled/<%= job_params(@job, @job.score) %>" method="post">
+<form action="<%= root_path %>scheduled/<%= job_token(@job, :schedule) %>" method="post">
   <%= csrf_tag %>
+  <% permitted = permitted_entry_actions(@job, :schedule) %>
   <a class="btn btn-default" href="<%= root_path %>scheduled"><%= t('GoBack') %></a>
-  <input class="btn btn-primary" type="submit" name="add_to_queue" value="<%= t('AddToQueue') %>">
-  <input class="btn btn-danger" type="submit" name="delete" value="<%= t('Delete') %>">
+  <% if permitted.include?(:retry) %><input class="btn btn-primary" type="submit" name="add_to_queue" value="<%= t('AddToQueue') %>"><% end %>
+  <% if permitted.include?(:cancel) %><input class="btn btn-danger" type="submit" name="delete" value="<%= t('Delete') %>"><% end %>
 </form>

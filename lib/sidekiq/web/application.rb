@@ -196,21 +196,20 @@ module Sidekiq
       post "/morgue" do
         redirect(request.path) unless url_params("key")
 
-        url_params("key").each do |key|
-          job = Sidekiq::DeadSet.new.fetch(*parse_key(key)).first
-          retry_or_delete_or_kill job, request.params if job
-        end
-
-        redirect_with_query("#{root_path}morgue")
+        result = perform_entry_actions(:dead, url_params("key"), request.params)
+        action_notice(result)
+        action_redirect("#{root_path}morgue")
       end
 
       post "/morgue/all/delete" do
+        perform_bulk_action!(:dead, :cancel)
         Sidekiq::DeadSet.new.clear
 
         redirect "#{root_path}morgue"
       end
 
       post "/morgue/all/retry" do
+        perform_bulk_action!(:dead, :retry)
         Sidekiq::DeadSet.new.retry_all
 
         redirect "#{root_path}morgue"
@@ -220,10 +219,9 @@ module Sidekiq
         key = route_params(:key)
         halt(404) unless key
 
-        job = Sidekiq::DeadSet.new.fetch(*parse_key(key)).first
-        retry_or_delete_or_kill job, request.params if job
-
-        redirect_with_query("#{root_path}morgue")
+        result = perform_entry_actions(:dead, [key], request.params)
+        action_notice(result)
+        action_redirect("#{root_path}morgue")
       end
 
       get "/retries" do
@@ -255,35 +253,33 @@ module Sidekiq
       post "/retries" do
         redirect(request.path) unless url_params("key")
 
-        url_params("key").each do |key|
-          job = Sidekiq::RetrySet.new.fetch(*parse_key(key)).first
-          retry_or_delete_or_kill job, request.params if job
-        end
-
-        redirect_with_query("#{root_path}retries")
+        result = perform_entry_actions(:retry, url_params("key"), request.params)
+        action_notice(result)
+        action_redirect("#{root_path}retries")
       end
 
       post "/retries/all/delete" do
+        perform_bulk_action!(:retry, :cancel)
         Sidekiq::RetrySet.new.clear
         redirect "#{root_path}retries"
       end
 
       post "/retries/all/retry" do
+        perform_bulk_action!(:retry, :retry)
         Sidekiq::RetrySet.new.retry_all
         redirect "#{root_path}retries"
       end
 
       post "/retries/all/kill" do
+        perform_bulk_action!(:retry, :kill)
         Sidekiq::RetrySet.new.kill_all
         redirect "#{root_path}retries"
       end
 
       post "/retries/:key" do
-        job = Sidekiq::RetrySet.new.fetch(*parse_key(route_params(:key))).first
-
-        retry_or_delete_or_kill job, request.params if job
-
-        redirect_with_query("#{root_path}retries")
+        result = perform_entry_actions(:retry, [route_params(:key)], request.params)
+        action_notice(result)
+        action_redirect("#{root_path}retries")
       end
 
       get "/scheduled" do
@@ -313,30 +309,28 @@ module Sidekiq
       post "/scheduled" do
         redirect(request.path) unless url_params("key")
 
-        url_params("key").each do |key|
-          job = Sidekiq::ScheduledSet.new.fetch(*parse_key(key)).first
-          delete_or_add_queue job, request.params if job
-        end
-
-        redirect_with_query("#{root_path}scheduled")
+        result = perform_entry_actions(:schedule, url_params("key"), request.params)
+        action_notice(result)
+        action_redirect("#{root_path}scheduled")
       end
 
       post "/scheduled/:key" do
         key = route_params(:key)
         halt(404) unless key
 
-        job = Sidekiq::ScheduledSet.new.fetch(*parse_key(key)).first
-        delete_or_add_queue job, request.params if job
-
-        redirect_with_query("#{root_path}scheduled")
+        result = perform_entry_actions(:schedule, [key], request.params)
+        action_notice(result)
+        action_redirect("#{root_path}scheduled")
       end
 
       post "/scheduled/all/delete" do
+        perform_bulk_action!(:schedule, :cancel)
         Sidekiq::ScheduledSet.new.clear
         redirect "#{root_path}scheduled"
       end
 
       post "/scheduled/all/add_to_queue" do
+        perform_bulk_action!(:schedule, :retry)
         Sidekiq::ScheduledSet.new.each(&:add_to_queue)
         redirect "#{root_path}scheduled"
       end
@@ -475,6 +469,7 @@ module Sidekiq
       end
       helpers WebHelpers
       helpers Paginator
+      helpers ActionControls
     end
   end
 end

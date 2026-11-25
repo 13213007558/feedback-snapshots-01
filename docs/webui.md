@@ -42,6 +42,42 @@ end
 
 See `lib/sidekiq/web/config.rb` for options.
 
+## Job Management Permissions
+
+The Retry, Scheduled and Dead listings can authorize each management action
+separately. Read-only access is still possible: deny only the mutating actions
+and the listings keep rendering.
+
+```ruby
+Sidekiq::Web.configure do |config|
+  config.authorize_action do |env, action, target|
+    case action
+    when :retry  then env["session.role"] == "operator"
+    when :cancel then env["session.role"] == "operator"
+    when :kill   then env["session.role"] == "admin"
+    else false
+    end
+  end
+end
+```
+
+`action` is one of `:retry`, `:cancel` (delete) or `:kill`. `target` describes
+the exact entry the operator acted on, e.g.
+`{set: "retry", action: :retry, jid: "abc", key: "1700000000.0-abc", queue: "default", klass: "MyJob", score: 1700000000.0}`.
+Bulk actions receive `target[:bulk] == true`.
+
+Each listing entry is rendered with a signed confirmation token bound to the
+set, score, jid and a digest of the stored payload. A submission re-checks that
+token against the entry which is present at submit time, so a job moved by the
+scheduler (or re-appearing under the same jid) is not acted on with a stale
+confirmation. Re-submitting an action that already completed reports that fact
+instead of pushing the job twice. When a per-action policy is configured, the
+older `score-jid` keys require a fresh confirmation.
+
+This is separate from Rack middleware authentication. Use middleware to
+identify the operator, and `authorize_action` to decide which job actions that
+operator may perform.
+
 ## Web UI Extensions
 
 There is a sample Web UI extension in `examples/webui-ext` which shows you how to build your own UI extension.

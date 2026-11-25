@@ -29,10 +29,11 @@
     </table>
   </div>
 
-  <form action="<%= root_path %>morgue/<%= job_params(@dead, @dead.score) %>" method="post">
+  <form action="<%= root_path %>morgue/<%= job_token(@dead, :dead) %>" method="post">
     <%= csrf_tag %>
+    <% permitted = permitted_entry_actions(@dead, :dead) %>
     <a class="btn btn-default" href="<%= root_path %>morgue"><%= t('GoBack') %></a>
-    <input class="btn btn-primary" type="submit" name="retry" value="<%= t('RetryNow') %>">
-    <input class="btn btn-danger" type="submit" name="delete" value="<%= t('Delete') %>">
+    <% if permitted.include?(:retry) %><input class="btn btn-primary" type="submit" name="retry" value="<%= t('RetryNow') %>"><% end %>
+    <% if permitted.include?(:cancel) %><input class="btn btn-danger" type="submit" name="delete" value="<%= t('Delete') %>"><% end %>
   </form>
 </section>

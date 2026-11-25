@@ -51,6 +51,31 @@ module Sidekiq
       attr_accessor :app_url
       attr_accessor :assets_path
 
+      ##
+      # Per-action authorization for job management in the Web UI.
+      #
+      # The callable receives the Rack env, the action (:retry, :cancel or
+      # :kill) and the target entry:
+      #
+      #   config.authorize_action do |env, action, target|
+      #     env["my.permissions"].include?(action.to_s)
+      #   end
+      #
+      # +target+ is a Hash describing the entry the operator is acting on:
+      #
+      #   {set: "retry", action: :retry, jid: "...", key: "1700000000.0-...",
+      #    queue: "default", klass: "MyJob", score: 1700000000.0}
+      #
+      # Bulk actions receive +target[:bulk] == true+.  When unset, all three
+      # actions are permitted (the historical behavior).
+      #
+      # Read-only access remains available by returning false for the mutating
+      # actions; the Web UI still renders the listings.
+      def authorize_action(&block)
+        @authorize_action = block if block
+        @authorize_action
+      end
+
       def initialize
         @options = OPTIONS.dup
         @locales = LOCALES

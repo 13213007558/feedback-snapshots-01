@@ -466,24 +466,6 @@ module Sidekiq
       !(current_path == "" || current_path.index("metrics"))
     end
 
-    def retry_or_delete_or_kill(job, params)
-      if params["retry"]
-        job.retry
-      elsif params["delete"]
-        job.delete
-      elsif params["kill"]
-        job.kill
-      end
-    end
-
-    def delete_or_add_queue(job, params)
-      if params["delete"]
-        job.delete
-      elsif params["add_to_queue"]
-        job.add_to_queue
-      end
-    end
-
     def url_count(param_name: "count", default_count: 25)
       p = url_params(param_name)
       if p
