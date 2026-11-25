@@ -253,3 +253,123 @@ pod = Pod.get("some-pod", api=api2)
 ```
 
 ````
+
+## Discovery and access control
+
+Kubernetes discovery can advertise more than one version of the same resource
+name. kr8s keeps two decisions separate for every version:
+
+- whether a version is **visible** (may be shown by `api_resources()` or a
+  service catalog), and
+- which request **verbs** are approved for that exact version.
+
+That means a newly discovered version can be listed without automatically
+becoming requestable. Approvals are matched by `(group, version, resource)`, so
+two versions sharing a resource name can have different access.
+
+```{warning}
+`AccessDeniedError` is a client-side preflight failure. It is raised before the
+request is sent, so a denied request never reaches the API server.
+```
+
+The default policy is permissive, which preserves existing behaviour. Adding the
+first rule for a resource name turns that name into an explicit allowlist: a
+version of it without a matching rule is denied, rather than inheriting another
+version's approval.
+
+The example below has two local versions of `widgets`: `v1alpha` is approved
+for read (`get`/`watch`) and `v1beta1` is approved for `list` only. Both may be
+displayed.
+
+`````{tab-set}
+
+````{tab-item} Sync
+:sync: sync
+```python
+import kr8s
+
+api = kr8s.api()
+api.access_policy.allow("widgets", group="example.com", version="v1alpha", verbs=["get"])
+api.access_policy.allow("widgets", group="example.com", version="v1beta1", verbs=["list"])
+
+# The catalog shows both versions, each with its own approved verbs.
+for resource in api.api_resources():
+    if resource["name"] == "widgets":
+        print(resource["version"], resource["kr8sApprovedVerbs"])
+
+# A list resolves to the list-approved version.
+widgets = list(api.get("widgets", namespace="default"))
+
+# Requesting a verb the version was not approved for fails on the client.
+try:
+    list(api.get("widgets.example.com/v1alpha", namespace="default"))
+except kr8s.AccessDeniedError as e:
+    print(e.decision.explain())
+```
+````
+
+````{tab-item} Async
+:sync: async
+```python
+import kr8s
+
+api = await kr8s.asyncio.api()
+api.access_policy.allow("widgets", group="example.com", version="v1alpha", verbs=["get"])
+api.access_policy.allow("widgets", group="example.com", version="v1beta1", verbs=["list"])
+
+widgets = [w async for w in api.get("widgets", namespace="default")]
+
+# Direct requests are checked against the exact version before sending.
+try:
+    async with api.call_api("GET", version="example.com/v1alpha", url="widgets", namespace="default"):
+        pass
+except kr8s.AccessDeniedError as e:
+    print(e.decision.explain())
+```
+````
+
+````{tab-item} Display only
+:sync: display
+```python
+import kr8s
+
+api = kr8s.api()
+# Visible in the catalog, but no request verbs are approved.
+api.access_policy.allow_display("widgets", group="example.com", version="v1beta2")
+```
+````
+
+````{tab-item} Deny all
+:sync: deny
+```python
+import kr8s
+
+# Only explicitly approved versions are usable at all.
+api = kr8s.api()
+api.access_policy = kr8s.AccessPolicy.deny_by_default()
+```
+````
+
+`````
+
+Write operations use the same preflight. `create`, `update`, `patch` and
+`delete` must all be approved for the version carried by the object, so a
+display-only version cannot be used for writes either.
+
+Discovery results are still cached for six hours. The access policy is applied
+on every read, so changing approvals does not require refetching the catalog,
+and a newly discovered version never appears just because it was cached. Use
+`refresh_api_resources()` to refresh the catalog explicitly.
+
+To explain why a discovered version is unavailable, inspect the per-version
+decisions. This includes versions that are not visible:
+
+```python
+for decision in await api.async_api_resource_access():
+    print(decision.api_version, decision.visible, decision.approved_verbs)
+    if not decision.visible:
+        print(decision.explain())
+```
+
+Use `AccessPolicy.deny_by_default()` instead of the default constructor when
+only explicitly approved versions should be usable at all.

@@ -108,6 +108,22 @@ async def api_resources(api=None, _asyncio=True):
     return await api.async_api_resources()
 
 
+async def api_resource_access(api=None, _asyncio=True):
+    """Return access decisions (visibility and approved verbs) for discovery.
+
+    Args:
+        api: The API client to use.
+        _asyncio: Whether to return the async API client.
+
+    Returns:
+        A list of :class:`AccessDecision <kr8s.AccessDecision>` entries, one per
+        discovered resource version, including versions that are not visible.
+    """
+    if api is None:
+        api = await _api(_asyncio=_asyncio)
+    return await api.async_api_resource_access()
+
+
 async def whoami(api=None, _asyncio=True):
     if api is None:
         api = await _api(_asyncio=_asyncio)

@@ -5,14 +5,29 @@
 This module provides an asynchronous API for interacting with a Kubernetes cluster.
 """
 
+from kr8s._access import AccessDecision, AccessPolicy, AccessRule
 from kr8s._api import Api
+from kr8s._exceptions import AccessDeniedError
 
 from . import objects, portforward
 from ._api import api
-from ._helpers import api_resources, create, get, version, watch, whoami
+from ._helpers import (
+    api_resource_access,
+    api_resources,
+    create,
+    get,
+    version,
+    watch,
+    whoami,
+)
 
 __all__ = [
+    "AccessDecision",
+    "AccessDeniedError",
+    "AccessPolicy",
+    "AccessRule",
     "api",
+    "api_resource_access",
     "api_resources",
     "create",
     "get",

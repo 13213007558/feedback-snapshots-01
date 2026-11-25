@@ -27,14 +27,14 @@ from cryptography import x509
 from packaging.version import InvalidVersion
 from packaging.version import parse as parse_version
 
+from ._access import AccessDecision, AccessPolicy, split_api_version
 from ._auth import KubeAuth
 from ._constants import (
     KUBERNETES_MAXIMUM_SUPPORTED_VERSION,
     KUBERNETES_MINIMUM_SUPPORTED_VERSION,
 )
 from ._data_utils import dict_to_selector, sort_versions
-from ._exceptions import APITimeoutError, ServerError
-from ._vendored.asyncache import cached  # type: ignore
+from ._exceptions import AccessDeniedError, APITimeoutError, ServerError
 from ._version import __version__
 
 if TYPE_CHECKING:
@@ -86,6 +86,8 @@ class Api:
         self._serviceaccount = kwargs.get("serviceaccount")
         self._session: httpx.AsyncClient | None = None
         self._timeout = None
+        self._api_resources_cache: TTLCache = TTLCache(maxsize=1, ttl=60 * 60 * 6)
+        self._access_policy = AccessPolicy()
         self.auth = KubeAuth(
             url=self._url,
             kubeconfig=self._kubeconfig,
@@ -161,6 +163,155 @@ class Api:
         parts.append(url)
         return "/".join(parts)
 
+    @property
+    def access_policy(self) -> AccessPolicy:
+        """The access policy used for discovery and request preflight.
+
+        The policy starts permissive so existing behaviour is unchanged. Adding
+        the first rule turns it into an explicit allowlist: any resource version
+        that is not granted visibility or request verbs is then denied. This is
+        what prevents a newly discovered version from inheriting broad access.
+        """
+        return self._access_policy
+
+    @access_policy.setter
+    def access_policy(self, value: AccessPolicy) -> None:
+        self._access_policy = value
+
+    async def async_refresh_api_resources(self) -> list[dict]:
+        """Refresh the discovery cache and return the visible resources.
+
+        Only the raw server response is cached. Visibility is applied on every
+        read, so the refreshed catalog still reflects the current approvals.
+
+        Returns:
+            The discovery entries that are currently visible.
+        """
+        raw = await self.async_api_resources_uncached()
+        self._api_resources_cache[("resources",)] = raw
+        return self._filter_api_resources(raw)
+
+    async def refresh_api_resources(self) -> list[dict]:
+        """Refresh the discovery cache and return the visible resources."""
+        return await self.async_refresh_api_resources()
+
+    async def async_api_resource_access(self) -> list[AccessDecision]:
+        """Report the access decision for every discovered resource version.
+
+        Unlike :meth:`async_api_resources`, this includes versions that are not
+        visible, together with an explanation of why they are unavailable. It
+        is the diagnostic surface for "this version exists but I may not use
+        it yet".
+        """
+        key = ("resources",)
+        try:
+            raw = self._api_resources_cache[key]
+        except KeyError:
+            raw = await self.async_api_resources_uncached()
+            self._api_resources_cache[key] = raw
+        return self._access_decisions(raw)
+
+    async def check_resource_access(
+        self,
+        verb: str,
+        resource: str,
+        *,
+        group: str = "",
+        version: str = "",
+    ) -> AccessDecision:
+        """Check a request verb against an exact resource version.
+
+        Args:
+            verb: The request verb (``get``, ``list``, ``create``, ...).
+            resource: The plural resource name.
+            group: The API group, empty for the core group.
+            version: The API version.
+
+        Returns:
+            An :class:`AccessDecision` describing the outcome.
+        """
+        return await self.async_check_resource_access(
+            verb, resource, group=group, version=version
+        )
+
+    async def async_check_resource_access(
+        self,
+        verb: str,
+        resource: str,
+        *,
+        group: str = "",
+        version: str = "",
+    ) -> AccessDecision:
+        """Check a request verb against an exact resource version."""
+        return self._access_policy.check(verb, resource, group=group, version=version)
+
+    def _filter_api_resources(self, resources: list[dict]) -> list[dict]:
+        """Apply the current policy to cached discovery entries."""
+        filtered = []
+        for resource in self._access_policy.filter_resources(resources):
+            entry = dict(resource)
+            if self._access_policy.enabled:
+                group, version = split_api_version(resource.get("version", ""))
+                decision = self._access_policy.check_visibility(
+                    resource.get("name", ""), group=group, version=version
+                )
+                entry["kr8sVisible"] = decision.visible
+                entry["kr8sApprovedVerbs"] = sorted(decision.approved_verbs)
+            filtered.append(entry)
+        return filtered
+
+    def _resource_visible(self, resource: dict) -> bool:
+        """Return whether a raw discovery entry may be displayed."""
+        group, version = split_api_version(resource.get("version", ""))
+        return self._access_policy.is_visible(
+            resource.get("name", ""), group=group, version=version
+        )
+
+    def _access_decisions(self, resources: list[dict]) -> list[AccessDecision]:
+        """Build display decisions for every raw discovery entry."""
+        decisions = []
+        for resource in resources:
+            group, version = split_api_version(resource.get("version", ""))
+            decisions.append(
+                self._access_policy.check_visibility(
+                    resource.get("name", ""), group=group, version=version
+                )
+            )
+        return decisions
+
+    def _request_access(
+        self,
+        method: str,
+        version: str,
+        base: str,
+        namespace: str | None,
+        url: str,
+        params: dict | None,
+    ) -> AccessDecision | None:
+        """Resolve the exact resource version targeted by a request and check it.
+
+        Returns ``None`` when the request is not a resource request (for example
+        discovery or version endpoints) or when the policy is permissive.
+        Raises :class:`AccessDeniedError` when the request is not approved.
+        """
+        if not self._access_policy.enabled:
+            return None
+        path = self._construct_url(version, base, namespace, url)
+        target = _parse_resource_path(path)
+        if target is None:
+            return None
+        group, api_version, resource, has_name, subresource = target
+        verb = _request_verb(method, has_name, subresource, params)
+        decision = self._access_policy.check(
+            verb, resource, group=group, version=api_version
+        )
+        if not decision.allowed:
+            raise AccessDeniedError(
+                f"Cannot send '{verb.upper()} {path}': {decision.explain()}",
+                decision=decision,
+            )
+        return decision
+
     @contextlib.asynccontextmanager
     async def call_api(
         self,
@@ -174,6 +325,14 @@ class Api:
         **kwargs,
     ) -> AsyncGenerator[httpx.Response]:
         """Make a Kubernetes API request."""
+        self._request_access(
+            method,
+            version,
+            base,
+            namespace,
+            url,
+            kwargs.get("params"),
+        )
         if not self._session or self._session.is_closed:
             await self._create_session()
         url = self._construct_url(version, base, namespace, url)
@@ -254,6 +413,14 @@ class Api:
         **kwargs,
     ) -> AsyncGenerator[httpx_ws.AsyncWebSocketSession]:
         """Open a websocket connection to a Kubernetes API endpoint."""
+        self._request_access(
+            "GET",
+            version,
+            base,
+            namespace,
+            url,
+            kwargs.get("params"),
+        )
         if not self._session or self._session.is_closed:
             await self._create_session()
         url = self._construct_url(version, base, namespace, url)
@@ -363,28 +530,50 @@ class Api:
                 [name] = cert.subject.get_attributes_for_oid(x509.OID_COMMON_NAME)
                 return name.value
 
-    async def lookup_kind(self, kind) -> tuple[str, str, bool]:
+    async def lookup_kind(self, kind, verb: str = "list") -> tuple[str, str, bool]:
         """Lookup a Kubernetes resource kind.
 
         Check whether a resource kind exists on the remote server.
 
         Args:
             kind: The kind of resource to lookup.
+            verb: The operation the caller is about to perform. Different
+                versions of the same resource name can be approved for different
+                verbs, so the version is selected for this exact operation.
 
         Returns:
             The kind of resource, the plural form and whether the resource is namespaced
 
         Raises:
+            AccessDeniedError: If the kind was discovered but no version is
+                approved for ``verb``.
             ValueError: If the kind is not found.
         """
-        return await self.async_lookup_kind(kind)
+        return await self.async_lookup_kind(kind, verb=verb)
 
     async def async_lookup_kind(
-        self, kind, skip_cache: bool = False
+        self, kind, skip_cache: bool = False, verb: str = "list"
     ) -> tuple[str, str, bool]:
-        """Lookup a Kubernetes resource kind."""
+        """Lookup a Kubernetes resource kind.
+
+        Args:
+            kind: The kind, plural, singular, short name or qualified name.
+            skip_cache: Bypass the discovery cache for this lookup.
+            verb: The operation the caller is about to perform. Different
+                versions of the same resource name may be approved for different
+                verbs, so the version is selected for this exact operation.
+
+        Returns:
+            The qualified kind, plural form and whether the resource is namespaced.
+
+        Raises:
+            AccessDeniedError: If the only discovered versions of the kind are
+                not approved for ``verb``.
+            ValueError: If the kind was not discovered at all.
+        """
         from ._objects import parse_kind
 
+        requested_kind = kind
         if skip_cache:
             resources = await self.async_api_resources_uncached()
         else:
@@ -392,13 +581,59 @@ class Api:
         kind, group, version = parse_kind(kind)
         if group:
             version = f"{group}/{version}"
-        for resource in resources:
-            if (not version or version in resource["version"]) and (
+
+        def matches_version(resource_version: str) -> bool:
+            if not version:
+                return True
+            if version.endswith("/"):
+                # Only a group was given, so any version in that group matches.
+                return resource_version.startswith(version)
+            return version == resource_version
+
+        def matches(resource: dict) -> bool:
+            return matches_version(resource["version"]) and (
                 kind == resource["name"]
                 or kind == resource["kind"]
                 or kind == resource["singularName"]
                 or ("shortNames" in resource and kind in resource["shortNames"])
-            ):
+            )
+
+        exact_version = bool(version) and not version.endswith("/")
+
+        for resource in resources:
+            if not self._resource_visible(resource):
+                continue
+            if matches(resource):
+                resource_group, resource_version = split_api_version(
+                    resource["version"]
+                )
+                approved = (
+                    not self._access_policy.enabled
+                    or self._access_policy.allows(
+                        verb,
+                        resource["name"],
+                        group=resource_group,
+                        version=resource_version,
+                    )
+                )
+                if not approved and not exact_version:
+                    # Only an unversioned lookup may fall through to another
+                    # visible version of the same resource name that is approved
+                    # for this operation. An explicitly requested version never
+                    # silently changes.
+                    continue
+                if not approved:
+                    decision = self._access_policy.check(
+                        verb,
+                        resource["name"],
+                        group=resource_group,
+                        version=resource_version,
+                    )
+                    raise AccessDeniedError(
+                        f"Kind {kind} is discovered at {resource['version']} but cannot be requested: "
+                        f"{decision.explain()}",
+                        decision=decision,
+                    )
                 if "/" in resource["version"]:
                     return (
                         f"{resource['singularName']}.{resource['version']}",
@@ -412,7 +647,31 @@ class Api:
                 )
 
         if not skip_cache:
-            return await self.async_lookup_kind(kind, skip_cache=True)
+            return await self.async_lookup_kind(
+                requested_kind, skip_cache=True, verb=verb
+            )
+
+        # The version was discovered but is not visible or not requestable.
+        # Surface that instead of pretending the kind does not exist.
+        if self._access_policy.enabled:
+            for resource in resources:
+                if not matches(resource):
+                    continue
+                resource_group, resource_version = split_api_version(
+                    resource["version"]
+                )
+                decision = self._access_policy.check(
+                    verb,
+                    resource["name"],
+                    group=resource_group,
+                    version=resource_version,
+                )
+                raise AccessDeniedError(
+                    f"Kind {kind} is discovered at "
+                    f"{resource['version']} but cannot be requested: "
+                    f"{decision.explain()}",
+                    decision=decision,
+                )
 
         raise ValueError(f"Kind {kind} not found.")
 
@@ -452,8 +711,11 @@ class Api:
             obj_cls = kind
         else:
             namespaced: bool | None = None
+            lookup_verb = "watch" if watch else "list"
             try:
-                kind, plural, namespaced = await self.async_lookup_kind(kind)
+                kind, plural, namespaced = await self.async_lookup_kind(
+                    kind, verb=lookup_verb
+                )
             except ServerError as e:
                 warnings.warn(str(e), stacklevel=1)
             if isinstance(kind, str):
@@ -692,9 +954,21 @@ class Api:
 
     # Cache for 6 hours because kubectl does
     # https://github.com/kubernetes/cli-runtime/blob/980bedf450ab21617b33d68331786942227fe93a/pkg/genericclioptions/config_flags.go#L297
-    @cached(TTLCache(1, 60 * 60 * 6))
     async def async_api_resources(self) -> list[dict]:
-        return await self.async_api_resources_uncached()
+        """Get the Kubernetes API resources visible under the access policy.
+
+        The raw discovery response is cached for six hours. The access policy is
+        applied on every read, so the cache keeps working while approvals change,
+        and a newly discovered version is never displayed unless it is approved
+        for display.
+        """
+        key = ("resources",)
+        try:
+            raw = self._api_resources_cache[key]
+        except KeyError:
+            raw = await self.async_api_resources_uncached()
+            self._api_resources_cache[key] = raw
+        return self._filter_api_resources(raw)
 
     async def async_api_resources_uncached(self) -> list[dict]:
         """Get the Kubernetes API resources."""
@@ -780,3 +1054,86 @@ def hash_kwargs(kwargs: dict):
         if isinstance(key_kwargs[key], dict):
             key_kwargs[key] = json.dumps(key_kwargs[key])
     return frozenset(key_kwargs.items())
+
+
+_NAMESPACE_SUBRESOURCES = frozenset({"finalize", "status"})
+
+
+def _parse_resource_path(
+    path: str,
+) -> tuple[str, str, str, bool, str | None] | None:
+    """Resolve the exact resource version targeted by an API path.
+
+    Args:
+        path: A constructed Kubernetes API path such as
+            ``/apis/apps/v1/namespaces/ns/deployments/name/scale``.
+
+    Returns:
+        A tuple of ``(group, version, resource, has_name, subresource)`` or
+        ``None`` when the path is not a resource request (for example a
+        discovery or version endpoint).
+    """
+    segments = [segment for segment in path.split("/") if segment]
+    if not segments:
+        return None
+    if segments[0] == "api":
+        if len(segments) < 2:
+            return None
+        group = ""
+        version = segments[1]
+        rest = segments[2:]
+    elif segments[0] == "apis":
+        if len(segments) < 3:
+            return None
+        group = segments[1]
+        version = segments[2]
+        rest = segments[3:]
+    else:
+        return None
+    if not rest:
+        return None
+
+    if rest[0] == "namespaces":
+        if len(rest) == 1:
+            return group, version, "namespaces", False, None
+        if len(rest) == 2:
+            return group, version, "namespaces", True, None
+        if len(rest) == 3 and rest[2] in _NAMESPACE_SUBRESOURCES:
+            return group, version, "namespaces", True, rest[2]
+        resource = rest[2]
+        remainder = rest[3:]
+    else:
+        resource = rest[0]
+        remainder = rest[1:]
+
+    has_name = bool(remainder)
+    subresource = remainder[1] if len(remainder) > 1 else None
+    return group, version, resource, has_name, subresource
+
+
+def _request_verb(
+    method: str,
+    has_name: bool,
+    subresource: str | None,
+    params: dict | None,
+) -> str:
+    """Derive the Kubernetes RBAC verb for a request."""
+    method = method.upper()
+    if subresource in ("exec", "attach", "portforward"):
+        # Kubernetes authorizes these connections with the create verb.
+        return "create"
+    if method == "GET":
+        if params and str(params.get("watch", "")).lower() == "true":
+            return "watch"
+        return "get" if has_name else "list"
+    if method == "POST":
+        return "create"
+    if method == "PUT":
+        return "update"
+    if method == "PATCH":
+        return "patch"
+    if method == "DELETE":
+        if has_name or subresource == "finalize":
+            return "delete"
+        return "deletecollection"
+    return method.lower()

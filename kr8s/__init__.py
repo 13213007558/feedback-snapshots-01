@@ -16,6 +16,7 @@ from functools import partial, update_wrapper
 from typing import Union, cast
 
 from . import asyncio, objects, portforward
+from ._access import AccessDecision, AccessPolicy, AccessRule
 from ._api import ALL
 from ._api import Api as _AsyncApi
 from ._async_utils import as_sync_func as _as_sync_func
@@ -25,6 +26,7 @@ from ._constants import (
     KUBERNETES_MINIMUM_SUPPORTED_VERSION,
 )
 from ._exceptions import (
+    AccessDeniedError,
     APITimeoutError,
     ConnectionClosedError,
     ExecError,
@@ -72,8 +74,8 @@ class Api(_AsyncApi):
     def whoami(self):  # type: ignore[override]
         return _as_sync_func(self.async_whoami)()
 
-    def lookup_kind(self, kind) -> tuple[str, str, bool]:  # type: ignore[override]
-        return _as_sync_func(self.async_lookup_kind)(kind)
+    def lookup_kind(self, kind, verb: str = "list") -> tuple[str, str, bool]:  # type: ignore[override]
+        return _as_sync_func(self.async_lookup_kind)(kind, verb=verb)
 
     def get(  # type: ignore[override]
         self,
@@ -123,6 +125,24 @@ class Api(_AsyncApi):
 
     def api_resources(self) -> list[dict]:  # type: ignore[override]
         return _as_sync_func(self.async_api_resources)()
+
+    def refresh_api_resources(self) -> list[dict]:  # type: ignore[override]
+        return _as_sync_func(self.async_refresh_api_resources)()
+
+    def api_resource_access(self) -> list[AccessDecision]:  # type: ignore[override]
+        return _as_sync_func(self.async_api_resource_access)()
+
+    def check_resource_access(  # type: ignore[override]
+        self,
+        verb: str,
+        resource: str,
+        *,
+        group: str = "",
+        version: str = "",
+    ) -> AccessDecision:
+        return _as_sync_func(self.async_check_resource_access)(
+            verb, resource, group=group, version=version
+        )
 
     def api_versions(self) -> Generator[str]:  # type: ignore[override]
         yield from _as_sync_generator(self.async_api_versions)()
@@ -264,6 +284,10 @@ __all__ = [
     "__version__",
     "__version_tuple__",
     "ALL",
+    "AccessDecision",
+    "AccessDeniedError",
+    "AccessPolicy",
+    "AccessRule",
     "api",
     "api_resources",
     "asyncio",
