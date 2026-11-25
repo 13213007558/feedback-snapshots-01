@@ -44,6 +44,8 @@ replacements = {
     "AsyncClientSession": "ClientSession",
     "_AsyncBoundSessionContext": "_BoundSessionContext",
     "AsyncChangeStream": "ChangeStream",
+    "AsyncAuditSubscription": "AuditSubscription",
+    "AsyncAuditCursor": "AuditCursor",
     "AsyncCollectionChangeStream": "CollectionChangeStream",
     "AsyncDatabaseChangeStream": "DatabaseChangeStream",
     "AsyncClusterChangeStream": "ClusterChangeStream",

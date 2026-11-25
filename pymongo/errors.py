@@ -378,6 +378,10 @@ class InvalidOperation(PyMongoError):
     """Raised when a client attempts to perform an invalid operation."""
 
 
+class ScopeRevokedError(PyMongoError):
+    """Raised when a change or resume point is blocked by an audit withdrawal."""
+
+
 class InvalidName(PyMongoError):
     """Raised when an invalid name is used."""
 
