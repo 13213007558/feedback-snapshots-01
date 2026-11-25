@@ -797,6 +797,75 @@ class PdfWriter(PdfDocCommon):
             self._page_id2num.setdefault(cast(IndirectObject, page.indirect_reference).idnum, index)
         return self._page_id2num.get(idnum)
 
+    def clone_page_for_composition(
+        self,
+        page: PageObject,
+        *,
+        excluded_fields: Iterable[str] = (),
+    ) -> PageObject:
+        """
+        Clone a template page into this writer without adding it to the output.
+
+        The returned page is registered in the writer, so it can be passed to
+        :meth:`compose_page`. It is not inserted into the page tree, thus its
+        content does not appear unless a composition publishes it.
+
+        Args:
+            page: Source page, usually taken from a :class:`PdfReader`.
+            excluded_fields: Dictionary keys to skip while cloning. Use this to
+                keep document-level extensions of the template internal.
+
+        Returns:
+            The cloned page, owned by this writer.
+
+        """
+        clone = cast(
+            "PageObject",
+            page.clone(self, force_duplicate=True, ignore_fields=list(excluded_fields) or ()),
+        )
+        if not isinstance(clone, PageObject):
+            clone = PageObject(self, clone.indirect_reference)
+        if clone.indirect_reference is None:
+            self._add_object(clone)
+        return clone
+
+    def compose_page(
+        self,
+        page: PageObject | int,
+        layers: Iterable[PageObject | tuple[str, PageObject] | Any],
+        *,
+        strict: bool = False,
+    ) -> Any:
+        """
+        Draw approved template pages onto one page with scope-aware resources.
+
+        Unlike :meth:`PageObject.merge_page`, every layer keeps its own resource
+        definitions. Colliding resource names are renamed per layer and the
+        layer's content stream is rewritten, so fonts and graphics keep using
+        their approved objects. Resources shared between layers are published
+        once.
+
+        Only rendering resources are copied. Document-level extension keys such
+        as ``/PieceInfo`` are kept internal unless a layer selects them through
+        :attr:`ComposeLayer.include_document_extensions`. Composition is
+        verified before it is accepted; a rejected composition leaves the
+        page untouched.
+
+        Args:
+            page: Destination page, or its index.
+            layers: Approved layers to draw over the page. Each may be a
+                :class:`ComposeLayer`, a page, or a ``(name, page)`` tuple.
+            strict: Raise :class:`ScopeConflictError` on a scope conflict
+                instead of returning the conflicts in the result.
+
+        Returns:
+            The :class:`CompositionResult`.
+
+        """
+        from ._composition import compose_page  # noqa: PLC0415
+
+        return compose_page(self, page, layers, strict=strict)
+
     def add_blank_page(
         self, width: float | None = None, height: float | None = None
     ) -> PageObject:

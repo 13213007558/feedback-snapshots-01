@@ -16,6 +16,17 @@ from ._reader import PdfReader
 from ._text_extraction import mult
 from ._version import __version__
 from ._writer import ObjectDeletionFlag, PdfWriter
+from ._composition import (
+    ComposeLayer,
+    CompositionResult,
+    PublishedResource,
+    ResourceScopeReport,
+    ScopeConflict,
+    ScopeConflictError,
+    check_page_resource_references,
+    compose_page,
+    reachable_object_numbers,
+)
 from .constants import ImageType
 from .pagerange import PageRange, parse_filename_page_ranges
 from .papersizes import PaperSize
@@ -32,6 +43,8 @@ _debug_versions = (
 )
 
 __all__ = [
+    "ComposeLayer",
+    "CompositionResult",
     "Configuration",
     "DocumentInformation",
     "ImageType",
@@ -40,14 +53,21 @@ __all__ = [
     "PageRange",
     "PaperSize",
     "PasswordType",
+    "PublishedResource",
+    "ResourceScopeReport",
+    "ScopeConflict",
+    "ScopeConflictError",
     "PdfReader",
     "PdfWriter",
     "Transformation",
     "__version__",
     "_debug_versions",
     "apply_configuration",
+    "check_page_resource_references",
+    "compose_page",
     "get_configuration",
     "mult",
     "overwrite_configuration",
     "parse_filename_page_ranges",
+    "reachable_object_numbers",
 ]
