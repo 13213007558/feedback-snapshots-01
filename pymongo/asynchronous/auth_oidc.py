@@ -72,7 +72,7 @@ class _OIDCAuthenticator(_OIDCAuthenticatorBase):
         if ctx and ctx.speculate_succeeded():
             resp = ctx.speculative_authenticate
             if resp and resp["done"]:
-                conn.oidc_token_gen_id = self.token_gen_id
+                self.bind_connection(conn)
                 return resp
 
         # If spec auth failed, call the appropriate auth logic for the callback type.
@@ -209,13 +209,13 @@ class _OIDCAuthenticator(_OIDCAuthenticatorBase):
         if "issuer" in start_payload:
             self.idp_info = OIDCIdPInfo(**start_payload)
         access_token = await self._get_access_token()
-        conn.oidc_token_gen_id = self.token_gen_id
+        self.bind_connection(conn)
         cmd = self._get_continue_command({"jwt": access_token}, start_resp)
         return await self._run_command(conn, cmd)
 
     async def _sasl_start_jwt(self, conn: AsyncConnection) -> Mapping[str, Any]:
         access_token = await self._get_access_token()
-        conn.oidc_token_gen_id = self.token_gen_id
+        self.bind_connection(conn)
         cmd = self._get_start_command({"jwt": access_token})
         return await self._run_command(conn, cmd)
 

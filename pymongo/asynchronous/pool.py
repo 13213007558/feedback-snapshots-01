@@ -948,6 +948,10 @@ class Pool(_AgnosticBasePool["AsyncConnection"]):
             await conn.close_conn(ConnectionClosedReason.STALE)
             return True
 
+        if self._auth_material_is_stale(conn):
+            await conn.close_conn(ConnectionClosedReason.STALE)
+            return True
+
         return False
 
     def __del__(self) -> None:

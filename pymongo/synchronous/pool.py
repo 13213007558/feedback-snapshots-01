@@ -946,6 +946,10 @@ class Pool(_AgnosticBasePool["Connection"]):
             conn.close_conn(ConnectionClosedReason.STALE)
             return True
 
+        if self._auth_material_is_stale(conn):
+            conn.close_conn(ConnectionClosedReason.STALE)
+            return True
+
         return False
 
     def __del__(self) -> None:

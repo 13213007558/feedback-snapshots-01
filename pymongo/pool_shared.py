@@ -38,6 +38,7 @@ from typing import (
 from pymongo import _csot
 from pymongo._telemetry import _CmapTelemetry
 from pymongo.asynchronous.helpers import _getaddrinfo
+from pymongo.auth_oidc_shared import _oidc_material_is_current
 from pymongo.common import MAX_BSON_SIZE, MAX_MESSAGE_SIZE, MAX_WIRE_VERSION, MAX_WRITE_BATCH_SIZE
 from pymongo.errors import (  # type:ignore[attr-defined]
     AutoReconnect,
@@ -137,6 +138,7 @@ class _AgnosticBaseConnection(_ConnectionTelemetryInfo, Generic[_PoolT]):
         self.compression_context: SnappyContext | ZlibContext | ZstdContext | None = None
         self.socket_checker: SocketChecker = SocketChecker()
         self.oidc_token_gen_id: int | None = None
+        self.oidc_account_role: Any | None = None
         # Support for mechanism negotiation on the initial handshake.
         self.negotiated_mechs: list[str] | None = None
         self.auth_ctx: _AuthContext | None = None
@@ -341,6 +343,9 @@ class _AgnosticBasePool(Generic[_ConnT]):
     def stale_generation(self, gen: int, service_id: ObjectId | None) -> bool:
         return self.gen.stale(gen, service_id)
 
+    def _auth_material_is_stale(self, conn: _ConnT) -> bool:
+        return not _oidc_material_is_current(self.opts._credentials, conn)
+
     def _handle_connection_error(self, error: BaseException) -> None:
         # Handle system overload condition for non-sdam pools.
         # Look for errors of type AutoReconnect and add error labels if appropriate.
@@ -407,6 +412,8 @@ class _AgnosticBasePool(Generic[_ConnT]):
                 # CMAP requires the closed event be emitted after the check in.
                 emit_closed = True
             elif self.stale_generation(conn.generation, conn.service_id):
+                close_conn_reason = ConnectionClosedReason.STALE
+            elif self._auth_material_is_stale(conn):
                 close_conn_reason = ConnectionClosedReason.STALE
             else:
                 conn.update_last_checkin_time()

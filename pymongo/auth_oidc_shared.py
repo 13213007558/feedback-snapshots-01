@@ -157,6 +157,7 @@ class _OIDCAuthenticatorBase:
     idp_info: OIDCIdPInfo | None = field(default=None)
     token_gen_id: int = field(default=0)
     last_call_time: float = field(default=0)
+    approved_role: Any | None = field(default=None)
 
     def get_spec_auth_cmd(self) -> MutableMapping[str, Any] | None:
         """Get the appropriate speculative auth command."""
@@ -174,7 +175,39 @@ class _OIDCAuthenticatorBase:
         # current token gen id.
         if (oidc_token_gen_id or 0) < self.token_gen_id:
             return
+        # Advance the generation before the replacement token is fetched. This
+        # closes the window where another coroutine/thread could lend an idle
+        # connection authenticated with the invalidated material.
+        self.token_gen_id += 1
         self.access_token = None
+
+    def rotate_account_material(self) -> None:
+        """Forget cached account material and retire connections using it."""
+        self.access_token = None
+        self.refresh_token = None
+        self.token_gen_id += 1
+
+    def approve_role(self, role: Any) -> None:
+        """Approve a new OIDC role and retire connections bound to another role."""
+        if role == self.approved_role:
+            return
+        self.approved_role = role
+        self.rotate_account_material()
+
+    def bind_connection(self, conn: Any) -> None:
+        """Record the account material used to authenticate conn."""
+        conn.oidc_token_gen_id = self.token_gen_id
+        conn.oidc_account_role = self.approved_role
+
+    def connection_material_is_current(self, conn: Any) -> bool:
+        """Return whether conn used the newest known OIDC account material."""
+        conn_role = getattr(conn, "oidc_account_role", None)
+        if self.approved_role is not None and conn_role != self.approved_role:
+            return False
+        conn_gen_id = getattr(conn, "oidc_token_gen_id", None)
+        if conn_gen_id is None:
+            return True
+        return conn_gen_id >= self.token_gen_id
 
     def _get_start_command(self, payload: Mapping[str, Any] | None) -> MutableMapping[str, Any]:
         if payload is None:
@@ -195,6 +228,17 @@ class _OIDCAuthenticatorBase:
             "payload": bin_payload,
             "conversationId": start_resp["conversationId"],
         }
+
+
+def _oidc_material_is_current(credentials: MongoCredential | None, conn: Any) -> bool:
+    """Check whether a pooled connection matches current OIDC account material."""
+    if credentials is None or credentials.mechanism != "MONGODB-OIDC" or credentials.cache is None:
+        return True
+    authenticator = credentials.cache.data
+    is_current = getattr(authenticator, "connection_material_is_current", None)
+    if is_current is None:
+        return True
+    return bool(is_current(conn))
 
 
 def _get_authenticator(
