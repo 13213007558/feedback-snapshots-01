@@ -146,3 +146,4 @@ Enhancements
   :meth:`~pydicom.dataset.Dataset.update_raw_element` (:issue:`2170`)
 * The error for an unknown VR now names the pydicom version and the edition of the DICOM
   Standard it implements (:issue:`2336`)
+* :meth:`Dataset.remove_private_tags<pydicom.dataset.Dataset.remove_private_tags>` now accepts optional creator-aware rules for retaining selected private tags, resolved independently within each dataset and sequence item.

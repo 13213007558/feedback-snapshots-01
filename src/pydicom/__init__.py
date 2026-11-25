@@ -30,6 +30,16 @@ Quick Start
 
 from pydicom.dataelem import DataElement
 from pydicom.dataset import Dataset, FileDataset, FileMetaDataset
+from pydicom.deidentification import (
+    DeidentificationPolicy,
+    DeidentificationRule,
+    PrivateTagAllowList,
+    PrivateTagAllowlist,
+    PrivateTagPolicy,
+    PrivateTagRule,
+    deidentify_dataset,
+)
+from pydicom.deidentification import deidentify_dataset as deidentify
 import pydicom.examples
 from pydicom.filereader import dcmread
 from pydicom.filewriter import dcmwrite
@@ -43,14 +53,25 @@ from ._version import (
     __concepts_version__,
 )
 
+anonymize = deidentify
+
 __all__ = [
     "DataElement",
     "Dataset",
+    "DeidentificationPolicy",
+    "DeidentificationRule",
     "FileDataset",
     "FileMetaDataset",
+    "PrivateTagAllowList",
+    "PrivateTagAllowlist",
+    "PrivateTagPolicy",
+    "PrivateTagRule",
     "Sequence",
+    "anonymize",
     "dcmread",
     "dcmwrite",
+    "deidentify",
+    "deidentify_dataset",
     "pixel_array",
     "iter_pixels",
     "__version__",

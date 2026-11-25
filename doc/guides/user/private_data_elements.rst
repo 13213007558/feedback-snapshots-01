@@ -127,6 +127,33 @@ This can also be helpful during interactive sessions when exploring DICOM
 files, to remove a large number of lines from the display of a dataset --
 lines which may not provide useful information.
 
+Preserving selected private diagnostic tags
+-------------------------------------------
+
+If a data-use agreement permits a few private tags, pass a creator-aware rule
+to the same method.  Creator values are resolved from the private creator
+element in the immediate dataset or sequence item that contains each tag.
+This matters because two sequence items can contain the same numeric private
+tag but allocate it to different private creators:
+
+.. code-block:: python
+
+    rules = {
+        "Diagnostics Vendor A": [0x00411001, 0x00411002],
+        # A low byte such as 0x01 is treated as a creator-block offset:
+        "Diagnostics Vendor B": [0x01],
+    }
+    ds.remove_private_tags(rules)
+    ds.save_as("limited-private.dcm")
+
+The corresponding private creator elements are retained for allowed data
+elements so the re-read dataset can still resolve
+:meth:`Dataset.private_block`.  Tags from an untrusted creator, including
+tags with the same numeric tag as an allowed tag in another sequence item, are
+removed.  Raw and deferred elements are classified from their tag and local
+creator element; their values do not need to be decoded before applying the
+rule.
+
 Adding new elements to the DICOM dictionaries
 ---------------------------------------------
 *pydicom* contains a dictionary with all known public elements from the latest DICOM standard,

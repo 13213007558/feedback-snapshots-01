@@ -2575,16 +2575,64 @@ class Dataset:  # noqa: PLW1641
         )
         return self._read_little
 
-    def remove_private_tags(self) -> None:
-        """Remove all private elements from the :class:`Dataset`."""
+    def remove_private_tags(
+        self,
+        rules: Any = None,
+        **options: Any,
+    ) -> None:
+        """Remove private elements from the :class:`Dataset`.
 
-        def remove_callback(dataset: "Dataset", elem: DataElement) -> None:
-            """Internal method to use as callback to walk() method."""
-            if elem.tag.is_private:
-                # can't del self[tag] - won't be right dataset on recursion
-                del dataset[elem.tag]
+        By default all private elements are removed, as in earlier versions.
+        Pass an optional creator-aware `rules` policy to retain only selected
+        private diagnostic tags. Rules are evaluated in the immediate dataset
+        that owns each element, so identically numbered tags in different
+        sequence items can have different creators and outcomes.
 
-        self.walk(remove_callback)
+        Parameters
+        ----------
+        rules : Any, optional
+            A :class:`~pydicom.deidentification.PrivateTagPolicy`,
+            :class:`~pydicom.deidentification.PrivateTagRule`, creator-to-tags
+            mapping, predicate, or collection of rules.
+        **options : Any
+            Additional policy options such as ``allowed_private_tags``,
+            ``trusted_creators`` or ``predicate``.
+        """
+        if rules is None and not options:
+
+            def remove_callback(dataset: "Dataset", elem: DataElement) -> None:
+                """Internal method to use as callback to walk() method."""
+                if elem.tag.is_private:
+                    # can't del self[tag] - won't be right dataset on recursion
+                    del dataset[elem.tag]
+
+            self.walk(remove_callback)
+            return
+
+        recursive = options.pop("recursive", True)
+        from pydicom.deidentification import PrivateTagPolicy
+
+        policy = (
+            rules
+            if isinstance(rules, PrivateTagPolicy)
+            else PrivateTagPolicy(rules, **options)
+        )
+        policy.apply(self, recursive=recursive)
+
+    def deidentify(self, rules: Any = None, **options: Any) -> "Dataset":
+        """Apply de-identification options and return this dataset.
+
+        This currently provides the optional creator-aware private-tag rule
+        through :meth:`remove_private_tags`; standard attribute replacement
+        remains the caller's responsibility or can be supplied as a rule
+        predicate.
+        """
+        self.remove_private_tags(rules, **options)
+        return self
+
+    def anonymize(self, rules: Any = None, **options: Any) -> "Dataset":
+        """Alias for :meth:`deidentify`."""
+        return self.deidentify(rules, **options)
 
     def save_as(
         self,
