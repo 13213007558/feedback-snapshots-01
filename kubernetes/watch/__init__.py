@@ -12,8 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .watch import Watch
+from .watch import RestrictedView, Watch
 
 __all__ = [
+    "RestrictedView",
     "Watch",
 ]

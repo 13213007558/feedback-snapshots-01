@@ -23,7 +23,7 @@ from unittest.mock import Mock, call
 from kubernetes import client, config
 from kubernetes.client import ApiException
 
-from .watch import Watch
+from .watch import RestrictedView, Watch
 
 
 class WatchTests(unittest.TestCase):
@@ -726,6 +726,123 @@ class WatchTests(unittest.TestCase):
             call(_preload_content=False, watch=True)
         ])
     
+
+    def test_watch_restricted_view_filters_and_resumes(self):
+        # Stream 1: an out-of-scope event and a bookmark. Neither is
+        # delivered downstream, but both advance the internal resource
+        # version used to resume after the disconnect.
+        hidden = ('{"type": "ADDED", "object": {"metadata": {"name": "hidden",'
+                  '"resourceVersion": "10"}, "data": {"token": "s3cr3t"}}}\n')
+        bookmark = ('{"type": "BOOKMARK", "object": {"metadata": '
+                    '{"resourceVersion": "12"}}}\n')
+        # Stream 2: two events read from the wire in a single segment. The
+        # caller tightens the permission after the first one is delivered,
+        # so the second one - although already read - is evaluated against
+        # the latest scope and omitted.
+        segment = (
+            '{"type": "ADDED", "object": {"metadata": {"name": "public",'
+            '"resourceVersion": "13"}, "data": {"token": "abc"}}}\n'
+            '{"type": "ADDED", "object": {"metadata": {"name": "hidden2",'
+            '"resourceVersion": "14"}, "data": {"token": "def"}}}\n')
+
+        resp1 = Mock()
+        resp1.stream = Mock(return_value=[hidden, bookmark])
+        resp2 = Mock()
+        resp2.stream = Mock(return_value=[segment])
+        resp3 = Mock()
+        resp3.stream = Mock(return_value=[])
+
+        allowed = {'public', 'hidden2'}
+        internal_events = []
+
+        def permit(event):
+            internal_events.append(event)
+            return (event['type'] != 'BOOKMARK'
+                    and event['raw_object']['metadata']['name'] in allowed)
+
+        view = RestrictedView(
+            fields=('metadata.name', 'metadata.resourceVersion'),
+            permit=permit)
+        w = Watch(view=view)
+
+        call_order = []
+        resp1.close = Mock(side_effect=lambda: call_order.append('close1'))
+        resp2.close = Mock(side_effect=lambda: call_order.append('close2'))
+        resp3.close = Mock(side_effect=lambda: call_order.append('close3'))
+        responses = [resp1, resp2, resp3]
+        calls = []
+
+        def get_namespaces(*args, **kwargs):
+            calls.append(kwargs)
+            call_order.append('call')
+            if len(calls) == 3:
+                w.stop()
+            return responses[len(calls) - 1]
+
+        fake_api = Mock()
+        fake_api.get_namespaces = Mock(side_effect=get_namespaces)
+        fake_api.get_namespaces.__doc__ = ':rtype: V1NamespaceList'
+
+        received = []
+        for e in w.stream(fake_api.get_namespaces):
+            received.append(e)
+            # tighten the permission while the watch is running
+            allowed.discard('hidden2')
+
+        # only the in-scope event is delivered, restricted to the
+        # configured fields and without a 'raw_object' reference
+        self.assertEqual(
+            [{'type': 'ADDED',
+              'object': {'metadata': {'name': 'public',
+                                      'resourceVersion': '13'}}}],
+            received)
+        # the delivered event shares no references with the internal one
+        self.assertIsNot(received[0]['object']['metadata'],
+                         internal_events[2]['raw_object']['metadata'])
+        # the resume requests use the versions from the real events and
+        # bookmarks, never rewinding to the last delivered event
+        self.assertNotIn('resource_version', calls[0])
+        self.assertEqual('12', calls[1]['resource_version'])
+        self.assertEqual('14', calls[2]['resource_version'])
+        self.assertEqual('14', w.resource_version)
+        # the old stream is closed before the next one is requested
+        self.assertEqual(
+            ['call', 'close1', 'call', 'close2', 'call', 'close3'],
+            call_order)
+
+    def test_watch_restricted_view_preserves_410_state(self):
+        gone = ('{"type": "ERROR", "object": {"code": 410, "reason": "Gone",'
+                ' "message": "too old resource version"}}\n')
+        added = ('{"type": "ADDED", "object": {"metadata": {"name": "public",'
+                 '"resourceVersion": "5"}}}\n')
+
+        resp1 = Mock()
+        resp1.stream = Mock(return_value=[added, gone])
+        resp2 = Mock()
+        resp2.stream = Mock(return_value=[gone])
+
+        fake_api = Mock()
+        fake_api.get_thing = Mock(side_effect=[resp1, resp2])
+        fake_api.get_thing.__doc__ = ':rtype: V1NamespaceList'
+
+        w = Watch(view=RestrictedView(fields=('metadata.name',)))
+        received = []
+        with self.assertRaises(client.rest.ApiException) as cm:
+            for e in w.stream(fake_api.get_thing, resource_version="1"):
+                received.append(e)
+
+        # the expired version surfaces to the caller and the last real
+        # resource version is preserved
+        self.assertEqual(410, cm.exception.status)
+        self.assertEqual("5", w.resource_version)
+        self.assertEqual(
+            [{'type': 'ADDED', 'object': {'metadata': {'name': 'public'}}}],
+            received)
+        fake_api.get_thing.assert_has_calls([
+            call(_preload_content=False, watch=True, resource_version="1"),
+            call(_preload_content=False, watch=True, resource_version="5"),
+        ])
+
 
 if __name__ == '__main__':
     unittest.main()

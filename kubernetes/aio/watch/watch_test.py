@@ -18,7 +18,7 @@ from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, Mock, call, create_autospec
 
 import kubernetes.aio
-from kubernetes.aio.watch import Watch
+from kubernetes.aio.watch import RestrictedView, Watch
 
 
 async def _watch_operation(*args, **kwargs):
@@ -391,6 +391,95 @@ class WatchTest(IsolatedAsyncioTestCase):
 
         fake_resp.release.assert_called_once_with()
         self.assertEqual(watch.resource_version, '10')
+
+    async def test_watch_restricted_view_filters_and_resumes(self):
+        # Stream 1: an out-of-scope event and a bookmark. Neither is
+        # delivered downstream, but both advance the internal resource
+        # version used to resume after the disconnect.
+        hidden = {"type": "ADDED",
+                  "object": {"metadata": {"name": "hidden",
+                                          "resourceVersion": "10"},
+                             "data": {"token": "s3cr3t"}}}
+        bookmark = {"type": "BOOKMARK",
+                    "object": {"metadata": {"resourceVersion": "12"}}}
+        # Stream 2: two events. The caller tightens the permission after
+        # the first one is delivered, so the second one - although already
+        # read - is evaluated against the latest scope and omitted.
+        public = {"type": "ADDED",
+                  "object": {"metadata": {"name": "public",
+                                          "resourceVersion": "13"},
+                             "data": {"token": "abc"}}}
+        hidden2 = {"type": "ADDED",
+                   "object": {"metadata": {"name": "hidden2",
+                                           "resourceVersion": "14"},
+                              "data": {"token": "def"}}}
+
+        resp1 = Mock()
+        resp1.content.readline = AsyncMock(side_effect=[
+            json.dumps(hidden).encode('utf8'),
+            json.dumps(bookmark).encode('utf8'),
+            b''])
+        resp2 = Mock()
+        resp2.content.readline = AsyncMock(side_effect=[
+            json.dumps(public).encode('utf8'),
+            json.dumps(hidden2).encode('utf8'),
+            b''])
+        resp3 = Mock()
+
+        allowed = {'public', 'hidden2'}
+        internal_events = []
+
+        def permit(event):
+            internal_events.append(event)
+            return (event['type'] != 'BOOKMARK'
+                    and event['raw_object']['metadata']['name'] in allowed)
+
+        view = RestrictedView(
+            fields=('metadata.name', 'metadata.resourceVersion'),
+            permit=permit)
+        watch = kubernetes.aio.watch.Watch(view=view)
+
+        call_order = []
+        resp1.close = Mock(side_effect=lambda: call_order.append('close1'))
+        resp2.close = Mock(side_effect=lambda: call_order.append('close2'))
+        responses = [resp1, resp2, resp3]
+        calls = []
+
+        async def get_namespaces(*args, **kwargs):
+            calls.append(kwargs)
+            call_order.append('call')
+            if len(calls) == 3:
+                watch.stop()
+            return responses[len(calls) - 1]
+
+        get_namespaces.__doc__ = ':rtype: V1NamespaceList'
+
+        received = []
+        async with watch:
+            async for e in watch.stream(get_namespaces):
+                received.append(e)
+                # tighten the permission while the watch is running
+                allowed.discard('hidden2')
+
+        # only the in-scope event is delivered, restricted to the
+        # configured fields and without a 'raw_object' reference
+        self.assertEqual(
+            [{'type': 'ADDED',
+              'object': {'metadata': {'name': 'public',
+                                      'resourceVersion': '13'}}}],
+            received)
+        # the delivered event shares no references with the internal one
+        self.assertIsNot(received[0]['object']['metadata'],
+                         internal_events[2]['raw_object']['metadata'])
+        # the resume requests use the versions from the real events and
+        # bookmarks, never rewinding to the last delivered event
+        self.assertNotIn('resource_version', calls[0])
+        self.assertEqual('12', calls[1]['resource_version'])
+        self.assertEqual('14', calls[2]['resource_version'])
+        self.assertEqual('14', watch.resource_version)
+        # the old stream is closed before the next one is requested
+        self.assertEqual(['call', 'close1', 'call', 'close2', 'call'],
+                         call_order)
 
     async def test_unmarshal_bookmark_succeeds_and_preserves_resource_version(self):
         w = Watch()

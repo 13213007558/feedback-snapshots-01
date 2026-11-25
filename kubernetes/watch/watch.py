@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import http
 import inspect
 import json
@@ -84,13 +85,66 @@ def iter_resp_lines(resp):
             next_newline = buffer.find(b'\n')
 
 
+class RestrictedView:
+    """A field- and permission-restricted view of watch events.
+
+    Use this when watch events are forwarded to consumers that are only
+    allowed to see a subset of the data, e.g. another network zone. The
+    watcher still tracks the real events and bookmarks internally, so its
+    resource version keeps advancing even for events the view omits.
+
+    The view is applied when an event is about to be delivered, not when
+    it is read from the stream, so a tightened permission also applies to
+    events that were already read but not yet delivered.
+
+    Delivered events are freshly built dicts of the form
+    ``{'type': ..., 'object': {...}}`` containing only the configured
+    fields; they share no references with the original event objects.
+
+    :param fields: Dotted paths into the raw object that are exposed to
+                   the caller, e.g. ``("metadata.name",
+                   "metadata.resourceVersion")``.
+    :param permit: Optional callable receiving the full internal event
+                   dict (with 'type', 'object' and 'raw_object' keys) and
+                   returning whether the event may be delivered. It is
+                   evaluated at delivery time, so mutating the state it
+                   closes over changes the permission of a running watch.
+    """
+
+    def __init__(self, fields=(), permit=None):
+        self.fields = tuple(fields)
+        self.permit = permit
+
+    def __call__(self, event):
+        if self.permit is not None and not self.permit(event):
+            return None
+        source = event.get('raw_object', event.get('object'))
+        projected = {}
+        for path in self.fields:
+            parts = path.split('.')
+            value = source
+            for part in parts:
+                if not isinstance(value, dict) or part not in value:
+                    break
+                value = value[part]
+            else:
+                target = projected
+                for part in parts[:-1]:
+                    target = target.setdefault(part, {})
+                target[parts[-1]] = copy.deepcopy(value)
+        return {'type': event['type'], 'object': projected}
+
+
 class Watch:
 
-    def __init__(self, return_type=None):
+    def __init__(self, return_type=None, view=None):
         self._raw_return_type = return_type
         self._stop = False
         self._api_client = client.ApiClient()
         self.resource_version = None
+        # Optional callable mapping an internal event to the event
+        # delivered to the caller, or None to omit it. See RestrictedView.
+        self._view = view
 
     def stop(self):
         self._stop = True
@@ -182,6 +236,10 @@ class Watch:
         :param func: The API function pointer. Any parameter to the function
                      can be passed after this parameter.
 
+        If the Watch was created with a ``view``, each event is passed
+        through it before delivery and only the events it returns are
+        yielded.
+
         :return: Event object with these keys:
                    'type': The type of event such as "ADDED", "DELETED", etc.
                    'raw_object': a dict representing the watched object.
@@ -249,7 +307,14 @@ class Watch:
                             # unmarshal_event returns None for blank or
                             # undecodable lines; skip them.
                             retry_after_410 = False
-                            yield event
+                            if self._view is not None:
+                                # Applied at delivery time so the latest
+                                # permission state is used, even for events
+                                # read from the wire earlier. Omitted events
+                                # still advanced self.resource_version above.
+                                event = self._view(event)
+                            if event is not None:
+                                yield event
                     else:
                         if line:  
                             yield line  # Normal non-empty line
