@@ -7,6 +7,15 @@ Pixel Data (:mod:`pydicom.pixels`)
 .. currentmodule:: pydicom.pixels
 
 
+Decode budget
+-------------
+
+.. autosummary::
+   :toctree: generated/
+
+   DecodeBudget
+   DecodeBudgetExceeded
+
 Image processing functions
 
 .. autosummary::

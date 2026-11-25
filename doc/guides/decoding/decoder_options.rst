@@ -114,6 +114,57 @@ buffer-like object:
   include those extra frames in the returned data, otherwise return only the number
   of frames given by *Number of Frames*.
 
+Decode Budget
+=============
+
+Build limited previews, thumbnails or single frames without allowing a large
+dataset to consume unbounded decoding work. Pass a
+:class:`~pydicom.pixels.DecodeBudget` to either
+:func:`~pydicom.pixels.pixel_array` or :func:`~pydicom.pixels.iter_pixels`
+(and to the corresponding :meth:`Decoder.as_array()
+<pydicom.pixels.decoders.base.Decoder.as_array>` and
+:meth:`Decoder.iter_array()
+<pydicom.pixels.decoders.base.Decoder.iter_array>` methods):
+
+.. code-block:: python
+
+    from pydicom.pixels import DecodeBudget, iter_pixels
+
+    budget = DecodeBudget(max_frames=2, max_bytes=1024 * 1024)
+    for frame in iter_pixels("path/to/dataset.dcm", budget=budget):
+        ...
+
+The budget limits two quantities, each optional:
+
+* `max_frames`: the number of frames that may actually be expanded.
+* `max_bytes`: the number of bytes allocated for the decoded output.
+
+Both entry points account against the same counters, so changing from
+:func:`~pydicom.pixels.pixel_array` to :func:`~pydicom.pixels.iter_pixels`
+doesn't bypass the limit. The counters are checked before the next frame is
+expanded or allocation is made, and are incremented only once the
+corresponding work is complete.
+
+When a limit is reached, :class:`~pydicom.pixels.DecodeBudgetExceeded` is
+raised:
+
+* With :func:`~pydicom.pixels.iter_pixels` (or ``iter_array()``), frames that
+  were already yielded are complete. The exception's
+  :attr:`~pydicom.pixels.DecodeBudgetExceeded.result_usable` is ``True`` and
+  :attr:`~pydicom.pixels.DecodeBudgetExceeded.frames_decoded` gives the number
+  of frames delivered so far.
+* With :func:`~pydicom.pixels.pixel_array` (or ``as_array()``), the partial
+  result is never returned. :attr:`result_usable
+  <pydicom.pixels.DecodeBudgetExceeded.result_usable>` is ``False`` and the
+  counters still report how much work had been done.
+
+Ordinary decoding errors (such as when all decoding plugins fail) are
+unchanged. A budget is stateful, so create a new
+:class:`~pydicom.pixels.DecodeBudget` for each independent decode operation;
+:meth:`DecodeBudget.reset() <pydicom.pixels.DecodeBudget.reset>` clears the
+used counters while keeping the limits. Passing no budget, or one with both
+limits set to ``None``, keeps the existing behavior.
+
 The following options may be used with native (uncompressed) transfer syntaxes
 when decoding to a NumPy :class:`~numpy.ndarray`:
 

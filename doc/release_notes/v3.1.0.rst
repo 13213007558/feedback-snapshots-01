@@ -146,3 +146,9 @@ Enhancements
   :meth:`~pydicom.dataset.Dataset.update_raw_element` (:issue:`2170`)
 * The error for an unknown VR now names the pydicom version and the edition of the DICOM
   Standard it implements (:issue:`2336`)
+* Added an optional :class:`~pydicom.pixels.DecodeBudget` for limiting the work
+  done by a single pixel data decode operation. Both
+  :func:`~pydicom.pixels.pixel_array` and :func:`~pydicom.pixels.iter_pixels`
+  account the frames that are really expanded and the bytes allocated against
+  the same counters, and :class:`~pydicom.pixels.DecodeBudgetExceeded` reports
+  whether the frames delivered so far remain usable.

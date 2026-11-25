@@ -40,6 +40,7 @@ from pydicom.valuerep import VR
 if TYPE_CHECKING:  # pragma: no cover
     from os import PathLike
     from pydicom.dataset import Dataset
+    from pydicom.pixels.budget import DecodeBudget
 
 
 LOGGER = logging.getLogger(__name__)
@@ -1112,6 +1113,7 @@ def iter_pixels(
     indices: Iterable[int] | None = None,
     raw: bool = False,
     decoding_plugin: str = "",
+    budget: "DecodeBudget | None" = None,
     **kwargs: Any,
 ) -> Iterator["np.ndarray"]:
     """Yield decoded pixel data frames from `src` as :class:`~numpy.ndarray`.
@@ -1214,6 +1216,11 @@ def iter_pixels(
         available plugins will be tried and the result from the first successful
         one yielded. For information on the available plugins for each
         decoder see the :doc:`API documentation</reference/pixels.decoders>`.
+    budget : pydicom.pixels.DecodeBudget, optional
+        An optional budget limiting the number of frames that are expanded and
+        the bytes allocated for the decoded output. Frames that have already
+        been yielded remain usable when the budget is exceeded. See
+        :class:`~pydicom.pixels.DecodeBudget` for more information.
     **kwargs
         Optional keyword parameters for controlling decoding are also
         available, please see the :doc:`decoding options documentation
@@ -1258,6 +1265,7 @@ def iter_pixels(
             validate=True,
             raw=raw,
             decoding_plugin=decoding_plugin,
+            budget=budget,
             **opts,
         )
         for arr, _ in iterator:
@@ -1303,6 +1311,7 @@ def iter_pixels(
             validate=True,
             raw=raw,
             decoding_plugin=decoding_plugin,
+            budget=budget,
             **opts,
         )
         for arr, _ in iterator:
@@ -1447,6 +1456,7 @@ def pixel_array(
     index: int | None = None,
     raw: bool = False,
     decoding_plugin: str = "",
+    budget: "DecodeBudget | None" = None,
     **kwargs: Any,
 ) -> "np.ndarray":
     """Return decoded pixel data from `src` as :class:`~numpy.ndarray`.
@@ -1547,6 +1557,11 @@ def pixel_array(
         available plugins will be tried and the result from the first successful
         one returned. For information on the available plugins for each
         decoder see the :doc:`API documentation</reference/pixels.decoders>`.
+    budget : pydicom.pixels.DecodeBudget, optional
+        An optional budget limiting the number of frames that are expanded and
+        the bytes allocated for the decoded output. It's checked before the
+        output array is allocated, so a partial array is never returned. See
+        :class:`~pydicom.pixels.DecodeBudget` for more information.
     **kwargs
         Optional keyword parameters for controlling decoding, please see the
         :doc:`decoding options documentation</guides/decoding/decoder_options>`
@@ -1593,6 +1608,7 @@ def pixel_array(
             validate=True,
             raw=raw,
             decoding_plugin=decoding_plugin,
+            budget=budget,
             **opts,
         )[0]
 
@@ -1628,6 +1644,7 @@ def pixel_array(
             validate=True,
             raw=raw,
             decoding_plugin=decoding_plugin,
+            budget=budget,
             **opts,  # type: ignore[arg-type]
         )
     finally:

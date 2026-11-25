@@ -18,6 +18,7 @@ except ImportError:
 from pydicom import config
 from pydicom.encaps import get_frame, generate_frames
 from pydicom.misc import warn_and_log
+from pydicom.pixels.budget import DecodeBudget
 from pydicom.pixels.common import (
     Buffer,
     RunnerBase,
@@ -442,11 +443,16 @@ class DecodeRunner(RunnerBase):
         # The frame currently being decoded
         # Not useful for decoding native with Decoder.as_array(..., index=None)
         self._index: int
-        # The frame meta information, keyed to the frame index
+        # Frame meta information, keyed to the frame index
         # When decoding with `index=None`, frame indices start at 0 and are sequential
         #   otherwise the indices may not start at 0 and/or may not be sequential or
         #   ordered
         self._frame_meta: dict[int, FrameOptions] = {}
+        # Optional budget shared by all work done by this runner
+        self._budget: DecodeBudget | None = None
+        # True when frames are delivered one at a time, so already delivered
+        #   frames remain usable if the budget stops the operation
+        self._per_frame = False
 
         if self.is_encapsulated:
             self.set_option("pixel_keyword", "PixelData")
@@ -515,6 +521,91 @@ class DecodeRunner(RunnerBase):
                     f"{marker_name} marker which indicates it may be '{expected_cs}'"
                 )
                 return
+
+    def set_budget(self, budget: DecodeBudget | None) -> None:
+        """Set the optional budget for this decode operation.
+
+        Parameters
+        ----------
+        budget : DecodeBudget | None
+            The budget to account decoded frames and allocated bytes against.
+            ``None`` (or a budget with both limits unset) disables budget
+            accounting.
+        """
+        self._budget = budget if budget else None
+
+    def budget_frame_nbytes(self, frames: int = 1) -> int:
+        """Return the number of output array bytes `frames` will occupy."""
+        if self._budget is None:
+            return 0
+
+        # Use the itemsize of the output array without requiring NumPy (the
+        #   buffer output path doesn't need it)
+        keyword = self.pixel_keyword
+        if keyword == "FloatPixelData":
+            itemsize = 4
+        elif keyword == "DoubleFloatPixelData":
+            itemsize = 8
+        elif self.bits_allocated == 1:
+            itemsize = 1
+        else:
+            itemsize = self.bits_allocated // 8
+
+        return frames * int(self.frame_length("pixels")) * itemsize
+
+    def budget_buffer_nbytes(self, frames: int = 1, index: int | None = None) -> int:
+        """Return the number of decoded buffer bytes `frames` frames will occupy."""
+        if self._budget is None:
+            return 0
+
+        return frames * ceil(self.frame_length(unit="bytes", index=index))
+
+    def check_budget(
+        self,
+        *,
+        frames: int = 1,
+        nbytes: int | None = None,
+        result_usable: bool | None = None,
+    ) -> None:
+        """Check the budget before decoding or allocating `frames` frames.
+
+        Parameters
+        ----------
+        frames : int, optional
+            The number of frames that are about to be decoded.
+        nbytes : int | None, optional
+            The number of bytes that are about to be allocated. If ``None``
+            then the expected output size of `frames` is used.
+        result_usable : bool | None, optional
+            The value to set on :attr:`DecodeBudgetExceeded.result_usable` if
+            the budget is exceeded. If ``None`` then the value depends on whether
+            frames are being delivered one at a time.
+
+        Raises
+        ------
+        DecodeBudgetExceeded
+            If the budget would be exceeded.
+        """
+        if self._budget is None:
+            return
+
+        if nbytes is None:
+            nbytes = self.budget_frame_nbytes(frames)
+
+        if result_usable is None:
+            result_usable = self._per_frame
+
+        self._budget.check(frames=frames, nbytes=nbytes, result_usable=result_usable)
+
+    def commit_budget(self, *, frames: int = 1, nbytes: int | None = None) -> None:
+        """Account for `frames` that have been fully decoded."""
+        if self._budget is None:
+            return
+
+        if nbytes is None:
+            nbytes = self.budget_frame_nbytes(frames)
+
+        self._budget.commit(frames=frames, nbytes=nbytes)
 
     def decode(self, index: int) -> bytes | bytearray:
         """Decode the frame of pixel data at `index`.
@@ -680,17 +771,34 @@ class DecodeRunner(RunnerBase):
         src.seek(file_offset)
         return buffer
 
-    def iter_decode(self) -> Iterator[bytes | bytearray]:
+    def iter_decode(
+        self,
+        *,
+        result_usable: bool = True,
+        nbytes_per_frame: int | None = None,
+    ) -> Iterator[bytes | bytearray]:
         """Yield decoded frames from the encoded pixel data.
 
         .. versionchanged:: 3.1
 
             Add support for encapsulated single bit images (*Bits Allocated* = 1)
 
+        Parameters
+        ----------
+        result_usable : bool, optional
+            If ``True`` (default) then frames already yielded remain usable after
+            a budget stop. Set to ``False`` when the caller collects all frames
+            into one object that is unusable if incomplete.
+        nbytes_per_frame : int | None, optional
+            The number of output bytes to account per frame. If ``None`` then the
+            size of the array output is used.
         """
         original_bits_allocated = self.bits_allocated
         if self.is_binary:
             file_offset = cast(BinaryIO, self.src).tell()
+
+        if nbytes_per_frame is None:
+            nbytes_per_frame = self.budget_frame_nbytes()
 
         # For encapsulated data `self.src` should not be memoryview as doing so
         #   will create a duplicate object in memory by `generate_frames`
@@ -708,20 +816,32 @@ class DecodeRunner(RunnerBase):
             # This may have been overridden by the plugin by the previous frame
             self.set_option("bits_allocated", original_bits_allocated)
 
+            # Stop before the next frame is expanded if it would exceed the budget
+            self.check_budget(
+                frames=1,
+                nbytes=nbytes_per_frame,
+                result_usable=result_usable,
+            )
+
             # Try the previously successful decoder first (if available)
             name, func = getattr(self, "_previous", (None, None))
             if func:
                 try:
-                    yield func(src, self)
-                    continue
+                    frame = func(src, self)
                 except Exception:
                     LOGGER.warning(
                         f"The decoding plugin '{name}' failed to decode the "
                         f"frame at index {idx}"
                     )
+                else:
+                    self.commit_budget(frames=1, nbytes=nbytes_per_frame)
+                    yield frame
+                    continue
 
             # Otherwise try all decoders
-            yield self._decode_frame(src)
+            frame = self._decode_frame(src)
+            self.commit_budget(frames=1, nbytes=nbytes_per_frame)
+            yield frame
 
         if self.is_binary:
             cast(BinaryIO, self.src).seek(file_offset)
@@ -1251,11 +1371,14 @@ class Decoder(CoderBase):
         validate: bool = True,
         raw: bool = False,
         decoding_plugin: str = "",
+        budget: DecodeBudget | None = None,
         **kwargs: DecodeOptions,
     ) -> tuple["np.ndarray", dict[str, str | int]]:
         """Return decoded pixel data as :class:`~numpy.ndarray`.
 
         .. versionchanged:: 3.1
+
+            Added the `budget` keyword parameter.
 
             Add support for encapsulated single bit images (*Bits Allocated* = 1)
 
@@ -1329,6 +1452,11 @@ class Decoder(CoderBase):
             available plugins will be tried and the result from the first successful
             one returned. For information on the available plugins for each
             decoder see the :doc:`API documentation</reference/pixels.decoders>`.
+        budget : pydicom.pixels.DecodeBudget | None, optional
+            An optional budget limiting the number of frames that are expanded and
+            the bytes allocated for the decoded output. It's checked before the
+            output array is allocated, so a partial array is never returned. See
+            :class:`~pydicom.pixels.DecodeBudget` for more information.
         **kwargs
             Optional keyword parameters for controlling decoding are also
             available, please see the :doc:`decoding options documentation
@@ -1369,6 +1497,7 @@ class Decoder(CoderBase):
         runner = DecodeRunner(self.UID)
         runner.set_source(src)
         runner.set_options(**kwargs)
+        runner.set_budget(budget)
         if raw:
             runner.set_option("as_rgb", False)
 
@@ -1445,9 +1574,13 @@ class Decoder(CoderBase):
 
         # Return the specified frame only
         if index is not None:
+            # Check the budget before decoding or allocating this frame
+            runner.check_budget(frames=1)
+
             # The decoding plugin may alter the frame's bits_allocated to give a
             #   different dtype itemsize, so use frame_dtype()
             buffer: bytes | bytearray = runner.decode(index)
+            runner.commit_budget(frames=1, nbytes=runner.budget_frame_nbytes())
             if runner._test_for("bit_packed", index):
                 # Always ndarray[uint8]
                 frame = cast("np.ndarray", unpack_bits(buffer))[:pixels_per_frame]
@@ -1465,19 +1598,16 @@ class Decoder(CoderBase):
             return runner.reshape(frame, index)
 
         # Return all frames
-        # Preallocate the output array, individual frames will be placed into it
-        # The output dtype is based off the original input parameters
+        # The whole array can't be used if it's incomplete, so each frame and its
+        #   output bytes are checked as it's expanded. The output array itself is
+        #   only allocated once all expected frames have been decoded, so a
+        #   limited stop doesn't allocate a large partial array.
         number_of_frames = runner.number_of_frames
-        shape = (
-            number_of_frames,
-            runner.rows,
-            runner.columns,
-            runner.samples_per_pixel,
+        nbytes_per_frame = runner.budget_frame_nbytes()
+        decoded = []
+        frame_generator = runner.iter_decode(
+            result_usable=False, nbytes_per_frame=nbytes_per_frame
         )
-        # squeeze() will reduce shape (1, R, C, 1) to (R, C)
-        arr = np.empty(shape, dtype=runner.pixel_dtype).squeeze()
-
-        frame_generator = runner.iter_decode()
         for idx in range(number_of_frames):
             try:
                 buffer = next(frame_generator)
@@ -1494,9 +1624,21 @@ class Decoder(CoderBase):
                 frame = np.frombuffer(buffer, dtype=runner.frame_dtype(idx))
                 bits_allocated = runner.bits_allocated
 
-            dst = None if number_of_frames == 1 else idx
-            arr[dst] = runner.reshape(frame, idx)
+            decoded.append(runner.reshape(frame, idx))
             runner.set_frame_option(idx, "bits_allocated", bits_allocated)
+
+        # All expected frames fit the budget, so allocate the output array
+        shape = (
+            number_of_frames,
+            runner.rows,
+            runner.columns,
+            runner.samples_per_pixel,
+        )
+        # squeeze() will reduce shape (1, R, C, 1) to (R, C)
+        arr = np.empty(shape, dtype=runner.pixel_dtype).squeeze()
+        for idx, frame in enumerate(decoded):
+            dst = None if number_of_frames == 1 else idx
+            arr[dst] = frame
 
         # Check to see if we have any more frames available
         #   Should only apply to JPEG transfer syntaxes
@@ -1561,6 +1703,17 @@ class Decoder(CoderBase):
         length_bytes = runner.frame_length(unit="bytes")
         length_pixels = int(runner.frame_length(unit="pixels"))
         dtype = runner.pixel_dtype
+
+        # Check before reading or allocating the output so a limited decode
+        #   can't return a partially built array. The whole array is all-or-nothing
+        #   because a partially built one must not be used.
+        frames = 1 if index is not None else runner.number_of_frames
+        nbytes = frames * length_pixels * dtype.itemsize
+        runner.check_budget(frames=frames, nbytes=nbytes)
+
+        # Account for the output only after it's been assembled
+        commit_frames = frames
+        commit_nbytes = nbytes
 
         indices = (index,) if index is not None else range(runner.number_of_frames)
         for idx in indices:
@@ -1671,10 +1824,11 @@ class Decoder(CoderBase):
             # May need to remove bits from the beginning or end if frame
             # boundaries are not byte-aligned
             unpacked = unpacked[bit_offset_start : bit_offset_start + length_pixels]
-
+            runner.commit_budget(frames=commit_frames, nbytes=commit_nbytes)
             return runner.reshape(unpacked, index)
 
         if runner.photometric_interpretation != PI.YBR_FULL_422:
+            runner.commit_budget(frames=commit_frames, nbytes=commit_nbytes)
             return runner.reshape(arr, index)
 
         # Expand YBR_FULL_422 (if required)
@@ -1700,6 +1854,7 @@ class Decoder(CoderBase):
         for idx in indices:
             runner.set_frame_option(idx, "photometric_interpretation", PI.YBR_FULL)
 
+        runner.commit_budget(frames=commit_frames, nbytes=commit_nbytes)
         return runner.reshape(out, index)
 
     def as_buffer(
@@ -1709,22 +1864,25 @@ class Decoder(CoderBase):
         index: int | None = None,
         validate: bool = True,
         decoding_plugin: str = "",
+        budget: DecodeBudget | None = None,
         **kwargs: Any,
     ) -> tuple[Buffer, dict[int, dict[str, str | int]]]:
         """Return the raw decoded pixel data as a buffer-like.
 
         .. versionchanged:: 3.1
 
+            Added the `budget` keyword parameter.
+
             Native single-bit images (*Bits Allocated = 1*) are now always
             returned with the start of a frame aligned to a byte boundary, and
             with pixels from neighboring frames masked. Added support for
             encapsulated single-bit images.
 
-        .. versionchanged:: 3.1
-            The returned :class:`dict` containing the metadata has been changed to a
-            ``dict`` containing the metadata for individual frames, using the frame
-            indexes as keys. This is to provide more information where inter-frame
-            property values such as the planar configuration may not be consistent.
+            The returned :class:`dict` containing the metadata has been changed
+            to a ``dict`` containing the metadata for individual frames, using
+            the frame indexes as keys. This is to provide more information where
+            inter-frame property values such as the planar configuration may not
+            be consistent.
 
         .. warning::
 
@@ -1770,6 +1928,11 @@ class Decoder(CoderBase):
             specify the decoding plugin to help ensure inter-frame consistency
             in frame properties. For information on the available plugins for each
             decoder see the :doc:`API documentation</reference/pixels.decoders>`.
+        budget : pydicom.pixels.DecodeBudget | None, optional
+            An optional budget limiting the number of frames that are expanded and
+            the bytes allocated for the decoded output. An incomplete buffer is
+            never returned. See :class:`~pydicom.pixels.DecodeBudget` for more
+            information.
         **kwargs
             Optional keyword parameters for controlling decoding are also
             available, please see the :doc:`decoding options documentation
@@ -1802,6 +1965,7 @@ class Decoder(CoderBase):
         runner = DecodeRunner(self.UID)
         runner.set_source(src)
         runner.set_options(**kwargs)
+        runner.set_budget(budget)
 
         runner.set_decoders(
             cast(
@@ -1850,7 +2014,10 @@ class Decoder(CoderBase):
 
         """
         if index is not None:
+            nbytes = runner.budget_buffer_nbytes(index=index)
+            runner.check_budget(frames=1, nbytes=nbytes)
             frame = runner.decode(index)
+            runner.commit_budget(frames=1, nbytes=nbytes)
             length_bytes = runner.frame_length(unit="bytes", index=index)
             if (actual := len(frame)) != length_bytes:
                 raise ValueError(
@@ -1866,7 +2033,14 @@ class Decoder(CoderBase):
 
         # Return all frames
         frames = []
-        frame_generator = runner.iter_decode()
+        # The whole buffer can't be used if incomplete, so each frame and its
+        #   bytes are checked as it's expanded. On a limited stop the partially
+        #   collected frames are discarded and the exception reports how many
+        #   frames were really expanded.
+        frame_generator = runner.iter_decode(
+            result_usable=False,
+            nbytes_per_frame=runner.budget_buffer_nbytes(),
+        )
         for idx in range(runner.number_of_frames):
             try:
                 frame = next(frame_generator)
@@ -1974,6 +2148,12 @@ class Decoder(CoderBase):
         """
         length_bytes = runner.frame_length(unit="bytes")
 
+        # Check before reading or returning the output so a limited decode
+        #   can't hand back an incomplete buffer
+        frames = 1 if index is not None else runner.number_of_frames
+        nbytes = frames * ceil(length_bytes)
+        runner.check_budget(frames=frames, nbytes=nbytes)
+
         indices = (index,) if index is not None else range(runner.number_of_frames)
         for idx in indices:
             runner._frame_set_options(idx)
@@ -2010,18 +2190,25 @@ class Decoder(CoderBase):
 
                 if length_bytes % 2 == 0:
                     # Even length frame: start and end correct
-                    return runner.get_data(src, start_offset, length_bytes)
+                    buffer = runner.get_data(src, start_offset, length_bytes)
+                else:
+                    # Odd length frame
+                    # Even index: start correct, end incorrect
+                    #   -> src[start:start + length + 1]
+                    # Odd index: start incorrect, end correct
+                    #   -> src[start - 1:start + length + 1]
+                    buffer = runner.get_data(
+                        src, start_offset - index % 2, length_bytes + 1
+                    )
 
-                # Odd length frame
-                # Even index: start correct, end incorrect
-                #   -> src[start:start + length + 1]
-                # Odd index: start incorrect, end correct
-                #   -> src[start - 1:start + length + 1]
-                return runner.get_data(src, start_offset - index % 2, length_bytes + 1)
+                runner.commit_budget(frames=1, nbytes=nbytes)
+                return buffer
 
             # Return all frames
             length_bytes *= runner.number_of_frames
-            return runner.get_data(src, file_offset, length_bytes + length_bytes % 2)
+            buffer = runner.get_data(src, file_offset, length_bytes + length_bytes % 2)
+            runner.commit_budget(frames=frames, nbytes=nbytes)
+            return buffer
 
         if index is not None:
             # Return specified frame only
@@ -2035,18 +2222,23 @@ class Decoder(CoderBase):
 
             if runner.bits_allocated == 1:
                 # May need to bit-shift to remove pixels from neighboring frames
-                return get_packed_frame(
+                buffer = get_packed_frame(
                     buf,
                     index=index,
                     frame_length=int(runner.frame_length("pixels")),
                     start_offset=start_offset,
                 )
+            else:
+                buffer = buf
 
-            return buf
+            runner.commit_budget(frames=1, nbytes=nbytes)
+            return buffer
 
         # Return all frames
         length_bytes *= runner.number_of_frames
-        return runner.get_data(src, file_offset, ceil(length_bytes))
+        buffer = runner.get_data(src, file_offset, ceil(length_bytes))
+        runner.commit_budget(frames=frames, nbytes=nbytes)
+        return buffer
 
     def iter_array(
         self,
@@ -2056,9 +2248,16 @@ class Decoder(CoderBase):
         raw: bool = False,
         validate: bool = True,
         decoding_plugin: str = "",
+        budget: DecodeBudget | None = None,
         **kwargs: Any,
     ) -> Iterator[tuple["np.ndarray", dict[str, str | int]]]:
         """Yield pixel data frames as :class:`~numpy.ndarray`.
+
+        .. versionchanged:: 3.1
+
+            Added the `budget` keyword parameter.
+
+            Add support for encapsulated single bit images (*Bits Allocated* = 1)
 
         .. warning::
 
@@ -2066,10 +2265,6 @@ class Decoder(CoderBase):
             the installation of additional packages to perform the actual pixel
             data decoding. See the :doc:`pixel data decompression documentation
             </guides/user/image_data_handlers>` for more information.
-
-        .. versionchanged:: 3.1
-
-            Add support for encapsulated single bit images (*Bits Allocated* = 1)
 
         **Processing**
 
@@ -2132,6 +2327,11 @@ class Decoder(CoderBase):
             available plugins will be tried and the result from the first successful
             one yielded. For information on the available plugins for each
             decoder see the :doc:`API documentation</reference/pixels.decoders>`.
+        budget : pydicom.pixels.DecodeBudget | None, optional
+            An optional budget limiting the number of frames that are expanded and
+            the bytes allocated for the decoded output. Frames that have already
+            been yielded remain usable when the budget is exceeded. See
+            :class:`~pydicom.pixels.DecodeBudget` for more information.
         **kwargs
             Optional keyword parameters for controlling decoding are also
             available, please see the :doc:`decoding options documentation
@@ -2167,6 +2367,8 @@ class Decoder(CoderBase):
         runner = DecodeRunner(self.UID)
         runner.set_source(src)
         runner.set_options(**kwargs)
+        runner.set_budget(budget)
+        runner._per_frame = True
         if raw:
             runner.set_option("as_rgb", False)
 
@@ -2197,7 +2399,9 @@ class Decoder(CoderBase):
             pixels_per_frame = cast(int, runner.frame_length("pixels"))
             # iter_decode() yields bytes | bytearray and may yield more frames
             #   than number_of_frames if excess frames exist
-            for idx, buffer in enumerate(runner.iter_decode()):
+            for idx, buffer in enumerate(
+                runner.iter_decode(nbytes_per_frame=runner.budget_frame_nbytes())
+            ):
                 if runner._test_for("bit_packed", idx):
                     arr = cast("np.ndarray", unpack_bits(buffer)[:pixels_per_frame])
                     bits_allocated = 8
@@ -2256,9 +2460,14 @@ class Decoder(CoderBase):
         indices: Iterable[int] | None = None,
         validate: bool = True,
         decoding_plugin: str = "",
+        budget: DecodeBudget | None = None,
         **kwargs: Any,
     ) -> Iterator[tuple[Buffer, dict[str, str | int]]]:
         """Yield raw decoded pixel data frames as a buffer-like.
+
+        .. versionchanged:: 3.1
+
+            Added the `budget` keyword parameter.
 
         .. warning::
 
@@ -2306,6 +2515,11 @@ class Decoder(CoderBase):
             specify the decoding plugin to help ensure inter-frame consistency
             in frame properties. For information on the available plugins for each
             decoder see the :doc:`API documentation</reference/pixels.decoders>`.
+        budget : pydicom.pixels.DecodeBudget | None, optional
+            An optional budget limiting the number of frames that are expanded and
+            the bytes allocated for the decoded output. Frames that have already
+            been yielded remain usable when the budget is exceeded. See
+            :class:`~pydicom.pixels.DecodeBudget` for more information.
         **kwargs
             Optional keyword parameters for controlling decoding are also
             available, please see the :doc:`decoding options documentation
@@ -2338,6 +2552,8 @@ class Decoder(CoderBase):
         runner = DecodeRunner(self.UID)
         runner.set_source(src)
         runner.set_options(**kwargs)
+        runner.set_budget(budget)
+        runner._per_frame = True
         runner.set_decoders(
             cast(
                 dict[str, "DecodeFunction"],
@@ -2349,7 +2565,9 @@ class Decoder(CoderBase):
             runner.validate()
 
         if self.is_encapsulated and not indices:
-            for idx, buffer in enumerate(runner.iter_decode()):
+            for idx, buffer in enumerate(
+                runner.iter_decode(nbytes_per_frame=runner.budget_buffer_nbytes())
+            ):
                 if runner._test_for("bit_unpacked", idx):
                     buffer = pack_bits(buffer, pad=False)
                     runner.set_frame_option(runner.index, "bits_allocated", 1)
