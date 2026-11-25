@@ -20,6 +20,7 @@ This API reference guide details the functions, modules and objects included in
    acse
    ae
    association
+   authorization
    config
    dimse
    dsutils

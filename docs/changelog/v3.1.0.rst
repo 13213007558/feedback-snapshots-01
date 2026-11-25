@@ -9,3 +9,18 @@ Fixes
 * Fixed the default logging handlers for N-ACTION treating *Action Type ID* as mandatory (:issue:`1027`)
 * Fixed being unable to resolve IPv4 address when using the hostname (:issue:`1033`, :pr:`1034`)
 * Fixed the socket not being closed when shutting it down fails (:issue:`1102`)
+
+Enhancements
+------------
+
+* Added optional C-MOVE destination authorisation. Assign a policy to
+  :attr:`AE.move_authorization<pynetdicom.ae.ApplicationEntity.move_authorization>`
+  to make the query approval, the approval to open a new association with the
+  *Move Destination*, and the approval for each C-STORE sub-operation separate
+  decisions. Withdrawing the destination approval part-way through an operation
+  stops further datasets from being sent, and the final response reports the
+  datasets that were never sent using the remaining sub-operations count,
+  separately from genuine C-STORE failures. See
+  :mod:`pynetdicom.authorization` for the
+  :class:`~pynetdicom.authorization.InMemoryMoveAuthorization` implementation
+  and the :class:`~pynetdicom.authorization.MoveAuthorization` protocol.

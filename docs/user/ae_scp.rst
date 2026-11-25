@@ -267,3 +267,43 @@ parameter to :meth:`~pynetdicom.ae.ApplicationEntity.start_server` as:
     >>> server.shutdown()
     >>> server = ae.start_server(("::1", 11112), block=False)
     >>> server.shutdown()
+
+Authorising C-MOVE destinations
+...............................
+
+A C-MOVE SCP performs two privileged actions that are independent of each
+other: deciding whether the requesting identity may query the archive, and
+opening a **new** association with the *Move Destination* to send the matching
+SOP Instances. Authorising the query doesn't authorise the destination, and the
+destination approval may be withdrawn while the C-MOVE operation is in
+progress.
+
+To make these decisions separately you can assign a policy to
+:attr:`AE.move_authorization<pynetdicom.ae.ApplicationEntity.move_authorization>`.
+For example, using the in-memory policy from
+:mod:`pynetdicom.authorization`:
+
+.. code-block:: python
+
+    from pynetdicom import AE, evt
+    from pynetdicom.authorization import InMemoryMoveAuthorization
+    from pynetdicom.sop_class import PatientRootQueryRetrieveInformationModelMove
+
+    policy = InMemoryMoveAuthorization(approved_queries=["EXPORT_SCU"])
+    policy.grant_destination("EXPORT_SCU", "ARCHIVE_DEST")
+
+    def handle_move(event):
+        # ... yield destination and matching datasets as usual
+        ...
+
+    ae = AE("EXPORT_SCP")
+    ae.move_authorization = policy
+    ae.add_supported_context(PatientRootQueryRetrieveInformationModelMove)
+    ae.start_server(("127.0.0.1", 11112), evt_handlers=[(evt.EVT_C_MOVE, handle_move)])
+
+The policy is consulted when the C-MOVE request is received, when the new
+association with the *Move Destination* would be opened, and again for every
+C-STORE sub-operation. If the destination approval is withdrawn after the first
+dataset has been sent then the remaining datasets are never sent; the final
+C-MOVE response reports them using *Number of Remaining Sub-operations*, apart
+from any genuine C-STORE failures.

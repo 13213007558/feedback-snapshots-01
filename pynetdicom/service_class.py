@@ -26,6 +26,7 @@ from pynetdicom._globals import (
     STATUS_SUCCESS,
     STATUS_WARNING,
 )
+from pynetdicom.authorization import MoveApproval, query_identity
 from pynetdicom.dimse_primitives import (
     C_ECHO,
     C_FIND,
@@ -2034,6 +2035,17 @@ class QueryRetrieveServiceClass(ServiceClass):
             The C-MOVE request primitive sent by the peer.
         context : presentation.PresentationContext
             The presentation context that the SCP is operating under.
+
+        Notes
+        -----
+        If the AE has a :attr:`~pynetdicom.ae.ApplicationEntity.move_authorization`
+        policy assigned then the query approval, the approval to open the new
+        association with the *Move Destination* and the approval for each
+        C-STORE sub-operation are separate decisions. Sub-operations that are
+        not authorised are never sent; if the destination approval is
+        withdrawn part-way through the operation they are reported in the final
+        response using *Number of Remaining Sub-operations* and are kept
+        distinct from genuine C-STORE failures.
         """
         cx_id = cast(int, context.context_id)
         transfer_syntax = context.transfer_syntax[0]
@@ -2043,6 +2055,23 @@ class QueryRetrieveServiceClass(ServiceClass):
         rsp.MessageID = req.MessageID
         rsp.MessageIDBeingRespondedTo = req.MessageID
         rsp.AffectedSOPClassUID = req.AffectedSOPClassUID
+
+        # A destination authorisation policy is optional; when present the
+        #   query approval and the destination approval are separate decisions
+        policy = self.ae.move_authorization
+        query_approval: MoveApproval | None = None
+        if policy is not None:
+            identity = query_identity(self.assoc)
+            query_approval = policy.approve_query(identity, req)
+            if query_approval.denied:
+                LOGGER.info(
+                    f"Move SCP: query identity '{identity}' is not authorised"
+                )
+                # Failure - Not authorised
+                rsp.Status = 0x0124
+                rsp.ErrorComment = query_approval.reason
+                self.dimse.send_msg(rsp, cx_id)
+                return
 
         if _config.LOG_REQUEST_IDENTIFIERS:
             try:
@@ -2144,6 +2173,30 @@ class QueryRetrieveServiceClass(ServiceClass):
             self.dimse.send_msg(rsp, cx_id)
             return
 
+        # Authorise opening a new association with the Move Destination. This
+        #   is a separate decision from the query approval above.
+        destination_approval: MoveApproval | None = None
+        if policy is not None:
+            destination_approval = policy.approve_destination(
+                cast(MoveApproval, query_approval), req.MoveDestination, req
+            )
+            if destination_approval.denied:
+                LOGGER.info(
+                    "Move SCP: destination "
+                    f"'{req.MoveDestination}' is not authorised for "
+                    f"'{destination_approval.identity}': {destination_approval.reason}"
+                )
+                # Failure - Not authorised
+                rsp.Status = 0x0124
+                rsp.ErrorComment = destination_approval.reason
+                # Nothing was sent, so all sub-operations remain unsent
+                rsp.NumberOfRemainingSuboperations = nr_suboperations
+                rsp.NumberOfCompletedSuboperations = 0
+                rsp.NumberOfFailedSuboperations = 0
+                rsp.NumberOfWarningSuboperations = 0
+                self.dimse.send_msg(rsp, cx_id)
+                return
+
         # Try to request new association with Move Destination
         with attempt(rsp, self.dimse, cx_id) as ctx:
             ctx.error_msg = (
@@ -2185,6 +2238,10 @@ class QueryRetrieveServiceClass(ServiceClass):
                 failed_instances.append(ds.SOPInstanceUID)
 
         ii = -1  # So if there are no results, log below doesn't break
+        # Whether any sub-operation was withheld because the destination
+        #   approval was no longer valid
+        withheld_by_policy = False
+        unsent_instances: list[str] = []
         # Iterate through the remaining callback (status, dataset) yields
         # C-MOVE Pending responses are optional!
         for ii, (result, exc) in enumerate(self._wrap_handler(generator)):
@@ -2339,6 +2396,34 @@ class QueryRetrieveServiceClass(ServiceClass):
                     self.dimse.send_msg(rsp, cx_id)
                     continue
 
+                # Re-check the destination approval for every C-STORE
+                #   sub-operation: the approval may have been withdrawn since
+                #   the destination association was established.
+                if policy is not None:
+                    sub_approval = policy.approve_sub_operation(
+                        cast(MoveApproval, destination_approval), dataset
+                    )
+                    if sub_approval.denied:
+                        LOGGER.info(
+                            "Move SCP: C-STORE sub-operation not authorised: "
+                            f"{sub_approval.reason}"
+                        )
+                        # This dataset is not sent, but later datasets may
+                        #   still be approved (for example when the grant
+                        #   allows only some of the instances). Record it as
+                        #   unsent and continue with the next yield.
+                        withheld_by_policy = True
+                        unsent_instances.append(
+                            sub_approval.sop_instance_uid
+                            if sub_approval.sop_instance_uid is not None
+                            else ""
+                        )
+                        # Don't send a Pending response for a dataset that
+                        #   was never sent; the final response carries the
+                        #   unsent count instead.
+                        store_results[0] -= 1
+                        continue
+
                 LOGGER.info(f"Move SCP Response {ii + 1}: 0x{rsp.Status:04X} (Pending)")
 
                 # Send `dataset` via C-STORE sub-operations over the
@@ -2403,7 +2488,44 @@ class QueryRetrieveServiceClass(ServiceClass):
             return
 
         # If not already done, send the final 'Success' or 'Warning' response
-        if not store_results[1] and not store_results[2]:
+        if withheld_by_policy and unsent_instances:
+            # One or more datasets never left the SCP because the destination
+            #   approval was withdrawn, or because the policy only allowed
+            #   some instances. These are reported separately from genuine
+            #   C-STORE failures or warnings: the remaining count says how many
+            #   datasets were withheld, while the failed and warning counts
+            #   only describe sub-operations that were actually attempted.
+            unsent = len(unsent_instances)
+            attempted = store_results[1] + store_results[2] + store_results[3]
+            if attempted == 0:
+                # No sub-operation was performed at all because the
+                #   destination approval is no longer valid
+                LOGGER.info(
+                    f"Move SCP Response {ii + 2}: 0x0124 (Failure - "
+                    f"{unsent} sub-operation(s) not sent)"
+                )
+                rsp.Status = 0x0124  # Refused: Not Authorised
+            else:
+                LOGGER.info(
+                    f"Move SCP Response {ii + 2}: 0xB000 (Warning - "
+                    f"{unsent} sub-operation(s) not sent)"
+                )
+                rsp.Status = 0xB000
+
+            rsp.ErrorComment = "destination approval withheld"
+            # Only datasets that were *sent* and failed belong here; the
+            #   withheld datasets are reported via the remaining count
+            ds = Dataset()
+            ds.FailedSOPInstanceUIDList = failed_instances
+            bytestream = encode(
+                ds,
+                transfer_syntax.is_implicit_VR,
+                transfer_syntax.is_little_endian,
+                transfer_syntax.is_deflated,
+            )
+            rsp.Identifier = BytesIO(cast(bytes, bytestream))
+            rsp.NumberOfRemainingSuboperations = unsent
+        elif not store_results[1] and not store_results[2]:
             # Success response - no failures or warnings
             LOGGER.info(f"Move SCP Response {ii + 2}: 0x0000 (Success)")
             rsp.Status = 0x0000

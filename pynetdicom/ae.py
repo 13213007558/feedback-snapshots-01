@@ -11,6 +11,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from ssl import SSLContext
 from typing import (
+    TYPE_CHECKING,
     Any,
     TypeVar,
     cast,
@@ -43,6 +44,9 @@ _T = TypeVar("_T")
 ListCXType = list[PresentationContext]
 TSyntaxType = None | str | UID | Sequence[str] | Sequence[UID]
 
+if TYPE_CHECKING:  # pragma: no cover
+    from pynetdicom.authorization import MoveAuthorization
+
 
 class ApplicationEntity:
     """Represents a DICOM Application Entity (AE).
@@ -66,6 +70,9 @@ class ApplicationEntity:
         """
         self._ae_title: str
         self.ae_title = ae_title
+
+        # C-MOVE destination authorisation policy (None means no checks)
+        self._move_authorization: "MoveAuthorization | None" = None
 
         from pynetdicom import (
             PYNETDICOM_IMPLEMENTATION_UID,
@@ -882,6 +889,42 @@ class ApplicationEntity:
             evt_handlers=evt_handlers or [],
             **kwargs,
         )
+
+    @property
+    def move_authorization(self) -> "MoveAuthorization | None":
+        """Get or set the C-MOVE destination authorisation policy.
+
+        When acting as a C-MOVE SCP the policy is used to make three
+        independent authorisation decisions:
+
+        * whether the requesting identity may query the archive,
+        * whether a new association may be opened with the *Move Destination*,
+        * and whether each individual C-STORE sub-operation may still be sent.
+
+        The destination decision is bound to the new storage association and
+        is re-evaluated for every sub-operation, so withdrawing the destination
+        approval part-way through a C-MOVE operation stops further datasets
+        from being sent. Datasets that were not sent are reported separately
+        from genuine C-STORE failures in the final C-MOVE response.
+
+        If ``None`` (default) then no authorisation checks are made and the
+        SCP behaves as it did previously.
+
+        .. versionadded:: 3.1
+
+        Parameters
+        ----------
+        value : MoveAuthorization or None
+            An object implementing the
+            :class:`~pynetdicom.authorization.MoveAuthorization` protocol, for
+            example :class:`~pynetdicom.authorization.InMemoryMoveAuthorization`.
+        """
+        return self._move_authorization
+
+    @move_authorization.setter
+    def move_authorization(self, value: "MoveAuthorization | None") -> None:
+        """Set the C-MOVE destination authorisation policy."""
+        self._move_authorization = value
 
     @property
     def maximum_associations(self) -> int:

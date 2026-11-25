@@ -2930,6 +2930,14 @@ def doc_handle_move(event: "Event", *args: Sequence[Any]) -> CMoveType:
     SCP will send a response with a 'Failure' status of ``0xA801`` 'Move
     Destination Unknown'.
 
+    If the AE has a C-MOVE destination authorisation policy assigned to
+    :attr:`~pynetdicom.ae.ApplicationEntity.move_authorization` then the
+    query approval, the destination approval and each C-STORE sub-operation
+    are authorised separately. Withdrawing the destination approval while the
+    operation is in progress stops any further datasets from being sent; those
+    datasets are reported in the final response as *Number of Remaining
+    Sub-operations* rather than as C-STORE failures.
+
     **Event**
 
     ``evt.EVT_C_MOVE``
