@@ -27,6 +27,37 @@ from .retry import (Backoff, DEFAULT_BACKOFF, DEFAULT_RETRY,
                     retry_after_seconds)
 from .keepalive import tcp_keepalive_socket_options
 
+# The dry-run permit helpers depend on kubernetes.client, which imports
+# kubernetes.utils.retry.  Resolve them lazily so importing this package
+# from the generated client's REST layer cannot create an import cycle.
+_DRY_RUN_EXPORTS = {
+    "CommitApproval": "CommitApproval",
+    "DRY_RUN_ALL": "DRY_RUN_ALL",
+    "DryRunAttempt": "DryRunAttempt",
+    "DryRunExchange": "DryRunExchange",
+    "DryRunPermit": "DryRunPermit",
+    "DryRunRequest": "DryRunRequest",
+    "DryRunRetry": "DryRunRetry",
+    "DryRunSession": "DryRunSession",
+    "PermitCheck": "PermitCheck",
+    "PermitMismatch": "PermitMismatch",
+    "review_preview": "review_preview",
+}
+
+
+def __getattr__(name):
+    if name in _DRY_RUN_EXPORTS:
+        from . import dry_run
+        value = getattr(dry_run, _DRY_RUN_EXPORTS[name])
+        globals()[name] = value
+        return value
+    raise AttributeError(
+        "module {!r} has no attribute {!r}".format(__name__, name))
+
+
+def __dir__():
+    return sorted(set(globals()) | set(_DRY_RUN_EXPORTS))
+
 __all__ = [
     "FailToCreateError",
     "create_from_dict",
@@ -51,4 +82,15 @@ __all__ = [
     "retry_on_conflict",
     "retry_after_seconds",
     "tcp_keepalive_socket_options",
+    "CommitApproval",
+    "DRY_RUN_ALL",
+    "DryRunAttempt",
+    "DryRunExchange",
+    "DryRunPermit",
+    "DryRunRequest",
+    "DryRunRetry",
+    "DryRunSession",
+    "PermitCheck",
+    "PermitMismatch",
+    "review_preview",
 ]

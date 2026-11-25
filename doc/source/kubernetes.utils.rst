@@ -8,6 +8,8 @@ Submodules
    :maxdepth: 4
 
    kubernetes.utils.create_from_yaml
+   kubernetes.utils.dry_run
+   kubernetes.utils.dry_run_test
    kubernetes.utils.duration
    kubernetes.utils.metrics
    kubernetes.utils.quantity
