@@ -1,0 +1,7 @@
+`opentelemetry-sdk`: Add a private `MetricReader._allows_async_instrument`
+hook that gates whether an asynchronous instrument's callback runs during a
+reader's collection. The capability is checked before the callback executes and
+again before each of its measurements is stored, so a reader without the
+required capability never triggers restricted callbacks and cannot cache their
+results. The default implementation allows every asynchronous instrument,
+preserving existing reader behavior.

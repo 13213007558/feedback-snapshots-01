@@ -429,6 +429,22 @@ class MetricReader(ABC):
         """This function is internal to the SDK. It should not be called or overridden by users"""
         self._collect = func
 
+    def _allows_async_instrument(
+        self,
+        instrument: "opentelemetry.sdk.metrics._internal.instrument._Asynchronous",
+    ) -> bool:
+        """Capability check run before an asynchronous instrument's callback.
+
+        This function is internal to the SDK. It is evaluated before the user
+        supplied callback is executed so that a reader which is not allowed to
+        observe a given asynchronous instrument never triggers the (potentially
+        restricted) work the callback performs. Subclasses with restricted
+        collection rights override it to return ``False``; the default
+        implementation allows every asynchronous instrument so that existing
+        readers keep collecting all metrics.
+        """
+        return True
+
     @abstractmethod
     def _receive_metrics(
         self,

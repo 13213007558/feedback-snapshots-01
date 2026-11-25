@@ -102,6 +102,12 @@ class SynchronousMeasurementConsumer(MeasurementConsumer):
             default_timeout_ns = 10000 * 1e6
 
             for async_instrument in self._async_instruments:
+                # Confirm the reader is allowed to observe this instrument
+                # before running its callback, so that a restricted callback is
+                # never executed on behalf of an unauthorized reader.
+                if not metric_reader._allows_async_instrument(async_instrument):
+                    continue
+
                 remaining_time = deadline_ns - time_ns()
 
                 if remaining_time < default_timeout_ns:
@@ -111,6 +117,12 @@ class SynchronousMeasurementConsumer(MeasurementConsumer):
                 # only runs while the loop below iterates it, so the
                 # deadline can only be observed after iteration completes.
                 for measurement in async_instrument.callback(callback_options):
+                    # Re-check the capability right before accepting the
+                    # measurement. If the permission is revoked while the
+                    # callback is in flight, the computed values are dropped
+                    # instead of being cached in this reader's storage.
+                    if not metric_reader._allows_async_instrument(async_instrument):
+                        break
                     should_sample_exemplar = self._sdk_config.exemplar_filter.should_sample(
                         measurement.value,
                         measurement.time_unix_nano,
