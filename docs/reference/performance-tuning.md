@@ -50,6 +50,8 @@ The first setting, `api_request_time`, is helpful if you have a sustained high n
 
 Keep in mind that reducing the value of either setting will cause the agent to send more HTTP requests to the APM Server, potentially causing a higher load.
 
+If the queue itself needs a hard memory bound under sustained back-pressure, configure [`transport_discard_policy`](/reference/configuration.md#config-transport-discard-policy). It caps the number of waiting events, retires ordinary telemetry before security/audit events, and records exactly which event types had to be discarded so that a later reconnect can verify the real gap. The active ledger is also available from the client via `client.get_discard_report()`.
+
 
 ## Spans per transaction [tuning-max-spans]
 

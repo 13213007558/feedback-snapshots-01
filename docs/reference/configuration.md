@@ -212,6 +212,31 @@ Also note that this setting does not facilitate shipping logs to Elasticsearch. 
 The transport class to use when sending events to the APM Server.
 
 
+### `transport_discard_policy` [config-transport-discard-policy]
+
+| Environment | Django/Flask | Default |
+| --- | --- | --- |
+| `ELASTIC_APM_TRANSPORT_DISCARD_POLICY` | `TRANSPORT_DISCARD_POLICY` | `None` |
+
+An optional discard convention for the in-process transport queue. When unset the agent keeps its historical queue behaviour. When set, the queue gets a hard upper bound and records that are dropped because of back-pressure are classified by retention class instead of vanishing silently. The value is a JSON object (or a mapping when using Django/Flask settings):
+
+```json
+{
+  "max_queue_size": 1000,
+  "event_classes": {"error": "security", "transaction": "ordinary", "metricset": "ordinary"},
+  "class_priorities": {"security": 10, "ordinary": 0}
+}
+```
+
+* `max_queue_size` (required, positive integer) bounds the number of accepted events waiting for the background sender. Flush/close markers are not counted.
+* `event_classes` maps event types to a retention class. The defaults keep `error` events (the audit-relevant class) in `security` and everything else in `ordinary`.
+* `class_priorities` ranks retention classes. Ordinary records are retired before security/audit records when the queue is full; records of an equal or higher class are never displaced by lower-class traffic.
+
+While a gap exists, each outgoing batch carries a cumulative `discard` section in its metadata line describing the queue bound, the records that were really discarded (by event type and reason), the records that were handed to the sender but not yet confirmed, and whether that report has been acknowledged. The report is only acknowledged after a successfully delivered batch: a failed recovery attempt does not clear it, and the next successful batch repeats the full gap so a later reconnect can verify it.
+
+Records that were never handed to the sender (queue bound, transport back-off) are reported as `discarded`. Records whose send failed are reported as `unconfirmed`: the request may or may not have reached the server, so they stay listed until the operator can reconcile them and are never silently converted into "delivered".
+
+
 ### `service_node_name` [config-service-node-name]
 
 | Environment | Django/Flask | Default | Example |

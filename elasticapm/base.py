@@ -153,6 +153,7 @@ class Client(object):
             "server_ca_cert_file": self.config.server_ca_cert_file,
             "timeout": self.config.server_timeout,
             "processors": self.load_processors(),
+            "discard_policy": self.config.transport_discard_policy,
         }
         if config.transport_json_serializer:
             json_serializer_func = import_string(config.transport_json_serializer)
@@ -285,6 +286,18 @@ class Client(object):
         for you.
         """
         return self.capture("Exception", exc_info=exc_info, handled=handled, **kwargs)
+
+    def get_discard_report(self):
+        """
+        Return the transport's discard/gap ledger, if a discard policy is
+        configured.  ``None`` means the historical queue behaviour is in use.
+
+        The report distinguishes records that were really discarded from
+        records that were sent without a final receipt (``unconfirmed``), and
+        tells whether the latest gap has been acknowledged by the sender.
+        """
+        report = getattr(self._transport, "get_discard_report", None)
+        return report() if report is not None else None
 
     def queue(self, event_type, data, flush=False) -> None:
         if self.config.disable_send:

@@ -22,9 +22,11 @@ endif::[]
 
 // Unreleased changes go here
 // When the next release happens, nest these changes under the "Python Agent version 6.x" heading
-//[float]
-//===== Features
-//
+[float]
+===== Features
+
+* Add the optional `transport_discard_policy` setting. It bounds the transport queue, retires ordinary telemetry before security/audit events, and attaches a cumulative gap report to outgoing batches describing which event types were really discarded versus sent without confirmation. The report is only acknowledged after a successful send, so a failed recovery attempt cannot erase an earlier gap. Use `client.get_discard_report()` to inspect the active ledger. Without the setting, batching and queue behaviour are unchanged.
+
 //[float]
 //===== Bug fixes
 //

@@ -41,11 +41,25 @@ import time
 import timeit
 from collections import defaultdict
 
+from elasticapm.transport.discard import (
+    EVICT_MISS,
+    DiscardLedger,
+    DiscardPolicy,
+    evict_from_queue,
+    queue_counts,
+    queue_event_type,
+)
 from elasticapm.utils import json_encoder
 from elasticapm.utils.logging import get_logger
 from elasticapm.utils.threading import ThreadManager
 
 logger = get_logger("elasticapm.transport")
+
+# The underlying queue keeps a small amount of head-room for control records
+# (flush markers and shutdown) so that flow control can never be blocked by an
+# internal marker.  The discard policy's ``max_queue_size`` bounds only data
+# events and is enforced with ``_queued_data_count``.
+_CONTROL_HEADROOM = 16
 
 
 class Transport(ThreadManager):
@@ -65,6 +79,7 @@ class Transport(ThreadManager):
         queue_chill_count=500,
         queue_chill_time=1.0,
         processors=None,
+        discard_policy=None,
         **kwargs
     ) -> None:
         """
@@ -72,6 +87,9 @@ class Transport(ThreadManager):
 
         :param compress_level: GZip compress level. If zero, no GZip compression will be used
         :param json_serializer: serializer to use for JSON encoding
+        :param discard_policy: optional :class:`DiscardPolicy` that bounds the
+            event queue and reports discarded/unconfirmed records.  When omitted
+            the agent keeps its historical unbounded-ish behaviour.
         :param kwargs:
         """
         self.client = client
@@ -80,7 +98,20 @@ class Transport(ThreadManager):
         self._compress_level = min(9, max(0, compress_level if compress_level is not None else 0))
         self._json_serializer = json_serializer
         self._queued_data = None
-        self._event_queue = self._init_event_queue(chill_until=queue_chill_count, max_chill_time=queue_chill_time)
+        self._discard_policy = DiscardPolicy.from_value(discard_policy)
+        self._discard_ledger = DiscardLedger(self._discard_policy) if self._discard_policy is not None else None
+        self._queued_data_count = 0
+        self._queued_data_lock = threading.Lock()
+        self._admission_lock = threading.Lock()
+        self._event_queue = self._init_event_queue(
+            chill_until=queue_chill_count,
+            max_chill_time=queue_chill_time,
+            maxsize=(
+                self._discard_policy.max_queue_size + _CONTROL_HEADROOM
+                if self._discard_policy is not None
+                else 10000
+            ),
+        )
         self._is_chilled_queue = isinstance(self._event_queue, ChilledQueue)
         self._thread = None
         self._last_flush = timeit.default_timer()
@@ -99,13 +130,164 @@ class Transport(ThreadManager):
     def _max_buffer_size(self):
         return self.client.config.api_request_size if self.client else None
 
-    def queue(self, event_type, data, flush=False) -> None:
-        try:
-            self._flushed.clear()
-            kwargs = {"chill": not (event_type == "close" or flush)} if self._is_chilled_queue else {}
-            self._event_queue.put((event_type, data, flush), block=False, **kwargs)
+    @property
+    def discard_policy(self):
+        return self._discard_policy
 
-        except _queue.Full:
+    @property
+    def discard_ledger(self):
+        return self._discard_ledger
+
+    @property
+    def last_discard_report(self):
+        """
+        The most recent report a later attempt succeeded in delivering.
+
+        This may be a report that was written into an earlier, failed batch:
+        only the next successful send of a batch carrying that report (or a
+        newer one) advances the acknowledged revision.
+        """
+        if self._discard_ledger is None:
+            return None
+        return self._discard_ledger.last_acknowledged
+
+    def get_discard_report(self):
+        """
+        Return the current cumulative discard/gap ledger.
+
+        ``discarded`` counts records that were really thrown away (queue bound,
+        back-off).  ``unconfirmed`` counts records that were handed to the
+        sender but whose delivery has not been confirmed by a successful send;
+        they must not be reported as discarded.  ``pending`` indicates whether
+        the latest gap has not yet been acknowledged.
+        """
+        if self._discard_ledger is None:
+            return None
+        report = self._discard_ledger.snapshot()
+        report["queue"] = {
+            "max_size": self._discard_policy.max_queue_size,
+            "depth": self._queued_events(),
+        }
+        report["last_attempted"] = self._discard_ledger.last_attempted
+        return report
+
+    def _admit_event(self, event_type, item, kwargs) -> None:
+        """
+        Put an event on the queue, applying the optional discard convention.
+
+        Control records (flush markers and shutdown) are never subject to the
+        bound: dropping them would stall the consumer instead of applying
+        back-pressure to producers.
+        """
+        policy = self._discard_policy
+        if policy is None:
+            # Historical behaviour: no policy, no bound beyond the queue's own
+            # generous maxsize.
+            try:
+                self._event_queue.put(item, block=False, **kwargs)
+            except _queue.Full:
+                logger.debug("Event of type %s dropped due to full event queue", event_type)
+            return
+
+        if policy.is_control(event_type):
+            try:
+                self._event_queue.put(item, block=False, **kwargs)
+            except _queue.Full:
+                # Control records keep flow control moving.  If the queue's
+                # small head-room is exhausted, retire the oldest data record
+                # rather than losing a flush/shutdown marker.
+                evicted = evict_from_queue(
+                    self._event_queue,
+                    lambda queued: not policy.is_control(queue_event_type(queued)),
+                )
+                if evicted is not EVICT_MISS:
+                    self._adjust_queued_data_count(-1)
+                    self._record_discard(queue_event_type(evicted), "queue_high_water")
+                    try:
+                        self._event_queue.put(item, block=False, **kwargs)
+                    except _queue.Full:
+                        logger.debug("Control event of type %s dropped due to full event queue", event_type)
+                else:
+                    logger.debug("Control event of type %s dropped due to full event queue", event_type)
+            return
+
+        # Serialize producers so the data-event bound is exact even when many
+        # threads enqueue at once.  The count is incremented before the put, so
+        # a racing admission can never undershoot the bound.
+        with self._admission_lock:
+            if self._queued_events() >= policy.max_queue_size:
+                evicted = self._make_room(event_type)
+                if evicted is not EVICT_MISS:
+                    self._adjust_queued_data_count(-1)
+                    self._record_discard(queue_event_type(evicted), "queue_high_water")
+                else:
+                    self._record_discard(event_type, "queue_full")
+                    logger.debug("Event of type %s dropped due to full event queue", event_type)
+                    return
+            self._adjust_queued_data_count(1)
+            try:
+                self._event_queue.put(item, block=False, **kwargs)
+            except _queue.Full:
+                self._adjust_queued_data_count(-1)
+                self._record_discard(event_type, "queue_full")
+                logger.debug("Event of type %s dropped due to full event queue", event_type)
+                return
+            if self._discard_ledger is not None:
+                self._discard_ledger.record_accepted(event_type)
+
+    def _adjust_queued_data_count(self, delta) -> None:
+        with self._queued_data_lock:
+            self._queued_data_count = max(0, self._queued_data_count + delta)
+
+    def _queued_events(self) -> int:
+        """Number of data records currently waiting for the consumer."""
+        with self._queued_data_lock:
+            return self._queued_data_count
+
+    def _make_room(self, incoming_type):
+        """
+        Evict the oldest queued record whose retention is no stricter than the
+        incoming record.
+
+        Returns the evicted item (callers must account for it) or ``EVICT_MISS``.
+
+        Records with a higher retention (e.g. security events) are never
+        displaced by lower-retention traffic, while equal-retention traffic
+        retires in FIFO order so that at least the same class keeps flowing.
+        If no record qualifies the incoming record will be discarded by the
+        caller.
+        """
+        policy = self._discard_policy
+        incoming_priority = policy.priority_for(incoming_type)
+        evicted = evict_from_queue(
+            self._event_queue,
+            lambda queued: (
+                not policy.is_control(queue_event_type(queued))
+                and policy.priority_for(queue_event_type(queued)) <= incoming_priority
+            ),
+        )
+        if evicted is not EVICT_MISS:
+            logger.debug(
+                "Discarded event of type %s to make room for %s in bounded event queue",
+                queue_event_type(evicted),
+                incoming_type,
+            )
+            return evicted
+        return EVICT_MISS
+
+    def _record_discard(self, event_type, reason) -> None:
+        if self._discard_ledger is None or self._discard_policy is None:
+            return
+        if not self._discard_policy.is_control(event_type):
+            self._discard_ledger.record_discard(event_type, reason=reason)
+
+    def queue(self, event_type, data, flush=False) -> None:
+        self._flushed.clear()
+        kwargs = {"chill": not (event_type == "close" or flush)} if self._is_chilled_queue else {}
+        try:
+            self._admit_event(event_type, (event_type, data, flush), kwargs)
+        except _queue.Full:  # defensive: custom queue implementations may enforce their own bound
+            self._record_discard(event_type, "queue_full")
             logger.debug("Event of type %s dropped due to full event queue", event_type)
 
     def _process_queue(self) -> None:
@@ -115,6 +297,8 @@ class Transport(ThreadManager):
 
         buffer = self._init_buffer()
         buffer_written = False
+        batch_counts = defaultdict(int)
+        batch_report = None
         # add some randomness to timeout to avoid stampedes of several workers that are booted at the same time
         max_flush_time = (
             self._max_flush_time_seconds * random.uniform(0.9, 1.1) if self._max_flush_time_seconds else None
@@ -127,6 +311,8 @@ class Transport(ThreadManager):
             timed_out = False
             try:
                 event_type, data, flush = self._event_queue.get(block=True, timeout=timeout)
+                if self._discard_policy is not None and not self._discard_policy.is_control(event_type):
+                    self._adjust_queued_data_count(-1)
             except _queue.Empty:
                 event_type, data, flush = None, None, None
                 timed_out = True
@@ -134,7 +320,7 @@ class Transport(ThreadManager):
             if event_type == "close":
                 if buffer_written:
                     try:
-                        self._flush(buffer)
+                        self._flush(buffer, batch_counts=batch_counts, report=batch_report)
                     except Exception as exc:
                         logger.error(
                             "Exception occurred while flushing the buffer "
@@ -148,10 +334,12 @@ class Transport(ThreadManager):
                 if data is not None:
                     if not buffer_written:
                         # Write metadata just in time to allow for late metadata changes (such as in lambda)
-                        self._write_metadata(buffer)
+                        batch_report = self._build_gap_report(in_flight={event_type: 1})
+                        self._write_metadata(buffer, report=batch_report)
                     buffer.write((self._json_serializer({event_type: data}) + "\n").encode("utf-8"))
                     buffer_written = True
                     self._counts[event_type] += 1
+                    batch_counts[event_type] += 1
 
             queue_size = 0 if buffer.fileobj is None else buffer.fileobj.tell()
 
@@ -175,7 +363,7 @@ class Transport(ThreadManager):
                 flush = True
             if flush:
                 if buffer_written:
-                    self._flush(buffer, forced_flush=forced_flush)
+                    self._flush(buffer, forced_flush=forced_flush, batch_counts=batch_counts, report=batch_report)
                 elif forced_flush and any(x in self.client.config.server_url for x in ("/localhost:", "/127.0.0.1:")):
                     # No data on buffer, but due to manual flush we should send
                     # an empty payload with flushed=true query param, but only
@@ -188,6 +376,8 @@ class Transport(ThreadManager):
                 self._last_flush = timeit.default_timer()
                 buffer = self._init_buffer()
                 buffer_written = False
+                batch_counts = defaultdict(int)
+                batch_report = None
                 max_flush_time = (
                     self._max_flush_time_seconds * random.uniform(0.9, 1.1) if self._max_flush_time_seconds else None
                 )
@@ -222,11 +412,43 @@ class Transport(ThreadManager):
         buffer = gzip.GzipFile(fileobj=io.BytesIO(), mode="w", compresslevel=self._compress_level)
         return buffer
 
-    def _write_metadata(self, buffer) -> None:
-        data = (self._json_serializer({"metadata": self._metadata}) + "\n").encode("utf-8")
+    def _build_gap_report(self, in_flight=None):
+        """
+        Snapshot the discard ledger for the batch that is about to be sent.
+
+        Returns ``None`` while there is nothing to report, which keeps payloads
+        under normal load identical to the historical behaviour.  Once a gap
+        exists, every batch repeats the cumulative report until a send is
+        acknowledged, so a later reconnect can always verify the real gap.
+        """
+        if self._discard_ledger is None or self._metadata is None:
+            return None
+        snapshot = self._discard_ledger.snapshot()
+        if not snapshot["discarded"]["total"] and not snapshot["unconfirmed"]["total"]:
+            # No gap has ever occurred: keep payloads byte-for-byte identical
+            # to the historical behaviour.  Once a gap exists the cumulative
+            # report stays in every batch, so even a reconnect after the report
+            # was first acknowledged can still verify the real gap.
+            return None
+        snapshot["queue"] = {
+            "max_size": self._discard_policy.max_queue_size,
+            "depth": self._queued_events(),
+            # Records already moved into the forming batch when this metadata
+            # line was written.  They are neither discarded nor sent yet.
+            "batch_at_start": dict(in_flight or {}),
+            "waiting_by_event_type": queue_counts(self._event_queue, self._discard_policy.is_control),
+        }
+        return snapshot
+
+    def _write_metadata(self, buffer, report=None) -> None:
+        metadata = self._metadata
+        if report is not None:
+            metadata = dict(metadata or {})
+            metadata["discard"] = report
+        data = (self._json_serializer({"metadata": metadata}) + "\n").encode("utf-8")
         buffer.write(data)
 
-    def _init_event_queue(self, chill_until, max_chill_time):
+    def _init_event_queue(self, chill_until, max_chill_time, maxsize=10000):
         # some libraries like eventlet monkeypatch queue.Queue and switch out the implementation.
         # In those cases we can't rely on internals of queue.Queue to be there, so we simply use
         # their queue and forgo the optimizations of ChilledQueue. In the case of eventlet, this
@@ -239,28 +461,43 @@ class Transport(ThreadManager):
                 hasattr(_queue.Queue, "unfinished_tasks"),
             )
         ):
-            return ChilledQueue(maxsize=10000, chill_until=chill_until, max_chill_time=max_chill_time)
+            return ChilledQueue(maxsize=maxsize, chill_until=chill_until, max_chill_time=max_chill_time)
         else:
-            return _queue.Queue(maxsize=10000)
+            return _queue.Queue(maxsize=maxsize)
 
-    def _flush(self, buffer, forced_flush=False) -> None:
+    def _flush(self, buffer, forced_flush=False, batch_counts=None, report=None) -> None:
         """
         Flush the queue. This method should only be called from the event processing queue
         :return: None
         """
+        batch_counts = batch_counts or {}
         if not self.state.should_try():
             logger.error("dropping flushed data due to transport failure back-off")
             buffer.close()
+            # Back-off drops a formed batch that was never handed to the
+            # transport.  That is a known discard, not an undetermined send.
+            if self._discard_ledger is not None:
+                self._discard_ledger.record_discard(batch_counts, reason="transport_back_off")
         else:
             fileobj = buffer.fileobj  # get a reference to the fileobj before closing the gzip file
             buffer.close()
 
             data = fileobj.getbuffer()
             try:
+                if self._discard_ledger is not None:
+                    self._discard_ledger.begin_attempt(report)
                 self.send(data, forced_flush=forced_flush)
                 self.handle_transport_success()
+                if self._discard_ledger is not None:
+                    self._discard_ledger.acknowledge(report, confirmed_counts=batch_counts)
             except Exception as e:
                 self.handle_transport_fail(e)
+                # The payload may have reached the server, or not.  Until a
+                # subsequent send succeeds these records stay unconfirmed and
+                # the gap report stays pending: a failed attempt must never
+                # clear it.
+                if self._discard_ledger is not None:
+                    self._discard_ledger.record_unconfirmed(batch_counts, reason="send_failed")
 
             data.release()
 

@@ -438,6 +438,16 @@ class EnumerationValidator(object):
         return ret
 
 
+def _discard_policy_validator(value, field_name):
+    """Validate/parse the optional transport discard convention."""
+    from elasticapm.transport.discard import DiscardPolicy
+
+    try:
+        return DiscardPolicy.from_value(value)
+    except (TypeError, ValueError) as exc:
+        raise ConfigurationError("{}={} is not a valid discard policy: {}".format(field_name, value, exc), field_name)
+
+
 def _log_level_callback(dict_key, old_value, new_value, config_instance) -> None:
     elasticapm_logger = logging.getLogger("elasticapm")
     elasticapm_logger.setLevel(log_levels_map.get(new_value, 100))
@@ -625,6 +635,9 @@ class Config(_ConfigBase):
     hostname = _ConfigValue("HOSTNAME", default=None)
     auto_log_stacks = _BoolConfigValue("AUTO_LOG_STACKS", default=True)
     transport_class = _ConfigValue("TRANSPORT_CLASS", default="elasticapm.transport.http.Transport", required=True)
+    transport_discard_policy = _ConfigValue(
+        "TRANSPORT_DISCARD_POLICY", type=None, validators=[_discard_policy_validator], default=None
+    )
     processors = _ListConfigValue(
         "PROCESSORS",
         default=[
