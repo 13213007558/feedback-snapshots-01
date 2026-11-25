@@ -28,6 +28,13 @@ require "sidekiq/job/iterable"
 #
 # The cursor object must be serializable to JSON.
 #
+# When a chunked job runs under an approval, override `#approval_scope` to
+# return a JSON-serializable descriptor of what is approved. Sidekiq stores a
+# digest of it with the cursor; a later attempt only resumes when the digest
+# still matches. Override `#iteration_commit_key(item)` to record which items
+# have already committed, so a lost progress write does not cause duplicate
+# work. See `examples/iterable_scope/` for a runnable demonstration.
+#
 # Note there are several APIs to help you build enumerators for
 # ActiveRecord Relations, CSV files, etc. See sidekiq/job/iterable/*.rb.
 module Sidekiq

@@ -145,7 +145,11 @@
             <td>
               <%= relative_time(work.run_at) %>
               <% if (state = @iterable_states[job.jid]) %>
-                <div><small>cursor=<%= h(truncate(state.cursor.inspect, 100)) %>; exec=<%= state.executions %>; rt=<%= number_with_delimiter(state.runtime, precision: 3) %>s</small></div>
+                <% if (diag = state.diagnostics) %>
+                  <div><small>scope=<%= h(diag["scope"] || "unknown") %>; processed=<%= diag["processed"].to_i %>; iterations=<%= diag["iterations"].to_i %>; committed=<%= diag["committed"].to_i %>; recovered=<%= diag["recovered"].to_i %>; exec=<%= state.executions %></small></div>
+                <% else %>
+                  <div><small>cursor=<%= h(truncate(state.cursor.inspect, 100)) %>; exec=<%= state.executions %>; rt=<%= number_with_delimiter(state.runtime, precision: 3) %>s</small></div>
+                <% end %>
               <% end %>
             </td>
           </tr>

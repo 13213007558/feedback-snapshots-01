@@ -1462,6 +1462,46 @@ module Sidekiq
       def cancelled
         raw["cancelled"]&.to_i
       end
+
+      # Redacted, scope-bound diagnostics persisted by approval-scoped
+      # iterable jobs. Returns nil for jobs without scope binding or when the
+      # stored payload is unreadable. The cursor and record payloads are not
+      # part of this structure.
+      def diagnostics
+        return @diagnostics if defined?(@diagnostics)
+
+        @diagnostics = begin
+          blob = raw["diag"]
+          parsed = blob && Sidekiq.load_json(blob)
+          parsed.is_a?(Hash) ? parsed : nil
+        rescue JSON::ParserError
+          nil
+        end
+      end
+
+      def scope
+        diagnostics && diagnostics["scope"]
+      end
+
+      def reason
+        diagnostics && diagnostics["reason"]
+      end
+
+      def processed
+        diagnostics && diagnostics["processed"].to_i
+      end
+
+      def iterations
+        diagnostics && diagnostics["iterations"].to_i
+      end
+
+      def recovered
+        diagnostics && diagnostics["recovered"].to_i
+      end
+
+      def committed
+        diagnostics && diagnostics["committed"].to_i
+      end
     end
   end
 end

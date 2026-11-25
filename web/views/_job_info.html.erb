@@ -38,7 +38,11 @@
         <tr>
           <th>Iteration</th>
           <td>
-            <code>cursor=<%= h(state.cursor.inspect) %>; exec=<%= state.executions %>; rt=<%= number_with_delimiter(state.runtime, precision: 3) %>s</code>
+            <% if (diag = state.diagnostics) %>
+              <code>scope=<%= h(diag["scope"] || "unknown") %>; processed=<%= diag["processed"].to_i %>; iterations=<%= diag["iterations"].to_i %>; committed=<%= diag["committed"].to_i %>; recovered=<%= diag["recovered"].to_i %><%= "; reason=#{h(diag["reason"])}" if diag["reason"] %>; exec=<%= state.executions %>; rt=<%= number_with_delimiter(state.runtime, precision: 3) %>s</code>
+            <% else %>
+              <code>cursor=<%= h(state.cursor.inspect) %>; exec=<%= state.executions %>; rt=<%= number_with_delimiter(state.runtime, precision: 3) %>s</code>
+            <% end %>
           </td>
         </tr>
         <% end %>
