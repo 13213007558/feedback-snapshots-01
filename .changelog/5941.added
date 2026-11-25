@@ -1,0 +1,1 @@
+`opentelemetry-sdk`: add opt-in `SpanDisclosurePolicy` so selected applications can give each span processor an isolated, filtered view of ended spans; exception type and status code are always visible while message, stacktrace, extra attributes and status description are disclosed only to permitted subscribers.

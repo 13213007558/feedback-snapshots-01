@@ -6,6 +6,7 @@ Submodules
 
 .. toctree::
 
+   trace.disclosure
    trace.export
    trace.id_generator
    trace.sampling

@@ -55,6 +55,11 @@ from opentelemetry.sdk.resources import (
     _get_process_dependent_resource,
 )
 from opentelemetry.sdk.trace import sampling
+from opentelemetry.sdk.trace._disclosure import (
+    SpanDisclosurePolicy,
+    effective_policy,
+    materialize_span,
+)
 from opentelemetry.sdk.trace._tracer_metrics import create_tracer_metrics
 from opentelemetry.sdk.trace.id_generator import IdGenerator, RandomIdGenerator
 from opentelemetry.sdk.util import BoundedList
@@ -128,6 +133,12 @@ class SpanProcessor:
         This method is called synchronously on the thread that ends the
         span, therefore it should not block or throw an exception.
 
+        When the provider is given a
+        :class:`~opentelemetry.sdk.trace.SpanDisclosurePolicy`, ``span`` is a
+        per-processor snapshot that only contains the data this processor is
+        allowed to read. Mutating that snapshot never affects another
+        processor.
+
         Args:
             span: The :class:`opentelemetry.trace.Span` that just ended.
         """
@@ -165,12 +176,42 @@ class SynchronousMultiSpanProcessor(SpanProcessor):
         # use a tuple to avoid race conditions when adding a new span and
         # iterating through it on "on_start" and "on_end".
         self._span_processors = ()
+        self._disclosure_policies: dict[int, SpanDisclosurePolicy | None] = {}
+        self._disclosure_ceiling: SpanDisclosurePolicy | None = None
         self._lock = threading.Lock()
 
-    def add_span_processor(self, span_processor: SpanProcessor) -> None:
-        """Adds a SpanProcessor to the list handled by this instance."""
+    def add_span_processor(
+        self,
+        span_processor: SpanProcessor,
+        *,
+        disclosure_policy: SpanDisclosurePolicy | None = None,
+    ) -> None:
+        """Adds a SpanProcessor to the list handled by this instance.
+
+        ``disclosure_policy`` narrows what the processor may read for this
+        subscriber. It is intersected with the application-wide policy on the
+        provider.
+        """
         with self._lock:
             self._span_processors += (span_processor,)
+            self._disclosure_policies[id(span_processor)] = disclosure_policy
+
+    def _disclosure_ceiling_for(self, span_processor: SpanProcessor) -> SpanDisclosurePolicy | None:
+        # pylint: disable=protected-access
+        return self._disclosure_ceiling
+
+    def _span_for(
+        self,
+        span: "ReadableSpan",
+        span_processor: SpanProcessor,
+    ) -> "ReadableSpan":
+        policy = effective_policy(
+            self._disclosure_ceiling_for(span_processor),
+            self._disclosure_policies.get(id(span_processor)),
+        )
+        if policy is None:
+            return span
+        return materialize_span(span, policy)
 
     def on_start(
         self,
@@ -194,7 +235,7 @@ class SynchronousMultiSpanProcessor(SpanProcessor):
     def on_end(self, span: "ReadableSpan") -> None:
         for sp in self._span_processors:
             try:
-                sp.on_end(span)
+                sp.on_end(self._span_for(span, sp))
             except Exception:  # pylint: disable=broad-exception-caught
                 logger.exception("Exception while calling SpanProcessor.on_end.")
 
@@ -258,6 +299,8 @@ class ConcurrentMultiSpanProcessor(SpanProcessor):
         # use a tuple to avoid race conditions when adding a new span and
         # iterating through it on "on_start" and "on_end".
         self._span_processors = ()
+        self._disclosure_policies: dict[int, SpanDisclosurePolicy | None] = {}
+        self._disclosure_ceiling: SpanDisclosurePolicy | None = None
         self._lock = threading.Lock()
         self._init_executor(num_threads)
         if hasattr(os, "register_at_fork"):
@@ -275,10 +318,38 @@ class ConcurrentMultiSpanProcessor(SpanProcessor):
     def _init_executor(self, num_threads: int) -> None:
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=num_threads)
 
-    def add_span_processor(self, span_processor: SpanProcessor) -> None:
-        """Adds a SpanProcessor to the list handled by this instance."""
+    def add_span_processor(
+        self,
+        span_processor: SpanProcessor,
+        *,
+        disclosure_policy: SpanDisclosurePolicy | None = None,
+    ) -> None:
+        """Adds a SpanProcessor to the list handled by this instance.
+
+        ``disclosure_policy`` narrows what the processor may read for this
+        subscriber. It is intersected with the application-wide policy on the
+        provider.
+        """
         with self._lock:
             self._span_processors += (span_processor,)
+            self._disclosure_policies[id(span_processor)] = disclosure_policy
+
+    def _disclosure_ceiling_for(self, span_processor: SpanProcessor) -> SpanDisclosurePolicy | None:
+        # pylint: disable=protected-access
+        return self._disclosure_ceiling
+
+    def _span_for(
+        self,
+        span: "ReadableSpan",
+        span_processor: SpanProcessor,
+    ) -> "ReadableSpan":
+        policy = effective_policy(
+            self._disclosure_ceiling_for(span_processor),
+            self._disclosure_policies.get(id(span_processor)),
+        )
+        if policy is None:
+            return span
+        return materialize_span(span, policy)
 
     def _submit_and_await(
         self,
@@ -318,7 +389,18 @@ class ConcurrentMultiSpanProcessor(SpanProcessor):
                 logger.exception("Exception while calling _on_ending on %s.", sp)
 
     def on_end(self, span: "ReadableSpan") -> None:
-        self._submit_and_await(lambda sp: sp.on_end, span)
+        futures = []
+        for sp in self._span_processors:
+            try:
+                future = self._executor.submit(sp.on_end, self._span_for(span, sp))
+                futures.append(future)
+            except Exception:  # pylint: disable=broad-exception-caught
+                logger.exception("Exception while submitting task to SpanProcessor executor.")
+        for future in futures:
+            try:
+                future.result()
+            except Exception:  # pylint: disable=broad-exception-caught
+                logger.exception("Exception while executing SpanProcessor task.")
 
     def shutdown(self) -> None:
         """Shuts down all underlying span processors in parallel."""
@@ -1340,10 +1422,13 @@ class TracerProvider(trace_api.TracerProvider):
         id_generator: IdGenerator | None = None,
         span_limits: SpanLimits | None = None,
         *,
+        span_disclosure_policy: SpanDisclosurePolicy | None = None,
         meter_provider: metrics_api.MeterProvider | None = None,
         _tracer_configurator: _TracerConfiguratorT | None = None,
     ) -> None:
         self._active_span_processor = active_span_processor or SynchronousMultiSpanProcessor()
+        # pylint: disable=protected-access
+        self._active_span_processor._disclosure_ceiling = span_disclosure_policy
         if id_generator is None:
             self.id_generator = RandomIdGenerator()
         else:
@@ -1468,15 +1553,26 @@ class TracerProvider(trace_api.TracerProvider):
 
         return tracer
 
-    def add_span_processor(self, span_processor: SpanProcessor) -> None:
+    def add_span_processor(
+        self,
+        span_processor: SpanProcessor,
+        *,
+        disclosure_policy: SpanDisclosurePolicy | None = None,
+    ) -> None:
         """Registers a new :class:`SpanProcessor` for this `TracerProvider`.
 
         The span processors are invoked in the same order they are registered.
+
+        ``disclosure_policy`` narrows what this subscriber may read. It is
+        intersected with the ``span_disclosure_policy`` given to the provider.
         """
 
         # no lock here because add_span_processor is thread safe for both
         # SynchronousMultiSpanProcessor and ConcurrentMultiSpanProcessor.
-        self._active_span_processor.add_span_processor(span_processor)
+        self._active_span_processor.add_span_processor(
+            span_processor,
+            disclosure_policy=disclosure_policy,
+        )
 
     def shutdown(self) -> None:
         """Shut down the span processors added to the tracer provider."""
