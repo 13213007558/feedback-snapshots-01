@@ -395,6 +395,112 @@ class DictCursor(DictCursorMixin, Cursor):
     """A cursor which returns results as a dictionary"""
 
 
+#: Grade for fields whose actual origin is confirmed to be public.
+GRADE_APPROVED = "approved"
+
+#: Grade for fields whose origin cannot be confirmed from the column
+#: metadata. They are kept in the result but held pending confirmation.
+GRADE_PENDING = "pending"
+
+
+class PublicRow(dict):
+    """A dict row that carries the origin grading of its keys.
+
+    Instances are returned by cursors using :class:`OriginDictCursorMixin`.
+    `approved_keys` holds the display keys confirmed to come from a public
+    origin, while `pending_keys` holds the display keys kept pending
+    confirmation because the column metadata was not enough to determine
+    their actual origin.
+    """
+
+    approved_keys = ()
+    pending_keys = ()
+
+
+class OriginDictCursorMixin(DictCursorMixin):
+    """Dict cursor mixin grading columns by their actual field origin.
+
+    Opt-in cursors using this mixin decide the public grading of each
+    column from the field's actual origin (the ``org_table``/``org_name``
+    metadata) instead of its display key. A public column therefore stays
+    available when a query renames it with a SQL alias or when the dict
+    key is qualified with a table name to disambiguate duplicate column
+    names. Grading is recomputed for every result set, including result
+    sets reached through :meth:`nextset`, so a same-named column pointing
+    at a new origin is re-evaluated.
+
+    Columns whose origin cannot be confirmed from the column metadata are
+    kept in the result but graded :data:`GRADE_PENDING`, so callers can
+    tell them apart from normally approved fields via
+    `cursor.field_classification` or the row's `pending_keys`. Columns
+    confirmed to come from a non-public origin are excluded from the
+    public result.
+    """
+
+    dict_type = PublicRow
+
+    #: Origins considered public, as ``(org_table, org_name)`` pairs.
+    public_origins = frozenset()
+
+    _field_grades = None
+    field_classification = {}
+
+    def _grade_field(self, field):
+        org_table = getattr(field, "org_table", None) or ""
+        org_name = getattr(field, "org_name", None) or ""
+        if not org_table or not org_name:
+            return GRADE_PENDING
+        if (org_table, org_name) in self.public_origins:
+            return GRADE_APPROVED
+        return None
+
+    def _do_get_result(self):
+        result = self._get_db()._result
+        fields = getattr(result, "fields", None)
+        if fields:
+            self._field_grades = tuple(self._grade_field(f) for f in fields)
+        else:
+            self._field_grades = None
+        super()._do_get_result()
+        grades = self._field_grades
+        if grades is not None and getattr(self, "_fields", None):
+            self.field_classification = {
+                key: grade
+                for key, grade in zip(self._fields, grades)
+                if grade is not None
+            }
+        else:
+            self.field_classification = {}
+
+    def _conv_row(self, row):
+        row = super()._conv_row(row)
+        if row is None:
+            return None
+        grades = self._field_grades
+        if grades is None:
+            return row
+        graded = [
+            (key, grade)
+            for key, grade in zip(self._fields, grades)
+            if grade is not None
+        ]
+        public = self.dict_type((key, row[key]) for key, _ in graded)
+        public.approved_keys = tuple(
+            key for key, grade in graded if grade == GRADE_APPROVED
+        )
+        public.pending_keys = tuple(
+            key for key, grade in graded if grade == GRADE_PENDING
+        )
+        return public
+
+
+class OriginDictCursor(OriginDictCursorMixin, DictCursor):
+    """A buffered cursor returning public-graded rows as dictionaries.
+
+    See :class:`OriginDictCursorMixin` for how the grading works.
+    """
+
+
 class SSCursor(Cursor):
     """
     Unbuffered Cursor, mainly useful for queries that return a lot of data,
@@ -518,3 +624,10 @@ class SSCursor(Cursor):
 
 class SSDictCursor(DictCursorMixin, SSCursor):
     """An unbuffered cursor, which returns results as a dictionary"""
+
+
+class OriginSSDictCursor(OriginDictCursorMixin, SSDictCursor):
+    """An unbuffered cursor returning public-graded rows as dictionaries.
+
+    See :class:`OriginDictCursorMixin` for how the grading works.
+    """

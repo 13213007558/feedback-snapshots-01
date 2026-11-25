@@ -17,3 +17,15 @@ Cursor Objects
 
 .. autoclass:: SSDictCursor
    :members:
+
+.. autoclass:: PublicRow
+   :members:
+
+.. autoclass:: OriginDictCursorMixin
+   :members:
+
+.. autoclass:: OriginDictCursor
+   :members:
+
+.. autoclass:: OriginSSDictCursor
+   :members:

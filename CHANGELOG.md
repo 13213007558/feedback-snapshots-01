@@ -1,5 +1,15 @@
 # Changes
 
+## Unreleased
+
+* Add opt-in `OriginDictCursor` and `OriginSSDictCursor` (via
+  `OriginDictCursorMixin`) that grade columns by their actual field origin
+  (`org_table`/`org_name`) instead of the display key. Public columns stay
+  available when renamed by a SQL alias or qualified with a table name for
+  duplicate keys; grading is re-evaluated on every result set, and fields
+  whose origin cannot be confirmed are kept but marked `pending` so callers
+  can distinguish them from approved fields.
+
 ## v1.2.4 (security fix)
 
 Release date: 2026-11-09
