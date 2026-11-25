@@ -34,6 +34,12 @@ from kubernetes.config.exec_provider import ExecProvider
 
 from .config_exception import ConfigException
 from .dateutil import UTC, format_rfc3339, parse_rfc3339
+from .kubeconfig_source import (CAPABILITY_AUTHENTICATE, CAPABILITY_DESCRIBE,
+                                CAPABILITY_EXEC, KubeConfigAudit,
+                                KubeConfigAuditRecord,
+                                KubeConfigSourceError,
+                                KubeConfigSourcePolicy,
+                                canonical_source_path, describe_material)
 
 try:
     import google.auth
@@ -76,6 +82,27 @@ def _create_temp_file_with_content(content, temp_file_path=None, force_recreate=
     with open(name, 'wb') as fd:
         fd.write(content.encode() if isinstance(content, str) else content)
     return name
+
+
+def _describe_material_field(obj, file_key, resolved_file, origin=None):
+    """Describe the certificate material a kubeconfig field produced.
+
+    ``data`` wins over ``file`` in :class:`FileOrData`, so the audit record
+    follows the same precedence and records whether the value was inline or a
+    path.  ``origin`` marks material supplied by something other than the
+    kubeconfig entry (an exec plugin).
+    """
+
+    if not obj:
+        return None
+    data_key = file_key + '-data'
+    if data_key in obj and obj[data_key]:
+        return describe_material(
+            obj[data_key], resolved_file, kind='data', origin=origin)
+    if file_key in obj:
+        return describe_material(
+            obj[file_key], resolved_file, kind='path', origin=origin)
+    return describe_material(None, resolved_file, origin=origin)
 
 
 def _is_expired(expiry):
@@ -195,7 +222,9 @@ class KubeConfigLoader:
                  get_google_credentials=None,
                  config_base_path="",
                  config_persister=None,
-                 temp_file_path=None):
+                 temp_file_path=None,
+                 source_policy=None,
+                 audit=None):
 
         if config_dict is None:
             raise ConfigException(
@@ -206,13 +235,19 @@ class KubeConfigLoader:
         else:
             self._config = ConfigNode('kube-config', config_dict)
 
+        self._config_base_path = config_base_path
+        self._config_persister = config_persister
+        self._temp_file_path = temp_file_path
+        self.source_policy = source_policy
+        self.audit = audit
+        self.audit_record = None
+        self._context_source = None
+        self._user_source = None
+        self._cluster_source = None
         self._current_context = None
         self._user = None
         self._cluster = None
         self.set_active_context(active_context)
-        self._config_base_path = config_base_path
-        self._config_persister = config_persister
-        self._temp_file_path = temp_file_path
 
         def _refresh_credentials_with_cmd_path():
             config = self._user['auth-provider']['config']
@@ -233,6 +268,15 @@ class KubeConfigLoader:
                 cmd = fields[0]
                 args = fields[1:]
 
+            # ``cmd-path`` runs a local helper just like an exec plugin, so
+            # it needs the same capability from the user's own source.
+            self._check_source(self._user_source, CAPABILITY_EXEC, 'exec')
+            record = self.audit_record
+            if record is not None:
+                record.exec_configured = True
+                record.exec_command = [cmd] + list(args)
+                record.exec_authorized = True
+                record.exec_invocations += 1
             commandTokenSource = CommandTokenSource(
                 cmd, args,
                 config.safe_get('token-key'),
@@ -268,18 +312,98 @@ class KubeConfigLoader:
             context_name = self._config['current-context']
         self._current_context = self._config['contexts'].get_with_name(
             context_name)
-        if (self._current_context['context'].safe_get('user') and
-                self._config.safe_get('users')):
-            user = self._config['users'].get_with_name(
-                self._current_context['context']['user'], safe=True)
-            if user:
-                self._user = user['user']
-            else:
-                self._user = None
+        user_name = self._current_context['context'].safe_get('user')
+        user_node = None
+        if user_name and self._config.safe_get('users'):
+            user_node = self._config['users'].get_with_name(
+                user_name, safe=True)
+        if user_node:
+            self._user = user_node['user']
         else:
             self._user = None
-        self._cluster = self._config['clusters'].get_with_name(
-            self._current_context['context']['cluster'])['cluster']
+        cluster_name = self._current_context['context']['cluster']
+        cluster_node = self._config['clusters'].get_with_name(cluster_name)
+        self._cluster = cluster_node['cluster']
+
+        self._context_source = self._current_context.path
+        self._user_source = (
+            user_node.path if user_node is not None else None)
+        self._cluster_source = cluster_node.path
+
+        self.audit_record = KubeConfigAuditRecord(
+            context_name=context_name,
+            context_source=self._context_source,
+            cluster_name=cluster_name,
+            cluster_source=self._cluster_source,
+            user_name=user_name if user_node is not None else None,
+            user_source=self._user_source,
+        )
+        if self.audit is not None:
+            self.audit.records.append(self.audit_record)
+
+    def _check_source(self, source, capability, stage):
+        """Enforce the source policy for one resolved config component.
+
+        ``source`` is the path of the file the component was actually defined
+        in, not the path of the file passed to the loader.  A merged context can
+        borrow its cluster from one file and its user from another, so each
+        component is checked independently.
+        """
+        record = self.audit_record
+        if self.source_policy is None:
+            return
+        if record is not None:
+            record.policy_enforced = True
+            canonical = canonical_source_path(source)
+            record.source_capabilities[canonical] = \
+                self.source_policy.capabilities_for(source)
+        try:
+            self.source_policy.check(source, capability, stage)
+        except KubeConfigSourceError as error:
+            if record is not None:
+                record.decision = 'denied'
+                record.denied_capability = error.capability
+                record.denied_stage = error.stage
+                record.denied_source = error.source
+                record.error = str(error)
+            raise
+
+    def authorize_sources(self):
+        """Validate the resolved context against the source policy.
+
+        This runs before any authentication work so that an unapproved source
+        can never cause an authentication plugin to be spawned, even when the
+        context entry itself lives in an approved file.
+        """
+        if self.source_policy is None:
+            return
+        self._check_source(
+            self._context_source, CAPABILITY_DESCRIBE, 'context')
+        self._check_source(
+            self._cluster_source, CAPABILITY_DESCRIBE, 'cluster')
+        if self._user is not None:
+            self._check_source(
+                self._user_source, CAPABILITY_AUTHENTICATE, 'user')
+            if 'exec' in self._user:
+                self._check_source(
+                    self._user_source, CAPABILITY_EXEC, 'exec')
+
+    def _record_source_materials(self):
+        record = self.audit_record
+        if record is None:
+            return
+        cluster = self._cluster.value
+        user = self._user.value if self._user is not None else {}
+        record.certificate_authority = _describe_material_field(
+            cluster, 'certificate-authority',
+            getattr(self, 'ssl_ca_cert', None))
+        origin = getattr(self, '_material_origin', None)
+        record.client_certificate = _describe_material_field(
+            user, 'client-certificate',
+            getattr(self, 'cert_file', None), origin=origin)
+        record.client_key = _describe_material_field(
+            user, 'client-key',
+            getattr(self, 'key_file', None), origin=origin)
 
     def _load_authentication(self):
         """Read authentication from kube-config user section if exists.
@@ -292,7 +416,12 @@ class KubeConfigLoader:
             2. token field (point to a token file)
             3. exec provided plugin
             4. username/password
+
+        The resolved cluster and user sources are checked against the source
+        policy on every call, so a token refresh cannot re-use an approval
+        that has since been withdrawn for one of the contributing files.
         """
+        self.authorize_sources()
         if not self._user:
             return
         if self._load_auth_provider_token():
@@ -316,6 +445,14 @@ class KubeConfigLoader:
 
 
 
+    def _record_identity(self, method, **fields):
+        record = self.audit_record
+        if record is None:
+            return
+        identity = {'method': method}
+        identity.update(fields)
+        record.identity = identity
+
     def _load_gcp_token(self, provider):
         if (('config' not in provider) or
                 ('access-token' not in provider['config']) or
@@ -325,6 +462,7 @@ class KubeConfigLoader:
             self._refresh_gcp_token()
 
         self.token = "Bearer %s" % provider['config']['access-token']
+        self._record_identity('gcp-auth-provider')
         if 'expiry' in provider['config']:
             self.expiry = parse_rfc3339(provider['config']['expiry'])
         return self.token
@@ -376,6 +514,7 @@ class KubeConfigLoader:
                 self._config_persister()
 
         self.token = "Bearer %s" % provider['config']['id-token']
+        self._record_identity('oidc-auth-provider')
 
         return self.token
 
@@ -440,8 +579,35 @@ class KubeConfigLoader:
         if 'exec' not in self._user:
             return
         try:
-            base_path = self._get_base_path(self._cluster.path)
-            status = ExecProvider(self._user['exec'], base_path, self._cluster).run()
+            # The exec block belongs to the user entry; in a merged config its
+            # relative paths resolve against the user's file, not the
+            # cluster's.
+            base_path = self._get_base_path(self._user.path)
+            # The capability check on the context is not enough on its own:
+            # the user entry itself has to come from a file that is approved
+            # to run authentication plugins.  This is re-checked every time,
+            # including token refreshes.
+            self._check_source(self._user_source, CAPABILITY_EXEC, 'exec')
+            exec_config = self._user['exec']
+            command = [exec_config['command']]
+            if exec_config.safe_get('args'):
+                command.extend(exec_config['args'])
+            record = self.audit_record
+            if record is not None:
+                record.exec_configured = True
+                record.exec_command = list(command)
+                record.exec_authorized = False
+
+            def _count_execution():
+                if record is not None:
+                    record.exec_authorized = True
+                    record.exec_invocations += 1
+
+            status = ExecProvider(
+                exec_config, base_path, self._cluster,
+                authorize=lambda: self._check_source(
+                    self._user_source, CAPABILITY_EXEC, 'exec'),
+                on_execute=_count_execution).run()
             if 'token' in status:
                 self.token = "Bearer %s" % status['token']
             elif 'clientCertificateData' in status:
@@ -463,13 +629,30 @@ class KubeConfigLoader:
                     file_base_path=base_path,
                     base64_file_content=False,
                     temp_file_path=self._temp_file_path).as_file()
+                self._material_origin = 'exec-plugin'
             else:
                 logging.error('exec: missing token or clientCertificateData '
                               'field in plugin output')
                 return None
             if 'expirationTimestamp' in status:
                 self.expiry = parse_rfc3339(status['expirationTimestamp'])
+            if self.audit_record is not None:
+                self.audit_record.exec_succeeded = True
+            if 'token' in status:
+                self._record_identity(
+                    'exec-plugin-token',
+                    exec_command=list(self.audit_record.exec_command)
+                    if self.audit_record is not None else None)
+            else:
+                self._record_identity(
+                    'exec-plugin-certificate',
+                    exec_command=list(self.audit_record.exec_command)
+                    if self.audit_record is not None else None)
             return True
+        except KubeConfigSourceError:
+            # A denied source must fail the load, not fall through to another
+            # authentication method.
+            raise
         except Exception as e:
             logging.error(str(e))
 
@@ -482,6 +665,7 @@ class KubeConfigLoader:
             temp_file_path=self._temp_file_path).as_data()
         if token:
             self.token = "Bearer %s" % token
+            self._record_identity('token')
             return True
 
     def _load_user_pass_token(self):
@@ -489,6 +673,7 @@ class KubeConfigLoader:
             self.token = urllib3.util.make_headers(
                 basic_auth=(self._user['username'] + ':' +
                             self._user['password'])).get('authorization')
+            self._record_identity('basic-auth')
             return True
 
     def _get_base_path(self, config_path):
@@ -499,6 +684,8 @@ class KubeConfigLoader:
         return ""
 
     def _load_cluster_info(self):
+        if self.audit_record is not None:
+            self.audit_record.server = self._cluster.safe_get('server')
         if 'server' in self._cluster:
             self.host = self._cluster['server'].rstrip('/')
             if self.host.startswith("https"):
@@ -510,17 +697,25 @@ class KubeConfigLoader:
                 if 'cert_file' not in self.__dict__:
                     # cert_file could have been provided by
                     # _load_from_exec_plugin; only load from the _user
-                    # section if we need it.
+                    # section if we need it.  These paths belong to the user
+                    # entry, which in a merged config may live in a different
+                    # file than the cluster, so resolve them against the
+                    # user's own source.
+                    user_base_path = self._get_base_path(
+                        self._user.path if self._user is not None else None)
                     self.cert_file = FileOrData(
                         self._user, 'client-certificate',
-                        file_base_path=base_path,
+                        file_base_path=user_base_path,
                         temp_file_path=self._temp_file_path).as_file()
                     self.key_file = FileOrData(
                         self._user, 'client-key',
-                        file_base_path=base_path,
+                        file_base_path=user_base_path,
                         temp_file_path=self._temp_file_path).as_file()
         if 'insecure-skip-tls-verify' in self._cluster:
             self.verify_ssl = not self._cluster['insecure-skip-tls-verify']
+        if self.audit_record is not None:
+            self.audit_record.verify_ssl = getattr(
+                self, 'verify_ssl', None)
         if 'tls-server-name' in self._cluster:
             self.tls_server_name = self._cluster['tls-server-name']
         if 'proxy-url' in self._cluster:
@@ -543,8 +738,16 @@ class KubeConfigLoader:
                 setattr(client_configuration, key, getattr(self, key))
 
     def load_and_set(self, client_configuration):
-        self._load_authentication()
-        self._load_cluster_info()
+        try:
+            self._load_authentication()
+            self._load_cluster_info()
+        except KubeConfigSourceError:
+            raise
+        except Exception as error:
+            if self.audit_record is not None:
+                self.audit_record.error = str(error)
+            raise
+        self._record_source_materials()
         self._set_config(client_configuration)
 
     def list_contexts(self):
@@ -723,6 +926,8 @@ def _get_kube_config_loader(
         filename=None,
         config_dict=None,
         persist_config=False,
+        source_policy=None,
+        audit=None,
         **kwargs):
     if config_dict is None:
         kcfg = KubeConfigMerger(filename)
@@ -736,27 +941,34 @@ def _get_kube_config_loader(
         return KubeConfigLoader(
             config_dict=kcfg.config,
             config_base_path=None,
+            source_policy=source_policy,
+            audit=audit,
             **kwargs)
     else:
         return KubeConfigLoader(
             config_dict=config_dict,
             config_base_path=None,
+            source_policy=source_policy,
+            audit=audit,
             **kwargs)
 
 
-def list_kube_config_contexts(config_file=None):
+def list_kube_config_contexts(config_file=None, source_policy=None):
 
     if config_file is None:
         config_file = KUBE_CONFIG_DEFAULT_LOCATION
 
-    loader = _get_kube_config_loader(filename=config_file)
+    loader = _get_kube_config_loader(
+        filename=config_file, source_policy=source_policy)
     return loader.list_contexts(), loader.current_context
 
 
 def load_kube_config(config_file=None, context=None,
                      client_configuration=None,
                      persist_config=True,
-                     temp_file_path=None):
+                     temp_file_path=None,
+                     source_policy=None,
+                     audit=None):
     """Loads authentication and cluster information from kube-config file
     and stores them in kubernetes.client.configuration.
 
@@ -768,6 +980,13 @@ def load_kube_config(config_file=None, context=None,
     :param persist_config: If True, config file will be updated when changed
         (e.g GCP token refresh).
     :param temp_file_path: store temp files path.
+    :param source_policy: optional KubeConfigSourcePolicy limiting which
+        kubeconfig files may contribute cluster descriptions, user
+        credentials or exec plugin definitions.  Because merged configs draw
+        these from different files, the policy is applied to each resolved
+        component rather than to the entry config_file only.
+    :param audit: optional KubeConfigAudit that receives a record describing
+        the sources, certificates and identity actually used.
     """
 
     if config_file is None:
@@ -776,7 +995,9 @@ def load_kube_config(config_file=None, context=None,
     loader = _get_kube_config_loader(
         filename=config_file, active_context=context,
         persist_config=persist_config,
-        temp_file_path=temp_file_path)
+        temp_file_path=temp_file_path,
+        source_policy=source_policy,
+        audit=audit)
 
     if client_configuration is None:
         config = type.__call__(Configuration)
@@ -789,7 +1010,9 @@ def load_kube_config(config_file=None, context=None,
 def load_kube_config_from_dict(config_dict, context=None,
                                client_configuration=None,
                                persist_config=True,
-                               temp_file_path=None):
+                               temp_file_path=None,
+                               source_policy=None,
+                               audit=None):
     """Loads authentication and cluster information from config_dict file
     and stores them in kubernetes.client.configuration.
 
@@ -801,6 +1024,11 @@ def load_kube_config_from_dict(config_dict, context=None,
     :param persist_config: If True, config file will be updated when changed
         (e.g GCP token refresh).
     :param temp_file_path: store temp files path.
+    :param source_policy: optional KubeConfigSourcePolicy.  A dict-based
+        config has no file provenance, so a strict policy will treat its
+        components as unverifiable.
+    :param audit: optional KubeConfigAudit that receives a record describing
+        the sources, certificates and identity actually used.
     """
     if config_dict is None:
         raise ConfigException(
@@ -810,7 +1038,9 @@ def load_kube_config_from_dict(config_dict, context=None,
     loader = _get_kube_config_loader(
         config_dict=config_dict, active_context=context,
         persist_config=persist_config,
-        temp_file_path=temp_file_path)
+        temp_file_path=temp_file_path,
+        source_policy=source_policy,
+        audit=audit)
 
     if client_configuration is None:
         config = type.__call__(Configuration)
@@ -824,7 +1054,9 @@ def new_client_from_config(
         config_file=None,
         context=None,
         persist_config=True,
-        client_configuration=None):
+        client_configuration=None,
+        source_policy=None,
+        audit=None):
     """
     Loads configuration the same as load_kube_config but returns an ApiClient
     to be used with any API object. This will allow the caller to concurrently
@@ -834,7 +1066,8 @@ def new_client_from_config(
         client_configuration = type.__call__(Configuration)
     load_kube_config(config_file=config_file, context=context,
                      client_configuration=client_configuration,
-                     persist_config=persist_config)
+                     persist_config=persist_config,
+                     source_policy=source_policy, audit=audit)
     return ApiClient(configuration=client_configuration)
 
 
@@ -843,7 +1076,9 @@ def new_client_from_config_dict(
         context=None,
         persist_config=True,
         temp_file_path=None,
-        client_configuration=None):
+        client_configuration=None,
+        source_policy=None,
+        audit=None):
     """
     Loads configuration the same as load_kube_config_from_dict but returns an ApiClient
     to be used with any API object. This will allow the caller to concurrently
@@ -854,5 +1089,7 @@ def new_client_from_config_dict(
     load_kube_config_from_dict(config_dict=config_dict, context=context,
                                client_configuration=client_configuration,
                                persist_config=persist_config,
-                               temp_file_path=temp_file_path)
+                               temp_file_path=temp_file_path,
+                               source_policy=source_policy,
+                               audit=audit)
     return ApiClient(configuration=client_configuration)

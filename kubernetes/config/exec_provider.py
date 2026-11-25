@@ -31,12 +31,21 @@ class ExecProvider:
     * caching
     """
 
-    def __init__(self, exec_config, cwd, cluster=None):
+    def __init__(self, exec_config, cwd, cluster=None, authorize=None,
+                 on_execute=None):
         """
         exec_config must be of type ConfigNode because we depend on
         safe_get(self, key) to correctly handle optional exec provider
         config parameters.
+
+        ``authorize`` is an optional zero-argument callable invoked immediately
+        before the plugin process is spawned.  It exists so a caller can bind
+        the decision to the exact point of execution; raising from it must
+        prevent the spawn.  ``on_execute`` is invoked after authorization
+        succeeds and immediately before the spawn, for audit bookkeeping.
         """
+        self._authorize = authorize
+        self._on_execute = on_execute
         for key in ['command', 'apiVersion']:
             if key not in exec_config:
                 raise ConfigException(
@@ -88,6 +97,10 @@ class ExecProvider:
                         break
 
         self.env['KUBERNETES_EXEC_INFO'] = json.dumps(kubernetes_exec_info)
+        if self._authorize is not None:
+            self._authorize()
+        if self._on_execute is not None:
+            self._on_execute()
         process = subprocess.Popen(
             self.args,
             stdout=subprocess.PIPE,

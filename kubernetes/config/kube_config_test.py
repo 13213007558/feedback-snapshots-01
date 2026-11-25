@@ -19,6 +19,7 @@ import json
 import os
 from pprint import pprint
 import shutil
+import sys
 import tempfile
 import unittest
 from collections import namedtuple
@@ -38,6 +39,8 @@ from .kube_config import (ENV_KUBECONFIG_PATH_SEPARATOR, CommandTokenSource,
                           _get_kube_config_loader_for_yaml_file,
                           list_kube_config_contexts, load_kube_config,
                           load_kube_config_from_dict, new_client_from_config, new_client_from_config_dict)
+from .kubeconfig_source import (KubeConfigAudit, KubeConfigSourceError,
+                                KubeConfigSourcePolicy, sha256_file)
 
 BEARER_TOKEN_FORMAT = "Bearer %s"
 
@@ -1793,6 +1796,617 @@ class TestKubeConfigMerger(BaseTestCase):
 
         # new token
         self.assertEqual(provider.value['id-token'], "token-changed")
+
+
+class TestKubeConfigSourceProvenance(BaseTestCase):
+    """Merged kubeconfigs draw a context's cluster, user and exec plugin from
+    different files.  These tests check the decision is made per resolved
+    component, not on the entry file, and that both outcomes are recorded."""
+
+    def setUp(self):
+        super().setUp()
+        self._dirs = []
+
+    def tearDown(self):
+        for directory in self._dirs:
+            shutil.rmtree(directory, ignore_errors=True)
+        super().tearDown()
+
+    def _make_dir(self):
+        directory = tempfile.mkdtemp()
+        self._dirs.append(directory)
+        return directory
+
+    def _write_config(self, directory, name, content):
+        path = os.path.join(directory, name)
+        with open(path, 'w') as stream:
+            yaml.safe_dump(content, stream)
+        return path
+
+    def _write_plugin(self, directory, identity, exit_code=0):
+        """Create a local fake authentication plugin.
+
+        The plugin appends ``identity`` to an invocation log.  The log is the
+        evidence for "this plugin did not run": no spawn can leave a mark.
+        """
+        log_path = os.path.join(directory, 'plugin-invocations.log')
+        script_path = os.path.join(directory, 'fake-credential-plugin.py')
+        token = 'token-for-%s' % identity
+        with open(script_path, 'w') as stream:
+            stream.write(
+                '#!%s\n'
+                'import json\n'
+                'import os\n'
+                'import sys\n'
+                'log = os.environ.get("FAKE_PLUGIN_LOG")\n'
+                'if log:\n'
+                '    with open(log, "a") as handle:\n'
+                '        handle.write(%r + "\\n")\n'
+                'if %d != 0:\n'
+                '    sys.stderr.write("denied")\n'
+                '    sys.exit(%d)\n'
+                'json.dump({\n'
+                '    "apiVersion": "client.authentication.k8s.io/v1beta1",\n'
+                '    "kind": "ExecCredential",\n'
+                '    "status": {"token": %r},\n'
+                '}, sys.stdout)\n'
+                % (sys.executable, identity, exit_code, exit_code, token))
+        os.chmod(script_path, 0o755)
+        return script_path, log_path, token
+
+    def _read_log(self, log_path):
+        if not os.path.exists(log_path):
+            return []
+        with open(log_path) as stream:
+            return [line.strip() for line in stream if line.strip()]
+
+    def _build_pair(self, extra_capabilities):
+        """Build two local configs.
+
+        File A is approved to describe a cluster, hold a user and (when not
+        blocked) run authentication plugins.  File B is approved only to
+        describe clusters.  File B also defines a user named ``shared-user``
+        with an exec plugin, and both files define a context that points at
+        B's user.  So approving the entry context file alone is not enough.
+
+        Returns a dict with the paths, the expected plugin token, and the
+        policy.
+        """
+        directory = self._make_dir()
+        plugin_path, log_path, token = self._write_plugin(
+            directory, 'file-b-user')
+
+        cert_path = os.path.join(directory, 'file-a-ca.pem')
+        cert_body = 'file-a-certificate-authority'
+        with open(cert_path, 'w') as stream:
+            stream.write(cert_body)
+
+        file_a = self._write_config(directory, 'a-team.yaml', {
+            'clusters': [
+                {
+                    'name': 'cluster-a',
+                    'cluster': {
+                        'server': 'https://a.example.test',
+                        'certificate-authority': cert_path,
+                    },
+                },
+            ],
+            'users': [
+                {
+                    'name': 'team-user',
+                    'user': {'token': 'file-a-token'},
+                },
+            ],
+            'contexts': [
+                {
+                    'name': 'team-context',
+                    'context': {
+                        'cluster': 'cluster-a',
+                        'user': 'shared-user',
+                    },
+                },
+            ],
+            'current-context': 'team-context',
+        })
+        file_b = self._write_config(directory, 'b-shared.yaml', {
+            'clusters': [
+                {
+                    'name': 'cluster-b',
+                    'cluster': {'server': 'https://b.example.test'},
+                },
+            ],
+            'users': [
+                {
+                    'name': 'shared-user',
+                    'user': {
+                        'exec': {
+                            'apiVersion':
+                                'client.authentication.k8s.io/v1beta1',
+                            'command': plugin_path,
+                            'args': [],
+                            'env': [
+                                {'name': 'FAKE_PLUGIN_LOG',
+                                 'value': log_path},
+                            ],
+                        },
+                    },
+                },
+            ],
+        })
+        policy = KubeConfigSourcePolicy()
+        policy.approve(file_a, 'describe', 'authenticate', 'exec')
+        granted_b = ['describe']
+        for capability in extra_capabilities:
+            if capability not in granted_b:
+                granted_b.append(capability)
+        policy.approve(file_b, *granted_b)
+        return {
+            'directory': directory,
+            'file_a': file_a,
+            'file_b': file_b,
+            'plugin': plugin_path,
+            'log': log_path,
+            'token': token,
+            'policy': policy,
+            'cert_body': cert_body,
+            'cert_path': cert_path,
+            'kubeconfig': ENV_KUBECONFIG_PATH_SEPARATOR.join(
+                [file_a, file_b]),
+        }
+
+    def test_approved_merge_constructs_client_and_runs_plugin_once(self):
+        fixture = self._build_pair(
+            extra_capabilities=['authenticate', 'exec'])
+
+        audit = KubeConfigAudit()
+        client = new_client_from_config(
+            config_file=fixture['kubeconfig'],
+            context='team-context',
+            audit=audit,
+            source_policy=fixture['policy'])
+
+        record = audit.last_record.to_dict()
+        self.assertEqual('allowed', record['decision'])
+        self.assertEqual(1, audit.exec_invocations())
+        self.assertEqual(['file-b-user'], self._read_log(fixture['log']))
+        self.assertEqual('exec-plugin-token', record['identity']['method'])
+
+        # The certificate is the one from the cluster's actual source file.
+        self.assertEqual(
+            os.path.realpath(fixture['file_a']),
+            record['cluster']['source_realpath'])
+        ca = record['cluster']['certificate_authority']
+        self.assertEqual('path', ca['kind'])
+        self.assertEqual(fixture['cert_path'], ca['file'])
+        self.assertEqual(sha256_file(fixture['cert_path']), ca['sha256'])
+        self.assertEqual('https://a.example.test', record['cluster']['server'])
+
+        # The user came from the other file and is attributed there.
+        self.assertEqual(
+            os.path.realpath(fixture['file_b']),
+            record['user']['source_realpath'])
+        self.assertEqual(
+            fixture['token'],
+            client.configuration.api_key['BearerToken'].split(' ')[-1])
+        self.assertEqual('https://a.example.test',
+                         client.configuration.host)
+
+        exec_info = record['exec']
+        self.assertTrue(exec_info['configured'])
+        self.assertTrue(exec_info['spawned'])
+        self.assertTrue(exec_info['succeeded'])
+        self.assertEqual(1, exec_info['invocations'])
+        self.assertIsNone(record['user']['client_certificate'])
+
+    def test_exec_supplied_certificate_is_attributed_to_the_plugin(self):
+        directory = self._make_dir()
+        plugin = os.path.join(directory, 'cert-plugin.py')
+        with open(plugin, 'w') as stream:
+            stream.write(
+                '#!%s\n'
+                'import json\n'
+                'import sys\n'
+                'json.dump({\n'
+                "    'apiVersion': 'client.authentication.k8s.io/v1beta1',\n"
+                "    'kind': 'ExecCredential',\n"
+                "    'status': {\n"
+                "        'clientCertificateData': 'CERT-BODY',\n"
+                "        'clientKeyData': 'KEY-BODY',\n"
+                '    },\n'
+                '}, sys.stdout)\n' % sys.executable)
+        os.chmod(plugin, 0o755)
+        file_a = self._write_config(directory, 'exec-cert.yaml', {
+            'clusters': [{'name': 'c', 'cluster': {
+                'server': 'https://cert.example.test'}}],
+            'users': [{'name': 'u', 'user': {'exec': {
+                'apiVersion': 'client.authentication.k8s.io/v1beta1',
+                'command': plugin}}}],
+            'contexts': [{'name': 'ctx', 'context': {
+                'cluster': 'c', 'user': 'u'}}],
+            'current-context': 'ctx',
+        })
+        policy = KubeConfigSourcePolicy()
+        policy.approve(file_a, 'describe', 'authenticate', 'exec')
+        audit = KubeConfigAudit()
+        new_client_from_config(
+            config_file=file_a, context='ctx',
+            source_policy=policy, audit=audit)
+        record = audit.last_record.to_dict()
+        self.assertEqual('exec-plugin-certificate',
+                         record['identity']['method'])
+        self.assertEqual('exec-plugin',
+                         record['user']['client_certificate']['origin'])
+        self.assertIsNotNone(
+            record['user']['client_certificate']['sha256'])
+        serialized = json.dumps(record)
+        self.assertNotIn('CERT-BODY', serialized)
+        self.assertNotIn('KEY-BODY', serialized)
+
+    def test_read_only_source_never_runs_plugin(self):
+        fixture = self._build_pair(extra_capabilities=[])
+
+        audit = KubeConfigAudit()
+        with self.assertRaises(KubeConfigSourceError) as context:
+            new_client_from_config(
+                config_file=fixture['kubeconfig'],
+                context='team-context',
+                audit=audit,
+                source_policy=fixture['policy'])
+
+        # The denial is attributed to the file that owns the user, not to the
+        # approved entry file.  It stops at the authentication gate, before
+        # the exec capability is ever consulted.
+        self.assertEqual('authenticate', context.exception.capability)
+        self.assertEqual('user', context.exception.stage)
+        self.assertEqual(os.path.realpath(fixture['file_b']),
+                         context.exception.source)
+        record = audit.last_record.to_dict()
+        self.assertEqual('denied', record['decision'])
+        self.assertEqual('authenticate', record['denied']['capability'])
+        self.assertFalse(record['exec']['spawned'])
+        self.assertEqual(0, record['exec']['invocations'])
+        self.assertEqual([], self._read_log(fixture['log']))
+
+    def test_context_in_read_only_file_can_describe_but_not_authenticate(self):
+        """A file approved only to describe clusters may contribute the
+        context, but that must not bootstrap authentication from it."""
+        fixture = self._build_pair(extra_capabilities=[])
+        # Move the context into B, which is only approved for describe.
+        config_b = yaml.safe_load(open(fixture['file_b']))
+        config_b['contexts'] = [{
+            'name': 'team-context',
+            'context': {'cluster': 'cluster-a', 'user': 'shared-user'},
+        }]
+        config_b['current-context'] = 'team-context'
+        self._write_config(os.path.dirname(fixture['file_b']),
+                           'b-shared.yaml', config_b)
+        # Remove it from A so there is only one definition.
+        config_a = yaml.safe_load(open(fixture['file_a']))
+        config_a['contexts'] = []
+        config_a.pop('current-context', None)
+        self._write_config(os.path.dirname(fixture['file_a']),
+                           'a-team.yaml', config_a)
+
+        # Listing contexts is a read-only operation and stays available.
+        contexts, active = list_kube_config_contexts(
+            config_file=fixture['kubeconfig'],
+            source_policy=fixture['policy'])
+        self.assertEqual('team-context', active['name'])
+
+        with self.assertRaises(KubeConfigSourceError) as context:
+            new_client_from_config(
+                config_file=fixture['kubeconfig'],
+                context='team-context',
+                source_policy=fixture['policy'])
+        self.assertEqual('authenticate', context.exception.capability)
+        self.assertEqual(os.path.realpath(fixture['file_b']),
+                         context.exception.source)
+        self.assertEqual([], self._read_log(fixture['log']))
+
+    def test_alias_resolves_to_approved_identity(self):
+        fixture = self._build_pair(
+            extra_capabilities=['authenticate', 'exec'])
+        alias_dir = self._make_dir()
+        alias = os.path.join(alias_dir, 'a-team-alias.yaml')
+        os.symlink(fixture['file_a'], alias)
+        policy = KubeConfigSourcePolicy()
+        policy.approve(alias, 'describe', 'authenticate', 'exec')
+        policy.approve(fixture['file_b'], 'describe', 'authenticate', 'exec')
+
+        client = new_client_from_config(
+            config_file=ENV_KUBECONFIG_PATH_SEPARATOR.join(
+                [alias, fixture['file_b']]),
+            context='team-context',
+            source_policy=policy)
+        self.assertEqual('https://a.example.test', client.configuration.host)
+        self.assertEqual(['file-b-user'], self._read_log(fixture['log']))
+
+    def test_approving_alias_does_not_approve_target(self):
+        fixture = self._build_pair(extra_capabilities=[])
+        alias_dir = self._make_dir()
+        alias = os.path.join(alias_dir, 'b-alias.yaml')
+        # Link to a copy so approving the alias cannot leak to the original.
+        other = os.path.join(alias_dir, 'other.yaml')
+        shutil.copy(fixture['file_b'], other)
+        os.symlink(other, alias)
+        policy = KubeConfigSourcePolicy()
+        policy.approve(fixture['file_a'], 'describe', 'authenticate', 'exec')
+        policy.approve(alias, 'describe', 'authenticate', 'exec')
+
+        # The merged config uses the real file_b, which was never approved.
+        with self.assertRaises(KubeConfigSourceError) as context:
+            new_client_from_config(
+                config_file=fixture['kubeconfig'],
+                context='team-context',
+                source_policy=policy)
+        self.assertEqual(os.path.realpath(fixture['file_b']),
+                         context.exception.source)
+
+    def test_cross_source_exec_permission_is_not_inherited(self):
+        """Approving the entry file for exec must not let a context borrow an
+        exec user from a file that is only approved to authenticate."""
+        fixture = self._build_pair(extra_capabilities=['authenticate'])
+        # File A (the entry file) is fully approved, including exec.
+        self.assertTrue(fixture['policy'].allows(fixture['file_a'], 'exec'))
+        self.assertFalse(fixture['policy'].allows(fixture['file_b'], 'exec'))
+
+        audit = KubeConfigAudit()
+        with self.assertRaises(KubeConfigSourceError) as context:
+            new_client_from_config(
+                config_file=fixture['kubeconfig'],
+                context='team-context',
+                audit=audit,
+                source_policy=fixture['policy'])
+        self.assertEqual('exec', context.exception.capability)
+        self.assertEqual('exec', context.exception.stage)
+        self.assertEqual(os.path.realpath(fixture['file_b']),
+                         context.exception.source)
+        record = audit.last_record.to_dict()
+        self.assertFalse(record['exec']['spawned'])
+        self.assertEqual(0, record['exec']['invocations'])
+        self.assertEqual([], self._read_log(fixture['log']))
+
+    def test_user_relative_paths_resolve_against_user_file(self):
+        """A merged context can take its cluster from one file and its user
+        from another.  The user's client cert, key and exec cwd must resolve
+        relative to the user's file, not the cluster's."""
+        cluster_dir = self._make_dir()
+        user_dir = self._make_dir()
+        plugin_path, log_path, token = self._write_plugin(
+            user_dir, 'relative-user')
+        with open(os.path.join(user_dir, 'client.crt'), 'w') as stream:
+            stream.write('user-client-cert')
+        with open(os.path.join(user_dir, 'client.key'), 'w') as stream:
+            stream.write('user-client-key')
+
+        file_a = self._write_config(cluster_dir, 'a-cluster.yaml', {
+            'clusters': [{
+                'name': 'cluster-a',
+                'cluster': {'server': 'https://a.example.test'},
+            }],
+            'contexts': [{
+                'name': 'team-context',
+                'context': {'cluster': 'cluster-a', 'user': 'file-b-user'},
+            }],
+            'current-context': 'team-context',
+        })
+        file_b = self._write_config(user_dir, 'b-user.yaml', {
+            'users': [{
+                'name': 'file-b-user',
+                'user': {
+                    'client-certificate': 'client.crt',
+                    'client-key': 'client.key',
+                    'exec': {
+                        'apiVersion': 'client.authentication.k8s.io/v1beta1',
+                        'command': plugin_path,
+                        'env': [{'name': 'FAKE_PLUGIN_LOG',
+                                 'value': log_path}],
+                    },
+                },
+            }],
+        })
+        policy = KubeConfigSourcePolicy()
+        policy.approve(file_a, 'describe')
+        policy.approve(file_b, 'authenticate', 'exec')
+        audit = KubeConfigAudit()
+        client = new_client_from_config(
+            config_file=ENV_KUBECONFIG_PATH_SEPARATOR.join([file_a, file_b]),
+            context='team-context',
+            source_policy=policy,
+            audit=audit)
+
+        self.assertEqual('user-client-cert',
+                         open(client.configuration.cert_file).read())
+        self.assertEqual('user-client-key',
+                         open(client.configuration.key_file).read())
+        self.assertEqual(
+            sha256_file(os.path.join(user_dir, 'client.crt')),
+            audit.last_record.client_certificate['sha256'])
+        self.assertEqual(['relative-user'], self._read_log(log_path))
+
+    def test_inline_material_is_recorded_without_leaking_secrets(self):
+        fixture = self._build_pair(extra_capabilities=[])
+        fixture['policy'].approve(fixture['file_b'], 'authenticate', 'exec')
+        config_a = yaml.safe_load(open(fixture['file_a']))
+        config_a['clusters'][0]['cluster'] = {
+            'server': 'https://a.example.test',
+            'certificate-authority-data': _base64('inline-ca-body'),
+        }
+        config_a['users'] = [{
+            'name': 'team-user',
+            'user': {
+                'client-certificate-data': _base64('inline-client-cert'),
+                'client-key-data': _base64('inline-client-key'),
+            },
+        }]
+        # Keep the context pointing at the exec user from file B.
+        self._write_config(os.path.dirname(fixture['file_a']),
+                           'a-team.yaml', config_a)
+
+        audit = KubeConfigAudit()
+        client = new_client_from_config(
+            config_file=fixture['kubeconfig'],
+            context='team-context',
+            source_policy=fixture['policy'],
+            audit=audit)
+        record = audit.last_record.to_dict()
+        ca = record['cluster']['certificate_authority']
+        self.assertEqual('data', ca['kind'])
+        self.assertEqual('<inline>', ca['declared'])
+        self.assertEqual(
+            sha256_file(client.configuration.ssl_ca_cert), ca['sha256'])
+
+        serialized = json.dumps(record)
+        self.assertNotIn(_base64('inline-ca-body'), serialized)
+        self.assertNotIn(_base64('inline-client-key'), serialized)
+        self.assertNotIn(fixture['token'], serialized)
+        # The plugin-provided credential is also kept out of the record.
+        self.assertNotIn('Bearer', serialized)
+
+    def test_policy_approves_relative_source_paths(self):
+        fixture = self._build_pair(extra_capabilities=[])
+        fixture['policy'].approve(fixture['file_b'], 'authenticate', 'exec')
+        directory = os.path.dirname(fixture['file_a'])
+        relative_a = os.path.relpath(fixture['file_a'], os.getcwd())
+        policy = KubeConfigSourcePolicy()
+        policy.approve(relative_a, 'describe', 'authenticate', 'exec')
+        policy.approve(fixture['file_b'], 'describe', 'authenticate', 'exec')
+
+        client = new_client_from_config(
+            config_file=ENV_KUBECONFIG_PATH_SEPARATOR.join(
+                [fixture['file_a'], fixture['file_b']]),
+            context='team-context',
+            source_policy=policy)
+        self.assertEqual('https://a.example.test', client.configuration.host)
+        self.assertTrue(os.path.isdir(directory))
+
+    def test_default_policy_denies_everything(self):
+        fixture = self._build_pair(extra_capabilities=[])
+        strict = KubeConfigSourcePolicy()
+        with self.assertRaises(KubeConfigSourceError) as context:
+            new_client_from_config(
+                config_file=fixture['kubeconfig'],
+                context='team-context',
+                source_policy=strict)
+        self.assertEqual('context', context.exception.stage)
+        self.assertEqual([], self._read_log(fixture['log']))
+
+    def test_denial_does_not_fall_back_to_another_auth_method(self):
+        """If exec is denied, the loader must not quietly continue to the
+        user's token or password fields."""
+        fixture = self._build_pair(extra_capabilities=['authenticate'])
+        config_b = yaml.safe_load(open(fixture['file_b']))
+        config_b['users'][0]['user']['token'] = 'fallback-token'
+        self._write_config(os.path.dirname(fixture['file_b']),
+                           'b-shared.yaml', config_b)
+
+        with self.assertRaises(KubeConfigSourceError):
+            new_client_from_config(
+                config_file=fixture['kubeconfig'],
+                context='team-context',
+                source_policy=fixture['policy'])
+        self.assertEqual([], self._read_log(fixture['log']))
+
+    def test_token_identity_is_recorded_without_the_token(self):
+        directory = self._make_dir()
+        file_a = self._write_config(directory, 'token.yaml', {
+            'clusters': [{'name': 'c', 'cluster': {
+                'server': 'https://token.example.test'}}],
+            'users': [{'name': 'u', 'user': {'token': 'secret-token-value'}}],
+            'contexts': [{'name': 'ctx', 'context': {
+                'cluster': 'c', 'user': 'u'}}],
+            'current-context': 'ctx',
+        })
+        policy = KubeConfigSourcePolicy()
+        policy.approve(file_a, 'describe', 'authenticate')
+        audit = KubeConfigAudit()
+        client = new_client_from_config(
+            config_file=file_a, context='ctx',
+            source_policy=policy, audit=audit)
+        record = audit.last_record.to_dict()
+        self.assertEqual({'method': 'token'}, record['identity'])
+        self.assertIn('secret-token-value',
+                      client.configuration.api_key['BearerToken'])
+        self.assertNotIn('secret-token-value', json.dumps(record))
+
+    def test_cmd_path_helper_requires_exec_capability(self):
+        fixture = self._build_pair(extra_capabilities=['authenticate'])
+        directory = fixture['directory']
+        helper_dir = self._make_dir()
+        helper = os.path.join(helper_dir, 'helper.sh')
+        marker = os.path.join(helper_dir, 'helper-ran')
+        with open(helper, 'w') as stream:
+            stream.write('#!/bin/sh\ntouch %s\n' % marker)
+        os.chmod(helper, 0o755)
+        config_b = yaml.safe_load(open(fixture['file_b']))
+        config_b['users'][0]['user'] = {
+            'auth-provider': {
+                'name': 'gcp',
+                'config': {'cmd-path': helper},
+            },
+        }
+        self._write_config(directory, 'b-shared.yaml', config_b)
+
+        with self.assertRaises(KubeConfigSourceError) as context:
+            new_client_from_config(
+                config_file=fixture['kubeconfig'],
+                context='team-context',
+                source_policy=fixture['policy'])
+        self.assertEqual('exec', context.exception.capability)
+        self.assertFalse(os.path.exists(marker))
+
+    def test_policy_is_rechecked_on_exec_refresh(self):
+        fixture = self._build_pair(extra_capabilities=[])
+        fixture['policy'].approve(fixture['file_b'], 'authenticate', 'exec')
+        audit = KubeConfigAudit()
+        client_config = Configuration()
+        load_kube_config(
+            config_file=fixture['kubeconfig'],
+            context='team-context',
+            client_configuration=client_config,
+            audit=audit,
+            source_policy=fixture['policy'])
+        self.assertEqual(['file-b-user'], self._read_log(fixture['log']))
+
+        # Withdraw the exec approval and force a refresh; the plugin must not
+        # be spawned again.
+        fixture['policy'].revoke(fixture['file_b'], 'exec')
+        loader = _get_kube_config_loader(
+            filename=fixture['kubeconfig'],
+            active_context='team-context',
+            source_policy=fixture['policy'],
+            audit=audit)
+        with self.assertRaises(KubeConfigSourceError):
+            loader._load_from_exec_plugin()
+        self.assertEqual(['file-b-user'], self._read_log(fixture['log']))
+
+    def test_failed_plugin_is_not_counted_as_executed(self):
+        fixture = self._build_pair(extra_capabilities=[])
+        fixture['policy'].approve(fixture['file_b'], 'authenticate', 'exec')
+        # Replace the plugin with one that fails after recording itself.
+        failing_plugin, log_path, _ = self._write_plugin(
+            fixture['directory'], 'file-b-user', exit_code=3)
+        config_b = yaml.safe_load(open(fixture['file_b']))
+        exec_config = config_b['users'][0]['user']['exec']
+        exec_config['command'] = failing_plugin
+        exec_config['env'] = [{'name': 'FAKE_PLUGIN_LOG', 'value': log_path}]
+        self._write_config(os.path.dirname(fixture['file_b']),
+                           'b-shared.yaml', config_b)
+
+        audit = KubeConfigAudit()
+        load_kube_config(
+            config_file=fixture['kubeconfig'],
+            context='team-context',
+            client_configuration=Configuration(),
+            audit=audit,
+            source_policy=fixture['policy'])
+        record = audit.last_record.to_dict()
+        self.assertTrue(record['exec']['spawned'])
+        self.assertFalse(record['exec']['succeeded'])
+        self.assertEqual(1, record['exec']['invocations'])
+        self.assertEqual(['file-b-user'], self._read_log(log_path))
+        self.assertNotEqual('exec-plugin-token',
+                            record['identity'].get('method'))
 
 
 if __name__ == '__main__':

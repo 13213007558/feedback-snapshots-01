@@ -25,6 +25,33 @@ From [PyPI](https://pypi.python.org/pypi/kubernetes/) directly:
 pip install kubernetes
 ```
 
+## Merged kubeconfig source policy
+
+A merged kubeconfig (`KUBECONFIG=a.yaml:b.yaml`) can take a context from one
+file, its cluster from another and its user — including an authentication
+plugin — from a third. Approving only the entry file is therefore not enough.
+
+`KubeConfigSourcePolicy` approves capabilities per source file, and is applied
+to each resolved component. `KubeConfigAudit` records which files were used,
+which certificate material was obtained and whether the plugin actually ran.
+
+```python
+from kubernetes import config
+
+policy = config.KubeConfigSourcePolicy()
+policy.approve("/etc/kube/team-a.yaml", "describe", "authenticate", "exec")
+policy.approve("/etc/kube/shared-clusters.yaml", "describe")
+
+audit = config.KubeConfigAudit()
+# Raises config.KubeConfigSourceError if a user or exec plugin comes from a
+# file that is not approved for it; no plugin process is spawned in that case.
+client = config.new_client_from_config(
+    context="team-context", source_policy=policy, audit=audit)
+print(audit.last_record.to_dict())
+```
+
+See `examples/merged_kubeconfig_source_policy.py` for a runnable version.
+
 ## Examples
 
 list all pods:
