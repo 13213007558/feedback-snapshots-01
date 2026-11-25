@@ -240,12 +240,31 @@ _LISTENERS = _Listeners([], [], [], [], [])
 class _EventListener:
     """Abstract base class for all event listeners."""
 
+    # A listener that is not granted the ``allow_command_documents`` permission
+    # receives command events without the command, reply, or failure document.
+    # The event still carries its identity (command_name, request_id,
+    # operation_id, attempt_number, ...) so the listener can follow attempts of
+    # a retry without seeing business field values.
+    # Subclasses may override this per instance, which lets one client publish
+    # a different view to each listener.
+    allow_command_documents: bool = True
+
 
 class CommandListener(_EventListener):
     """Abstract base class for command listeners.
 
     Handles `CommandStartedEvent`, `CommandSucceededEvent`,
     and `CommandFailedEvent`.
+
+    By default a listener receives full command, reply, and failure documents.
+    A listener that is not permitted to see business data can set the
+    ``allow_command_documents`` attribute to ``False`` to receive events that
+    omit those documents. The permission is applied when the event is published,
+    so two listeners with different permissions can be registered on the same
+    client and each receives its own view of the same event.
+
+    .. versionchanged:: 4.20.2
+       Added support for the ``allow_command_documents`` attribute.
     """
 
     def started(self, event: CommandStartedEvent) -> None:
@@ -547,6 +566,7 @@ class _CommandEvent:
     """Base class for command events."""
 
     __slots__ = (
+        "__attempt_number",
         "__cmd_name",
         "__conn_id",
         "__db",
@@ -565,6 +585,7 @@ class _CommandEvent:
         service_id: ObjectId | None = None,
         database_name: str = "",
         server_connection_id: int | None = None,
+        attempt_number: int | None = None,
     ) -> None:
         self.__cmd_name = command_name
         self.__rqst_id = request_id
@@ -573,6 +594,7 @@ class _CommandEvent:
         self.__service_id = service_id
         self.__db = database_name
         self.__server_conn_id = server_connection_id
+        self.__attempt_number = attempt_number
 
     @property
     def command_name(self) -> str:
@@ -603,6 +625,20 @@ class _CommandEvent:
         return self.__op_id
 
     @property
+    def attempt_number(self) -> int | None:
+        """The 1-based attempt number of a retryable operation, or ``None``.
+
+        Every event published for the same logical operation shares one
+        :attr:`operation_id`. The first attempt has ``attempt_number`` ``1``
+        and each retry increments it, so a failed attempt and the retry that
+        follows can be linked together. Commands outside a retryable operation
+        report ``None``.
+
+        .. versionadded:: 4.20.2
+        """
+        return self.__attempt_number
+
+    @property
     def database_name(self) -> str:
         """The database_name this command was sent to, or ``""``.
 
@@ -629,6 +665,13 @@ class CommandStartedEvent(_CommandEvent):
         was sent to.
     :param operation_id: An optional identifier for a series of related events.
     :param service_id: The service_id this command was sent to, or ``None``.
+    :param attempt_number: The 1-based attempt number, or ``None``.
+    :param allow_command_documents: When ``False``, the command document is
+        omitted. See the ``allow_command_documents`` attribute of
+        :class:`CommandListener`.
+
+    .. versionchanged:: 4.20.2
+       Added ``attempt_number`` and ``allow_command_documents`` parameters.
     """
 
     __slots__ = ("__cmd",)
@@ -642,6 +685,8 @@ class CommandStartedEvent(_CommandEvent):
         operation_id: int | None,
         service_id: ObjectId | None = None,
         server_connection_id: int | None = None,
+        attempt_number: int | None = None,
+        allow_command_documents: bool = True,
     ) -> None:
         if not command:
             raise ValueError(f"{command!r} is not a valid command")
@@ -655,9 +700,14 @@ class CommandStartedEvent(_CommandEvent):
             service_id=service_id,
             database_name=database_name,
             server_connection_id=server_connection_id,
+            attempt_number=attempt_number,
         )
         cmd_name = command_name.lower()
-        if cmd_name in _SENSITIVE_COMMANDS or _is_speculative_authenticate(cmd_name, command):
+        if (
+            not allow_command_documents
+            or cmd_name in _SENSITIVE_COMMANDS
+            or _is_speculative_authenticate(cmd_name, command)
+        ):
             self.__cmd: _DocumentOut = {}
         else:
             self.__cmd = command
@@ -692,6 +742,13 @@ class CommandSucceededEvent(_CommandEvent):
     :param operation_id: An optional identifier for a series of related events.
     :param service_id: The service_id this command was sent to, or ``None``.
     :param database_name: The database this command was sent to, or ``""``.
+    :param attempt_number: The 1-based attempt number, or ``None``.
+    :param allow_command_documents: When ``False``, the reply document is
+        omitted. See the ``allow_command_documents`` attribute of
+        :class:`CommandListener`.
+
+    .. versionchanged:: 4.20.2
+       Added ``attempt_number`` and ``allow_command_documents`` parameters.
     """
 
     __slots__ = ("__duration_micros", "__reply")
@@ -707,6 +764,8 @@ class CommandSucceededEvent(_CommandEvent):
         service_id: ObjectId | None = None,
         database_name: str = "",
         server_connection_id: int | None = None,
+        attempt_number: int | None = None,
+        allow_command_documents: bool = True,
     ) -> None:
         super().__init__(
             command_name,
@@ -716,10 +775,15 @@ class CommandSucceededEvent(_CommandEvent):
             service_id=service_id,
             database_name=database_name,
             server_connection_id=server_connection_id,
+            attempt_number=attempt_number,
         )
         self.__duration_micros = _to_micros(duration)
         cmd_name = command_name.lower()
-        if cmd_name in _SENSITIVE_COMMANDS or _is_speculative_authenticate(cmd_name, reply):
+        if (
+            not allow_command_documents
+            or cmd_name in _SENSITIVE_COMMANDS
+            or _is_speculative_authenticate(cmd_name, reply)
+        ):
             self.__reply: _DocumentOut = {}
         else:
             self.__reply = reply
@@ -755,6 +819,14 @@ class CommandFailedEvent(_CommandEvent):
     :param operation_id: An optional identifier for a series of related events.
     :param service_id: The service_id this command was sent to, or ``None``.
     :param database_name: The database this command was sent to, or ``""``.
+    :param attempt_number: The 1-based attempt number, or ``None``.
+    :param allow_command_documents: When ``True``, the failure document is
+        published as-is. When ``False``, the failure document is omitted and
+        only the event identity remains. See
+        :attr:`CommandListener.allow_command_documents`.
+
+    .. versionchanged:: 4.20.2
+       Added ``attempt_number`` and ``allow_command_documents`` parameters.
     """
 
     __slots__ = ("__duration_micros", "__failure")
@@ -770,6 +842,8 @@ class CommandFailedEvent(_CommandEvent):
         service_id: ObjectId | None = None,
         database_name: str = "",
         server_connection_id: int | None = None,
+        attempt_number: int | None = None,
+        allow_command_documents: bool = True,
     ) -> None:
         super().__init__(
             command_name,
@@ -779,9 +853,10 @@ class CommandFailedEvent(_CommandEvent):
             service_id=service_id,
             database_name=database_name,
             server_connection_id=server_connection_id,
+            attempt_number=attempt_number,
         )
         self.__duration_micros = _to_micros(duration)
-        self.__failure = failure
+        self.__failure = failure if allow_command_documents else {}
 
     @property
     def duration_micros(self) -> int:
@@ -1492,8 +1567,14 @@ class _EventListeners:
         server_connection_id: int | None,
         op_id: int | None = None,
         service_id: ObjectId | None = None,
+        attempt_number: int | None = None,
     ) -> None:
         """Publish a CommandStartedEvent to all command listeners.
+
+        Each listener receives a view built for its permission: listeners with
+        ``allow_command_documents`` set to ``False`` receive an event whose
+        command document is omitted. The event is constructed once per distinct
+        permission.
 
         :param command: The command document.
         :param database_name: The name of the database this command was run
@@ -1503,21 +1584,32 @@ class _EventListeners:
             command was sent to.
         :param op_id: The (optional) operation id for this operation.
         :param service_id: The service_id this command was sent to, or ``None``.
+        :param attempt_number: The 1-based attempt number, or ``None``.
         """
         if op_id is None:
             op_id = request_id
-        event = CommandStartedEvent(
-            command,
-            database_name,
-            request_id,
-            connection_id,
-            op_id,
-            service_id=service_id,
-            server_connection_id=server_connection_id,
-        )
+        events: dict[bool, CommandStartedEvent] = {}
+
+        def event_for(allow: bool) -> CommandStartedEvent:
+            event = events.get(allow)
+            if event is None:
+                event = CommandStartedEvent(
+                    command,
+                    database_name,
+                    request_id,
+                    connection_id,
+                    op_id,
+                    service_id=service_id,
+                    server_connection_id=server_connection_id,
+                    attempt_number=attempt_number,
+                    allow_command_documents=allow,
+                )
+                events[allow] = event
+            return event
+
         for subscriber in self.__command_listeners:
             try:
-                subscriber.started(event)
+                subscriber.started(event_for(subscriber.allow_command_documents))
             except Exception:
                 _handle_exception()
 
@@ -1533,8 +1625,14 @@ class _EventListeners:
         service_id: ObjectId | None = None,
         speculative_hello: bool = False,
         database_name: str = "",
+        attempt_number: int | None = None,
     ) -> None:
         """Publish a CommandSucceededEvent to all command listeners.
+
+        Each listener receives a view built for its permission: listeners with
+        ``allow_command_documents`` set to ``False`` receive an event whose
+        reply document is omitted. The event is constructed once per distinct
+        permission.
 
         :param duration: The command duration as a datetime.timedelta.
         :param reply: The server reply document.
@@ -1546,6 +1644,7 @@ class _EventListeners:
         :param service_id: The service_id this command was sent to, or ``None``.
         :param speculative_hello: Was the command sent with speculative auth?
         :param database_name: The database this command was sent to, or ``""``.
+        :param attempt_number: The 1-based attempt number, or ``None``.
         """
         if op_id is None:
             op_id = request_id
@@ -1553,20 +1652,30 @@ class _EventListeners:
             # Redact entire response when the command started contained
             # speculativeAuthenticate.
             reply = {}
-        event = CommandSucceededEvent(
-            duration,
-            reply,
-            command_name,
-            request_id,
-            connection_id,
-            op_id,
-            service_id,
-            database_name=database_name,
-            server_connection_id=server_connection_id,
-        )
+        events: dict[bool, CommandSucceededEvent] = {}
+
+        def event_for(allow: bool) -> CommandSucceededEvent:
+            event = events.get(allow)
+            if event is None:
+                event = CommandSucceededEvent(
+                    duration,
+                    reply,
+                    command_name,
+                    request_id,
+                    connection_id,
+                    op_id,
+                    service_id,
+                    database_name=database_name,
+                    server_connection_id=server_connection_id,
+                    attempt_number=attempt_number,
+                    allow_command_documents=allow,
+                )
+                events[allow] = event
+            return event
+
         for subscriber in self.__command_listeners:
             try:
-                subscriber.succeeded(event)
+                subscriber.succeeded(event_for(subscriber.allow_command_documents))
             except Exception:
                 _handle_exception()
 
@@ -1581,8 +1690,14 @@ class _EventListeners:
         op_id: int | None = None,
         service_id: ObjectId | None = None,
         database_name: str = "",
+        attempt_number: int | None = None,
     ) -> None:
         """Publish a CommandFailedEvent to all command listeners.
+
+        Each listener receives a view built for its permission: listeners with
+        ``allow_command_documents`` set to ``False`` receive an event whose
+        failure document is omitted. The event is constructed once per distinct
+        permission.
 
         :param duration: The command duration as a datetime.timedelta.
         :param failure: The server reply document or failure description
@@ -1594,25 +1709,37 @@ class _EventListeners:
         :param op_id: The (optional) operation id for this operation.
         :param service_id: The service_id this command was sent to, or ``None``.
         :param database_name: The database this command was sent to, or ``""``.
+        :param attempt_number: The 1-based attempt number, or ``None``.
         """
         if op_id is None:
             op_id = request_id
-        event = CommandFailedEvent(
-            duration,
-            failure,
-            command_name,
-            request_id,
-            connection_id,
-            op_id,
-            service_id=service_id,
-            database_name=database_name,
-            server_connection_id=server_connection_id,
-        )
+        events: dict[bool, CommandFailedEvent] = {}
+
+        def event_for(allow: bool) -> CommandFailedEvent:
+            event = events.get(allow)
+            if event is None:
+                event = CommandFailedEvent(
+                    duration,
+                    failure,
+                    command_name,
+                    request_id,
+                    connection_id,
+                    op_id,
+                    service_id=service_id,
+                    database_name=database_name,
+                    server_connection_id=server_connection_id,
+                    attempt_number=attempt_number,
+                    allow_command_documents=allow,
+                )
+                events[allow] = event
+            return event
+
         for subscriber in self.__command_listeners:
             try:
-                subscriber.failed(event)
+                subscriber.failed(event_for(subscriber.allow_command_documents))
             except Exception:
                 _handle_exception()
+
 
     def publish_server_heartbeat_started(self, connection_id: _Address, awaited: bool) -> None:
         """Publish a ServerHeartbeatStartedEvent to all server heartbeat listeners.

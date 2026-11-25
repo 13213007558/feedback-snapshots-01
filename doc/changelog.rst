@@ -4,6 +4,21 @@ Changelog
 Changes in Version 4.20.2 (unreleased)
 --------------------------------------
 
+New features
+............
+
+- Command monitoring events now carry the 1-based
+  :attr:`~pymongo.monitoring.CommandStartedEvent.attempt_number` of a retryable
+  operation, so the events of a failed attempt and of the retry that follows
+  can be linked to the same logical operation alongside their shared
+  ``operation_id``.
+- :class:`~pymongo.monitoring.CommandListener` subclasses can now set
+  ``allow_command_documents`` to ``False`` to receive command events without
+  the command, reply, or failure document. Listener permissions are applied
+  when the event is published, so one client can serve both a trusted
+  subscriber that sees the documents and an untrusted one that only sees the
+  event identity.
+
 Bug fixes
 .........
 

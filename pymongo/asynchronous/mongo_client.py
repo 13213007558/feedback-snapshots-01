@@ -3106,7 +3106,7 @@ class _ClientConnectionRetryable(
                 # One operation id across all attempts of this operation if APM/logging is enabled
                 if self._operation_id is None:
                     return await self._func(self._session, conn, self._retryable)  # type: ignore
-                with _op_id._OpIdContext(self._operation_id):
+                with _op_id._OpIdContext(self._operation_id, self._next_attempt()):
                     return await self._func(self._session, conn, self._retryable)  # type: ignore
         except PyMongoError as exc:
             if not self._retryable:
@@ -3144,7 +3144,7 @@ class _ClientConnectionRetryable(
         # One operation id across all attempts of this operation if APM/logging is enabled
         if self._operation_id is None:
             return await self._func(self._session, self._server, conn, read_pref)  # type: ignore
-        with _op_id._OpIdContext(self._operation_id):
+        with _op_id._OpIdContext(self._operation_id, self._next_attempt()):
             return await self._func(self._session, self._server, conn, read_pref)  # type: ignore
 
 

@@ -85,6 +85,7 @@ class _CommandTelemetry:
 
     __slots__ = (
         "_active",
+        "_attempt",
         "_cmd",
         "_conn",
         "_dbname",
@@ -127,8 +128,14 @@ class _CommandTelemetry:
         self._dbname = dbname
         self._request_id = request_id
         self._op_id = op_id if op_id is not None else _op_id.OP_ID.get()
+        # Set by the retryable read/write logic for every attempt of an operation.
+        self._attempt = _op_id.ATTEMPT.get()
 
     def _emit_log(self, message: _CommandStatusMessage, **extra: Any) -> None:
+        # Only include the retry attempt when the command is part of a retryable
+        # operation, so unrelated log entries keep their previous shape.
+        if self._attempt is not None and "retryAttemptNumber" not in extra:
+            extra["retryAttemptNumber"] = self._attempt
         _debug_log(
             _COMMAND_LOGGER,
             message=message,
@@ -151,7 +158,10 @@ class _CommandTelemetry:
         if not self._active:
             return
         if self._should_log:
-            self._emit_log(_CommandStatusMessage.STARTED, command=self._cmd)
+            self._emit_log(
+                _CommandStatusMessage.STARTED,
+                command=self._cmd,
+            )
         if self._publish:
             assert self._listeners is not None
             if ensure_db and "$db" not in orig:
@@ -164,6 +174,7 @@ class _CommandTelemetry:
                 self._conn.server_connection_id,
                 self._op_id,
                 service_id=self._conn.service_id,
+                attempt_number=self._attempt,
             )
 
     @property
@@ -202,6 +213,7 @@ class _CommandTelemetry:
                 service_id=self._conn.service_id,
                 speculative_hello=speculative_hello,
                 database_name=self._dbname,
+                attempt_number=self._attempt,
             )
 
     def failed(
@@ -234,6 +246,7 @@ class _CommandTelemetry:
                 self._op_id,
                 service_id=self._conn.service_id,
                 database_name=self._dbname,
+                attempt_number=self._attempt,
             )
 
 

@@ -27,12 +27,13 @@ from bson.int64 import Int64
 from bson.objectid import ObjectId
 from bson.raw_bson import RawBSONDocument
 from bson.son import SON
-from pymongo import CursorType, DeleteOne, InsertOne, UpdateOne, monitoring
+from pymongo import CursorType, DeleteOne, InsertOne, UpdateOne, WriteConcern, _op_id, monitoring
+from pymongo._telemetry import _CommandTelemetry
 from pymongo.errors import AutoReconnect, NotPrimaryError, OperationFailure
 from pymongo.read_preferences import ReadPreference
 from pymongo.synchronous.command_cursor import CommandCursor
 from pymongo.synchronous.helpers import next
-from pymongo.write_concern import WriteConcern
+from pymongo.synchronous.mongo_client import _ClientConnectionRetryable
 from test import (
     IntegrationTest,
     client_context,
@@ -1271,6 +1272,284 @@ class TestEventClasses(unittest.TestCase):
         )
         event = monitoring.TopologyClosedEvent(topology_id)
         self.assertEqual(repr(event), "<TopologyClosedEvent topology_id: 000000000000000000000001>")
+
+
+class _ViewListener(monitoring.CommandListener):
+    """Record the events one listener receives.
+
+    Setting ``allow_command_documents`` to ``False`` models an untrusted
+    support subscription that must not see business field values.
+    """
+
+    def __init__(self, allow_command_documents=True):
+        self.allow_command_documents = allow_command_documents
+        self.started_events = []
+        self.succeeded_events = []
+        self.failed_events = []
+
+    def started(self, event):
+        self.started_events.append(event)
+
+    def succeeded(self, event):
+        self.succeeded_events.append(event)
+
+    def failed(self, event):
+        self.failed_events.append(event)
+
+
+class _FakeServerDescription:
+    retryable_writes_supported = True
+
+
+class _FakeServer:
+    def __init__(self):
+        self.description = _FakeServerDescription()
+
+
+class _FakeRetryPolicy:
+    def backoff(self, attempt, *args):
+        return 0
+
+    def should_retry(self, *args):
+        return True
+
+
+class _FakeClientOptions:
+    retry_writes = True
+    retry_reads = True
+    max_adaptive_retries = 1
+    enable_overload_retargeting = False
+
+
+class _FakeTopologyDescription:
+    topology_type_name = "Unknown"
+
+
+class _FakeRetryClient:
+    """The minimal MongoClient surface used by the retryable read/write loop."""
+
+    def __init__(self, listeners, topology_id):
+        self._event_listeners = listeners
+        self._topology_id = topology_id
+        self.options = _FakeClientOptions()
+        self._retry_policy = _FakeRetryPolicy()
+        self.topology_description = _FakeTopologyDescription()
+
+    def _select_server(self, *args, **kwargs):
+        return _FakeServer()
+
+    def _checkout(self, server, session):
+        return self._FakeCheckout()
+
+    class _FakeCheckout:
+        def __enter__(self):
+            class Conn:
+                id = 1
+                server_connection_id = 1
+                address = ("localhost", 27017)
+                service_id = None
+                supports_sessions = True
+
+            return Conn()
+
+        def __exit__(self, *args):
+            return False
+
+
+class _FakeSession:
+    in_transaction = False
+
+    def _start_retryable_write(self):
+        pass
+
+    def _unpin(self):
+        pass
+
+
+def _docs_of(events):
+    docs = []
+    for event in events:
+        if isinstance(event, monitoring.CommandStartedEvent):
+            docs.append(event.command)
+        elif isinstance(event, monitoring.CommandSucceededEvent):
+            docs.append(event.reply)
+        else:
+            docs.append(event.failure)
+    return docs
+
+
+class TestCommandListenerViews(unittest.TestCase):
+    """A client publishes a separate view of each command event per listener."""
+
+    def _listeners(self):
+        self.trusted = _ViewListener(allow_command_documents=True)
+        self.untrusted = _ViewListener(allow_command_documents=False)
+        return monitoring._EventListeners([self.trusted, self.untrusted])
+
+    def test_untrusted_listener_cannot_read_documents(self):
+        listeners = self._listeners()
+        command = {"update": "coll", "updates": [{"q": {"_id": 1}, "u": {"$set": {"secret": 42}}}]}
+        failure = {
+            "ok": 0,
+            "code": 10107,
+            "codeName": "NotWritablePrimary",
+            "errmsg": "detailed server message",
+            "errorLabels": ["RetryableWriteError"],
+        }
+        reply = {"ok": 1, "n": 1, "nModified": 1}
+        delta = datetime.timedelta(seconds=1)
+        address = ("localhost", 27017)
+
+        listeners.publish_command_start(command, "db", 1, address, None, 7, attempt_number=1)
+        listeners.publish_command_failure(
+            delta, failure, "update", 1, address, None, 7, database_name="db", attempt_number=1
+        )
+        listeners.publish_command_success(
+            delta, reply, "update", 2, address, None, 7, database_name="db", attempt_number=2
+        )
+
+        self.assertIs(command, self.trusted.started_events[0].command)
+        self.assertEqual(failure, self.trusted.failed_events[0].failure)
+        self.assertIs(reply, self.trusted.succeeded_events[0].reply)
+
+        self.assertEqual({}, self.untrusted.started_events[0].command)
+        self.assertEqual({}, self.untrusted.succeeded_events[0].reply)
+        # The untrusted listener sees no failure document at all, while the
+        # trusted listener receives the approved diagnostics and the details.
+        self.assertEqual({}, self.untrusted.failed_events[0].failure)
+        self.assertEqual(10107, self.trusted.failed_events[0].failure["code"])
+        self.assertEqual("NotWritablePrimary", self.trusted.failed_events[0].failure["codeName"])
+        for doc in _docs_of(
+            self.untrusted.started_events
+            + self.untrusted.succeeded_events
+            + self.untrusted.failed_events
+        ):
+            self.assertEqual({}, doc)
+
+    def test_both_views_share_identity_of_the_operation(self):
+        listeners = self._listeners()
+        command = {"update": "coll", "updates": [{"q": {"_id": 1}, "u": {"$set": {"x": 1}}}]}
+        failure = {"ok": 0, "code": 10107, "errorLabels": ["RetryableWriteError"]}
+        reply = {"ok": 1}
+        delta = datetime.timedelta(seconds=1)
+        address = ("localhost", 27017)
+
+        listeners.publish_command_start(command, "db", 1, address, None, 7, attempt_number=1)
+        listeners.publish_command_failure(
+            delta, failure, "update", 1, address, None, 7, database_name="db", attempt_number=1
+        )
+        listeners.publish_command_start(command, "db", 2, address, None, 7, attempt_number=2)
+        listeners.publish_command_success(
+            delta, reply, "update", 2, address, None, 7, database_name="db", attempt_number=2
+        )
+
+        for listener in (self.trusted, self.untrusted):
+            self.assertTrue(listener.started_events)
+            self.assertEqual({7}, {event.operation_id for event in listener.started_events})
+            self.assertEqual([1, 2], [event.attempt_number for event in listener.started_events])
+            self.assertEqual({7}, {event.operation_id for event in listener.failed_events})
+            self.assertEqual({7}, {event.operation_id for event in listener.succeeded_events})
+            self.assertEqual(1, listener.failed_events[0].attempt_number)
+            self.assertEqual(2, listener.succeeded_events[0].attempt_number)
+
+    def test_default_listener_receives_documents(self):
+        listener = _ViewListener()
+        self.assertTrue(listener.allow_command_documents)
+
+    def test_attempt_number_only_for_retryable_operations(self):
+        listeners = self._listeners()
+        address = ("localhost", 27017)
+        command = {"insert": "coll", "documents": [{"_id": 1}]}
+
+        # A command outside a retryable operation reports no attempt number.
+        listeners.publish_command_start(command, "db", 1, address, None, 3)
+        self.assertIsNone(self.trusted.started_events[0].attempt_number)
+        self.assertIsNone(self.untrusted.started_events[0].attempt_number)
+
+    def test_retry_publishes_views_for_each_attempt(self):
+        """A retryable write that fails once publishes both views for both attempts.
+
+        Drives the real retryable read/write loop with a fake client and
+        connection so the attempt numbering and per-listener views are
+        exercised without a server. The first attempt fails with a retryable
+        server error and the retry succeeds.
+        """
+        trusted = _ViewListener(allow_command_documents=True)
+        untrusted = _ViewListener(allow_command_documents=False)
+        listeners = monitoring._EventListeners([trusted, untrusted])
+
+        command = {"update": "coll", "updates": [{"q": {"_id": 1}, "u": {"$set": {"secret": 42}}}]}
+        failure = {
+            "ok": 0,
+            "code": 10107,
+            "codeName": "NotWritablePrimary",
+            "errmsg": "detailed server message",
+            "errorLabels": ["RetryableWriteError"],
+        }
+        reply = {"ok": 1, "n": 1}
+        delta = datetime.timedelta(seconds=1)
+        attempts = []
+
+        def func(session, conn, retryable):
+            attempt = _op_id.ATTEMPT.get()
+            attempts.append(attempt)
+            telemetry = _CommandTelemetry(
+                fake_client._topology_id,
+                conn,
+                listeners,
+                command,
+                "db",
+                request_id=attempt,
+                op_id=None,
+            )
+            telemetry.started(command, False)
+            if len(attempts) == 1:
+                telemetry.failed(failure, "update", is_server_side_error=True)
+                raise OperationFailure(
+                    "boom", 10107, {"code": 10107, "errorLabels": ["RetryableWriteError"]}
+                )
+            telemetry.succeeded(reply, "update", False)
+            return "done"
+
+        fake_client = _FakeRetryClient(listeners, ObjectId())
+        retryable = _ClientConnectionRetryable(
+            fake_client,
+            func,
+            None,
+            "update",
+            session=_FakeSession(),
+            retryable=True,
+            operation_id=7,
+        )
+        result = retryable.run()
+
+        self.assertEqual("done", result)
+        self.assertEqual([1, 2], attempts)
+
+        for listener in (trusted, untrusted):
+            self.assertEqual(2, len(listener.started_events))
+            self.assertEqual(1, len(listener.failed_events))
+            self.assertEqual(1, len(listener.succeeded_events))
+            # Both attempts of one logical operation share one operation_id,
+            # and the attempt numbers let a consumer locate the actual retry.
+            self.assertEqual({7}, {event.operation_id for event in listener.started_events})
+            self.assertEqual([1, 2], [event.attempt_number for event in listener.started_events])
+            self.assertEqual(1, listener.failed_events[0].attempt_number)
+            self.assertEqual(2, listener.succeeded_events[0].attempt_number)
+            self.assertEqual(7, listener.failed_events[0].operation_id)
+            self.assertEqual(7, listener.succeeded_events[0].operation_id)
+
+        # The trusted listener sees the business fields; the untrusted one does not.
+        self.assertIs(command, trusted.started_events[0].command)
+        self.assertEqual(failure, trusted.failed_events[0].failure)
+        self.assertIs(reply, trusted.succeeded_events[0].reply)
+        self.assertEqual({}, untrusted.started_events[0].command)
+        self.assertEqual({}, untrusted.succeeded_events[0].reply)
+        self.assertEqual({}, untrusted.failed_events[0].failure)
+        # The trusted listener receives the approved diagnostics and details.
+        self.assertEqual(10107, trusted.failed_events[0].failure["code"])
+        self.assertEqual("NotWritablePrimary", trusted.failed_events[0].failure["codeName"])
+        self.assertEqual(["RetryableWriteError"], trusted.failed_events[0].failure["errorLabels"])
 
 
 if __name__ == "__main__":

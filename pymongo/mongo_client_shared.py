@@ -136,6 +136,7 @@ class _AgnosticClientConnectionRetryableBase(Generic[T, _ServerT, _FuncT]):
     __slots__ = (
         "_address",
         "_always_retryable",
+        "_attempt_cap",
         "_attempt_number",
         "_base_backoff_ms",
         "_bulk",
@@ -199,6 +200,7 @@ class _AgnosticClientConnectionRetryableBase(Generic[T, _ServerT, _FuncT]):
             operation_id = _generate_op_id_or_none(self._client._event_listeners)
         self._operation_id = operation_id
         self._attempt_number = 0
+        self._attempt_cap = 0
         self._is_run_command = is_run_command
         self._is_aggregate_write = is_aggregate_write
         self._base_backoff_ms: float | None = None
@@ -213,6 +215,19 @@ class _AgnosticClientConnectionRetryableBase(Generic[T, _ServerT, _FuncT]):
     def _is_retrying(self) -> bool:
         """Check if the exchange is currently undergoing a retry."""
         return self._bulk.retrying if self._bulk else self._retrying
+
+    def _next_attempt(self) -> int | None:
+        """Return the 1-based attempt number for this execution, or None if not retryable.
+
+        The number never decreases within one logical operation, so a bulk
+        operation that retries several commands reports one increasing attempt
+        number instead of resetting for every batch.
+        """
+        if not self._retryable and not self._always_retryable:
+            return None
+        attempt = max(self._attempt_number + 1, self._attempt_cap + 1)
+        self._attempt_cap = attempt
+        return attempt
 
     def _is_session_state_retryable(self) -> bool:
         """Check if provided session is eligible for retry.
