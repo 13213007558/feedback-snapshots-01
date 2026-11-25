@@ -13,6 +13,13 @@ from taskiq.cli.scheduler.args import SchedulerArgs
 from taskiq.cli.utils import import_object, import_tasks
 from taskiq.scheduler.scheduled_task import ScheduledTask
 from taskiq.scheduler.scheduler import TaskiqScheduler
+from taskiq.scheduler.source_rules import (
+    DispatchContext,
+    ResolvedSchedule,
+    ResolvedSchedules,
+    current_dispatch,
+    schedule_occurrence,
+)
 
 logger = getLogger(__name__)
 
@@ -159,6 +166,9 @@ async def send(
     scheduler: TaskiqScheduler,
     source: ScheduleSource,
     task: ScheduledTask,
+    *,
+    occurrence: str | None = None,
+    resolved: ResolvedSchedule | None = None,
 ) -> None:
     """
     Send a task.
@@ -166,13 +176,27 @@ async def send(
     :param scheduler: current scheduler.
     :param source: source of the task.
     :param task: task to send.
+    :param occurrence: occurrence key of this due item.
+    :param resolved: resolved plan this dispatch belongs to.
     """
     logger.info(
-        "Sending task %s with schedule_id %s.",
+        "Sending task %s with schedule_id %s from source %s.",
         task.task_name,
         task.schedule_id,
+        resolved.source_name if resolved is not None else source.__class__.__name__,
     )
-    await scheduler.on_ready(source, task)
+    context = None
+    if resolved is not None:
+        context = DispatchContext(
+            occurrence=occurrence
+            or schedule_occurrence(task, datetime.now(tz=timezone.utc)),
+            resolved=resolved,
+        )
+    token = current_dispatch.set(context)
+    try:
+        await scheduler.on_ready(source, task)
+    finally:
+        current_dispatch.reset(token)
 
 
 async def send_with_timeout(
@@ -180,6 +204,9 @@ async def send_with_timeout(
     source: ScheduleSource,
     task: ScheduledTask,
     timeout: float,
+    *,
+    occurrence: str | None = None,
+    resolved: ResolvedSchedule | None = None,
 ) -> None:
     """
     Send a task, cancelling it if it does not complete within ``timeout`` seconds.
@@ -194,9 +221,20 @@ async def send_with_timeout(
     :param source: source of the task.
     :param task: task to send.
     :param timeout: seconds to wait before cancelling the send. Must be > 0.
+    :param occurrence: occurrence key of this due item.
+    :param resolved: resolved plan this dispatch belongs to.
     """
     try:
-        await asyncio.wait_for(send(scheduler, source, task), timeout=timeout)
+        await asyncio.wait_for(
+            send(
+                scheduler,
+                source,
+                task,
+                occurrence=occurrence,
+                resolved=resolved,
+            ),
+            timeout=timeout,
+        )
     except asyncio.TimeoutError:
         logger.warning(
             "Sending task %s with schedule_id %s timed out after %.1fs "
@@ -230,11 +268,35 @@ class SchedulerLoop:
         self.time_tasks_last_run: dict[ScheduleId, datetime] = {}
 
         self.scheduled_tasks: list[tuple[ScheduleSource, list[ScheduledTask]]] = []
+        self.resolved_schedules: ResolvedSchedules | None = None
+        self.observed_schedules: tuple[ResolvedSchedule, ...] = ()
+        self.running_occurrences: dict[str, asyncio.Task[Any]] = {}
+        # Keyed by source object and schedule id, so a refresh mid pre_send
+        # cannot start a second dispatch of the same plan.
+        self.running_plan_keys: set[tuple[int, str]] = set()
         self.scheduled_tasks_updated_at: datetime | None = None
         self._update_schedules_task_future: asyncio.Task[Any] | None = None
 
+    def _refresh_resolved(self) -> None:
+        """Resolve the latest raw schedules through the source rules."""
+        self.resolved_schedules = self.scheduler.source_rules.resolve(
+            self.scheduled_tasks,
+        )
+        self.observed_schedules = self.resolved_schedules.observed
+        for conflict in self.resolved_schedules.conflicts:
+            logger.warning(
+                "Schedule %s was offered by several dispatch sources %s; "
+                "using %s.",
+                conflict.identity,
+                conflict.source_names,
+                conflict.chosen_source,
+            )
+
     def _update_schedules_task_future_callback(self, task_: asyncio.Task[Any]) -> None:
+        if task_.cancelled():
+            return
         self.scheduled_tasks = task_.result()
+        self._refresh_resolved()
 
         new_schedules_ids: set[ScheduleId] = set()
         for source, task_list in self.scheduled_tasks:
@@ -319,6 +381,107 @@ class SchedulerLoop:
 
         return is_ready_to_send
 
+    def dispatch_due(
+        self,
+        now: datetime,
+        *,
+        send_timeout: float | None = None,
+    ) -> list[asyncio.Task[Any]]:
+        """
+        Start dispatch tasks for every due plan allowed by the source rules.
+
+        A plan from an observation source, a revoked source, an already
+        handled occurrence, or one that is already in flight is skipped.
+
+        :param now: scheduler time used for due and occurrence checks.
+        :param send_timeout: optional per-send timeout.
+        :return: tasks spawned during this sweep.
+        """
+        resolved = self.resolved_schedules or ResolvedSchedules(
+            dispatch=(),
+            observed=(),
+            conflicts=(),
+        )
+        spawned: list[asyncio.Task[Any]] = []
+        for entry in resolved.dispatch:
+            source = entry.source
+            task = entry.task
+            if not self.scheduler.source_rules.is_dispatch_allowed(source):
+                continue
+
+            occurrence = schedule_occurrence(task, now)
+            if self.scheduler.audit_ledger.is_handled(occurrence):
+                continue
+            if occurrence in self.running_occurrences:
+                continue
+            plan_key = (id(source), task.schedule_id)
+            if plan_key in self.running_plan_keys:
+                continue
+
+            is_ready_to_send = self._is_schedule_ready_to_send(
+                task=task,
+                now=now,
+            )
+            if not is_ready_to_send:
+                continue
+
+            if send_timeout is not None:
+                send_coro = send_with_timeout(
+                    self.scheduler,
+                    source,
+                    task,
+                    timeout=send_timeout,
+                    occurrence=occurrence,
+                    resolved=entry,
+                )
+            else:
+                send_coro = send(
+                    self.scheduler,
+                    source,
+                    task,
+                    occurrence=occurrence,
+                    resolved=entry,
+                )
+            send_task = self._event_loop.create_task(
+                send_coro,
+                # We need to set the name of the task
+                # to be able to discard its reference
+                # after it is done.
+                name=f"occurrence_{occurrence}",
+            )
+            self.running_occurrences[occurrence] = send_task
+            self.running_plan_keys.add(plan_key)
+            send_task.add_done_callback(
+                lambda task_future, key=plan_key: self._finish_dispatch(
+                    task_future,
+                    key,
+                ),
+            )
+            spawned.append(send_task)
+        return spawned
+
+    def _finish_dispatch(
+        self,
+        task_future: asyncio.Task[Any],
+        plan_key: tuple[int, str],
+    ) -> None:
+        """Drop bookkeeping after a dispatch task completes."""
+        self.running_occurrences.pop(
+            task_future.get_name().removeprefix("occurrence_"),
+            None,
+        )
+        self.running_plan_keys.discard(plan_key)
+
+    def observed_plans(self) -> tuple[ResolvedSchedule, ...]:
+        """Return every plan visible from all sources, including display-only."""
+        return self.observed_schedules
+
+    async def refresh(self) -> None:
+        """Re-read every source and rebuild dispatch/observation plans."""
+        self.scheduled_tasks = await get_all_schedules(self.scheduler)
+        self._refresh_resolved()
+        self.scheduled_tasks_updated_at = datetime.now(tz=timezone.utc)
+
     async def run(  # noqa: C901
         self,
         *,
@@ -351,9 +514,8 @@ class SchedulerLoop:
         if send_timeout is not None and send_timeout <= 0:
             raise ValueError("send_timeout must be > 0 when provided")
 
-        running_schedules: dict[ScheduleId, asyncio.Task[Any]] = {}
-
         self.scheduled_tasks = await get_all_schedules(self.scheduler)
+        self._refresh_resolved()
         self.scheduled_tasks_updated_at = datetime.now(tz=timezone.utc)
 
         if skip_first_run:
@@ -369,36 +531,7 @@ class SchedulerLoop:
                 await self._update_scheduled_tasks()
                 self.scheduled_tasks_updated_at = now
 
-            for source, task_list in self.scheduled_tasks:
-                for task in task_list:
-                    is_ready_to_send: bool = self._is_schedule_ready_to_send(
-                        task=task,
-                        now=now,
-                    )
-
-                    if is_ready_to_send and task.schedule_id not in running_schedules:
-                        if send_timeout is not None:
-                            send_coro = send_with_timeout(
-                                self.scheduler,
-                                source,
-                                task,
-                                timeout=send_timeout,
-                            )
-                        else:
-                            send_coro = send(self.scheduler, source, task)
-                        send_task = self._event_loop.create_task(
-                            send_coro,
-                            # We need to set the name of the task
-                            # to be able to discard its reference
-                            # after it is done.
-                            name=f"schedule_{task.schedule_id}",
-                        )
-                        running_schedules[task.schedule_id] = send_task
-                        send_task.add_done_callback(
-                            lambda task_future: running_schedules.pop(
-                                task_future.get_name().removeprefix("schedule_"),
-                            ),
-                        )
+            self.dispatch_due(now, send_timeout=send_timeout)
 
             delay = next_run - datetime.now(tz=timezone.utc)
             logger.debug(

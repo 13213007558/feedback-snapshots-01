@@ -74,6 +74,56 @@ Currently we have only two default functions to merge tasks. You can find them i
 
 Every time we update the schedule it gets tasks from the source and executes this function to merge them together.
 
+### Dispatch and observation sources
+
+Sometimes a second source registers the same schedule for a different audience.
+For example, your release configuration publishes plans, while an audit service
+registers the same plans for display only. In that case you can attach an
+optional rule to each source:
+
+```python
+from taskiq.scheduler.source_rules import (
+    ScheduleSourceRules,
+    dispatch_rule,
+    observe_rule,
+)
+
+rules = ScheduleSourceRules(
+    {
+        release_source: dispatch_rule("release-config"),
+        audit_source: observe_rule("audit-register"),
+    },
+)
+
+scheduler = TaskiqScheduler(
+    broker,
+    sources=[release_source, audit_source],
+    source_rules=rules,
+)
+```
+
+Every plan from every source stays in the observation view, so both entries
+remain traceable. Only sources with the `dispatch` role are allowed to publish.
+When two allowed sources offer the same plan, the first one wins and a warning
+is logged.
+
+The rule is re-checked after `pre_send` returns. If the source is revoked while
+`pre_send` is running, the dispatch is cancelled. Every attempted occurrence is
+written to `scheduler.audit_ledger` with its occurrence key, source name and
+outcome (`published`, `cancelled` or `failed`). A later refresh of the same due
+item sees it as already handled, so it is not dispatched as a new occurrence.
+Dispatched messages carry `schedule_source`, `schedule_source_role` and
+`schedule_occurrence` labels for the audit view.
+
+```python
+from taskiq.scheduler.audit import ScheduleAuditOutcome
+
+occurrence = "..."
+published = scheduler.audit_ledger.was_published(occurrence)
+view = scheduler.audit_view()
+only_cancelled = scheduler.audit_view(outcome=ScheduleAuditOutcome.CANCELLED)
+```
+
 
 ## Working with timezones
 

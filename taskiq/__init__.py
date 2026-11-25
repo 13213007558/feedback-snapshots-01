@@ -35,6 +35,11 @@ from taskiq.middlewares import (
 from taskiq.result import TaskiqResult
 from taskiq.scheduler.scheduled_task import ScheduledTask
 from taskiq.scheduler.scheduler import TaskiqScheduler
+from taskiq.scheduler.source_rules import (
+    ScheduleSourceRole,
+    ScheduleSourceRule,
+    ScheduleSourceRules,
+)
 from taskiq.state import TaskiqState
 from taskiq.task import AsyncTaskiqTask
 
@@ -56,6 +61,9 @@ __all__ = [
     "ResultGetError",
     "ResultIsReadyError",
     "ScheduleSource",
+    "ScheduleSourceRole",
+    "ScheduleSourceRule",
+    "ScheduleSourceRules",
     "ScheduledTask",
     "SecurityError",
     "SendTaskError",
