@@ -61,5 +61,8 @@ venv/
 # pytest
 .pytest_cache
 
+# Local synthetic handoff demonstration output
+.feedback/synthetic-handoff-output/
+
 # airspeed velocity
 asv/*
