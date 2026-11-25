@@ -17,6 +17,7 @@ from kubernetes.client.rest import ApiException, ApiValueError
 
 import certifi
 import collections
+import json
 import select
 import socket
 import ssl
@@ -39,6 +40,100 @@ CLOSE_CHANNEL = 255
 
 V4_CHANNEL_PROTOCOL = "v4.channel.k8s.io"
 V5_CHANNEL_PROTOCOL = "v5.channel.k8s.io"
+
+DIAGNOSTIC_CHANNEL = 5
+
+TERMINAL_PENDING = "pending"
+TERMINAL_NORMAL = "normal"
+TERMINAL_PROTOCOL_FAILURE = "protocol_failure"
+TERMINAL_DISCONNECTED = "disconnected"
+
+
+class Termination:
+    """The formal terminal result of an exec stream."""
+
+    def __init__(self, kind, exit_code=None, status=None, error=None,
+                 formal_status_received=None, raw_payload=None):
+        self.kind = kind
+        self.state = kind
+        self.outcome = kind
+        self.reason = kind
+        self.exit_code = exit_code
+        self.returncode = exit_code
+        self.status = status
+        self.error = error
+        self.raw_payload = raw_payload
+        if formal_status_received is None:
+            formal_status_received = status is not None
+        self.formal_status_received = formal_status_received
+
+    @property
+    def pending(self):
+        return self.kind == TERMINAL_PENDING
+
+    @property
+    def completed(self):
+        return self.kind == TERMINAL_NORMAL
+
+    @property
+    def succeeded(self):
+        return self.kind == TERMINAL_NORMAL and self.exit_code == 0
+
+    @property
+    def normal_exit(self):
+        return self.kind == TERMINAL_NORMAL
+
+    @property
+    def protocol_failure(self):
+        return self.kind == TERMINAL_PROTOCOL_FAILURE
+
+    @property
+    def failed(self):
+        return self.kind == TERMINAL_PROTOCOL_FAILURE
+
+    @property
+    def disconnected(self):
+        return self.kind == TERMINAL_DISCONNECTED
+
+    @property
+    def ok(self):
+        return self.succeeded
+
+    def to_dict(self):
+        return {
+            "kind": self.kind,
+            "state": self.kind,
+            "outcome": self.kind,
+            "exit_code": self.exit_code,
+            "returncode": self.exit_code,
+            "status": self.status,
+            "error": self.error,
+            "formal_status_received": self.formal_status_received,
+        }
+
+    def __repr__(self):
+        return (
+            "Termination(kind={!r}, exit_code={!r}, "
+            "formal_status_received={!r})"
+        ).format(self.kind, self.exit_code, self.formal_status_received)
+
+
+class StreamDisconnected(ConnectionError, WebSocketConnectionClosedException):
+    """The WebSocket closed before a formal Kubernetes status arrived."""
+
+
+class ProtocolReportedFailure(RuntimeError):
+    """Kubernetes delivered a formal Failure status."""
+
+    def __init__(self, termination):
+        self.termination = termination
+        self.exit_code = termination.exit_code
+        super().__init__(termination.error or "command reported failure")
+
+
+ProtocolFailure = ProtocolExecutionError = ProtocolExitError = ProtocolReportedFailure
+DisconnectedWithoutStatus = StreamClosedWithoutStatus = StreamIncomplete = StreamDisconnected
+
 
 class _IgnoredIO:
     def write(self, _x):
@@ -78,6 +173,158 @@ class WSClient:
                         break
         self._connected = True
         self._returncode = None
+        self._frame_listeners = []
+        self._status_payload = None
+        self._termination = None
+
+    def add_frame_listener(self, listener):
+        """Subscribe to decoded ``(channel, data)`` frames as they arrive."""
+        self._frame_listeners.append(listener)
+        return listener
+
+    def remove_frame_listener(self, listener):
+        try:
+            self._frame_listeners.remove(listener)
+        except ValueError:
+            pass
+
+    def _emit_frame(self, channel, data):
+        for listener in list(self._frame_listeners):
+            listener(channel, data)
+
+    def _remember_status_payload(self, data):
+        if data in (None, "", b""):
+            return
+        if isinstance(data, bytes):
+            data = data.decode("utf-8", "replace")
+        self._status_payload = data
+
+    @staticmethod
+    def parse_status(payload):
+        """Parse a Kubernetes Status frame encoded as YAML or JSON."""
+        if payload in (None, "", b""):
+            return None
+        if isinstance(payload, bytes):
+            payload = payload.decode("utf-8", "replace")
+        try:
+            status = yaml.safe_load(payload)
+        except yaml.YAMLError:
+            try:
+                status = json.loads(payload)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return {
+                    "status": "Failure",
+                    "reason": "MalformedStatus",
+                    "message": "received an unparseable terminal status",
+                }
+        if isinstance(status, dict):
+            return status
+        return {
+            "status": "Failure",
+            "reason": "MalformedStatus",
+            "message": "terminal status was not a mapping",
+        }
+
+    @classmethod
+    def _exit_code_from_status(cls, status):
+        if not isinstance(status, dict):
+            return None
+        if status.get("status") == "Success":
+            return 0
+        details = status.get("details") or {}
+        causes = details.get("causes") or []
+        for cause in causes:
+            if isinstance(cause, dict) and cause.get("reason") == "ExitCode":
+                try:
+                    return int(cause.get("message"))
+                except (TypeError, ValueError):
+                    pass
+        for cause in causes:
+            if isinstance(cause, dict):
+                try:
+                    return int(cause.get("message"))
+                except (TypeError, ValueError):
+                    pass
+        message = status.get("message") or ""
+        for token in message.replace(";", " ").split():
+            if token.isdigit():
+                return int(token)
+        return None
+
+    def _current_status_payload(self):
+        if self._status_payload is not None:
+            return self._status_payload
+        if ERROR_CHANNEL in self._channels:
+            data = self._channels[ERROR_CHANNEL]
+            self._remember_status_payload(data)
+            return self._status_payload
+        return None
+
+    def termination(self, timeout=None):
+        """Classify the terminal state without consuming the status frame."""
+        if self._termination is not None:
+            return self._termination
+        if timeout is not None and self.is_open():
+            self.update(timeout=timeout)
+
+        status = self.parse_status(self._current_status_payload())
+        if status is not None:
+            exit_code = self._exit_code_from_status(status)
+            if status.get("status") == "Success":
+                kind = TERMINAL_NORMAL
+                exit_code = 0 if exit_code is None else exit_code
+                error = None
+            else:
+                kind = TERMINAL_PROTOCOL_FAILURE
+                error = status.get("message") or status.get("reason")
+            termination = Termination(
+                kind,
+                exit_code=exit_code,
+                status=status,
+                error=error,
+                formal_status_received=True,
+                raw_payload=self._status_payload,
+            )
+            self._termination = termination
+            self._returncode = exit_code
+            return termination
+
+        if not self.is_open():
+            termination = Termination(
+                TERMINAL_DISCONNECTED,
+                exit_code=None,
+                formal_status_received=False,
+            )
+            self._termination = termination
+            return termination
+
+        return Termination(TERMINAL_PENDING, formal_status_received=False)
+
+    def wait_termination(self, timeout=None):
+        """Drive frames until a formal result arrives or the socket closes."""
+        start = time.time()
+        while True:
+            termination = self.termination()
+            if not termination.pending:
+                return termination
+            if timeout is not None:
+                remaining = timeout - (time.time() - start)
+                if remaining <= 0:
+                    return termination
+                wait_timeout = remaining
+            else:
+                wait_timeout = None
+            if not self.is_open():
+                return self.termination(timeout=0)
+            self.update(timeout=wait_timeout)
+
+    def raise_for_termination(self):
+        termination = self.termination()
+        if termination.protocol_failure:
+            raise ProtocolReportedFailure(termination)
+        if termination.disconnected:
+            raise StreamDisconnected("websocket closed without a formal status")
+        return termination
 
     def peek_channel(self, channel, timeout=0):
         """Peek a channel and return part of the input,
@@ -97,6 +344,8 @@ class WSClient:
             ret = self.peek_channel(channel, timeout)
         else:
             ret = self._channels[channel]
+        if channel == ERROR_CHANNEL:
+            self._remember_status_payload(ret)
         if channel in self._channels:
             del self._channels[channel]
         return ret
@@ -255,10 +504,15 @@ class WSClient:
                 (self.sock.sock, ), (), (), timeout)
 
         while r:
-            op_code, frame = self.sock.recv_data_frame(True)
+            try:
+                op_code, frame = self.sock.recv_data_frame(True)
+            except WebSocketConnectionClosedException:
+                self._connected = False
+                self._termination = None
+                return self.termination(timeout=0)
             if op_code == ABNF.OPCODE_CLOSE:
                 self._connected = False
-                return
+                return self.termination(timeout=0)
             elif op_code == ABNF.OPCODE_BINARY or op_code == ABNF.OPCODE_TEXT:
                 data = frame.data
                 if len(data) > 0:
@@ -288,6 +542,11 @@ class WSClient:
                             self._channels[channel] = data
                         else:
                             self._channels[channel] += data
+                        if channel == ERROR_CHANNEL:
+                            self._remember_status_payload(
+                                self._channels.get(ERROR_CHANNEL, data))
+                            self._termination = None
+                        self._emit_frame(channel, data)
 
             # Output larger than the websocket frame size (e.g. long exec
             # stdout) arrives as a sequence of frames. Consume every frame
@@ -309,20 +568,30 @@ class WSClient:
     @property
     def returncode(self):
         """
-        The return code, A None value indicates that the process hasn't
-        terminated yet.
+        The return code. ``None`` means no formal terminal status is known.
+
+        A still-open stream and a close without the Kubernetes ERROR-channel
+        Status frame both yield ``None``; use :meth:`termination` to tell those
+        cases and protocol-reported failures apart.
         """
-        if self.is_open():
+        termination = self.termination()
+        if termination.pending:
             return None
-        else:
-            if self._returncode is None:
-                err = self.read_channel(ERROR_CHANNEL)
-                err = yaml.safe_load(err)
-                if err['status'] == "Success":
-                    self._returncode = 0
-                else:
-                    self._returncode = int(err['details']['causes'][0]['message'])
-            return self._returncode
+        return termination.exit_code
+
+    def restricted_view(self, policy=None, **kwargs):
+        """Return a disclosure-filtered portal over this same stream."""
+        from .portal import RestrictedPortal
+        return RestrictedPortal(self, policy=policy, **kwargs)
+
+    def portal(self, policy=None, **kwargs):
+        """Alias for :meth:`restricted_view`."""
+        return self.restricted_view(policy=policy, **kwargs)
+
+    def support_entry(self, approval=None, **kwargs):
+        """Return an authorized support diagnostics entry point."""
+        from .portal import SupportPortal
+        return SupportPortal(self, approval=approval, **kwargs)
 
     def close(self, **kwargs):
         """

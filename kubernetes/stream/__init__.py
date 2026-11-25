@@ -13,8 +13,40 @@
 # limitations under the License.
 
 from .stream import stream, portforward
+from .portal import (
+    DisclosurePolicy,
+    DisclosureRule,
+    InternalStreamReader,
+    RestrictedPortal,
+    RestrictedView,
+    RestrictedWSClient,
+    SupportPortal,
+    create_restricted_view,
+    restricted_view,
+    support_entry,
+)
+from .ws_client import (
+    ProtocolReportedFailure,
+    StreamDisconnected,
+    Termination,
+    WSClient,
+)
 
 __all__ = [
     "stream",
     "portforward",
+    "WSClient",
+    "DisclosurePolicy",
+    "DisclosureRule",
+    "RestrictedPortal",
+    "RestrictedView",
+    "RestrictedWSClient",
+    "InternalStreamReader",
+    "SupportPortal",
+    "Termination",
+    "ProtocolReportedFailure",
+    "StreamDisconnected",
+    "restricted_view",
+    "create_restricted_view",
+    "support_entry",
 ]

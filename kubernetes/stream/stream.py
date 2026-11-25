@@ -25,6 +25,10 @@ def _websocket_request(websocket_request, force_kwargs, api_method, *args, **kwa
             kwargs[kwarg] = value
     api_client = api_method.__self__.api_client
     configuration = api_client.configuration
+    restricted = kwargs.pop('restricted', False)
+    restricted = kwargs.pop('restricted_view', False) or restricted
+    disclosure_policy = kwargs.pop('disclosure_policy', None)
+    disclosure_policy = disclosure_policy or kwargs.pop('policy', None)
     preload_content = kwargs.pop('_preload_content', True)
     kwargs['_preload_content'] = False
     binary = kwargs.pop('binary', False)
@@ -65,6 +69,8 @@ def _websocket_request(websocket_request, force_kwargs, api_method, *args, **kwa
     finally:
         api_client.call_api = previous_call_api
 
+    if restricted and isinstance(response, ws_client.WSClient):
+        return response.restricted_view(disclosure_policy)
     if isinstance(response, ws_client.WSResponse):
         return response.data
     return response
