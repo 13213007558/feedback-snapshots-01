@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import collections
+import contextlib
 import enum
 import inspect
 import logging
@@ -26,6 +27,14 @@ from opentelemetry.context import (
 )
 from opentelemetry.sdk._shared_internal._processor_metrics import (
     ProcessorMetricsT,
+)
+from opentelemetry.sdk._shared_internal.process_ownership import (
+    ForkRecoveryBoundary,
+    PendingBatchCheckpoint,
+    ProcessOwnership,
+    ProcessOwnershipAwareExporter,
+    ProcessOwnershipBoundary,
+    process_ownership_context,
 )
 from opentelemetry.util._once import Once
 
@@ -90,9 +99,13 @@ class BatchProcessor(Generic[Telemetry]):
         max_queue_size: int,
         exporting: str,
         metrics: ProcessorMetricsT,
+        enable_process_ownership: bool = False,
     ):
         self._bsp_reset_once = Once()
         self._exporter = exporter
+        self._process_ownership_enabled = enable_process_ownership or isinstance(
+            exporter, ProcessOwnershipAwareExporter
+        )
         self._max_queue_size = max_queue_size
         self._schedule_delay_millis = schedule_delay_millis
         self._schedule_delay = schedule_delay_millis / 1e3
@@ -123,9 +136,50 @@ class BatchProcessor(Generic[Telemetry]):
 
             os.register_at_fork(after_in_child=_after_in_child)
         self._pid = os.getpid()
+        self._ownership_boundary = ProcessOwnershipBoundary()
+        self._bind_exporter_process_ownership()
 
         metrics.register_queue_size(lambda: len(self._queue))
         self._metrics = metrics
+
+    @property
+    def process_ownership_enabled(self) -> bool:
+        return self._process_ownership_enabled
+
+    @property
+    def process_ownership(self) -> ProcessOwnership:
+        return self._ownership_boundary.ownership
+
+    @property
+    def process_ownership_boundary(self) -> ProcessOwnershipBoundary:
+        return self._ownership_boundary
+
+    def checkpoint_process_ownership(self) -> PendingBatchCheckpoint:
+        return self._ownership_boundary.checkpoint_pending(len(self._queue))
+
+    def _bind_exporter_process_ownership(self) -> None:
+        if not self._process_ownership_enabled:
+            return
+        bind = getattr(self._exporter, "bind_process_ownership", None)
+        if not callable(bind):
+            return
+        try:
+            bind(self._ownership_boundary.ownership)
+        except Exception:  # pylint: disable=broad-exception-caught
+            _logger.exception("Exception while binding %s exporter process ownership.", self._exporting)
+
+    def _recover_exporter_after_fork(self, recovery: ForkRecoveryBoundary) -> None:
+        if not self._process_ownership_enabled:
+            return
+        recover = getattr(self._exporter, "recover_after_fork", None)
+        if callable(recover):
+            try:
+                recover(recovery)
+            except Exception:  # pylint: disable=broad-exception-caught
+                _logger.exception("Exception while recovering %s exporter after fork.", self._exporting)
+                return
+        self._ownership_boundary.mark_exporter_recovered()
+        self._bind_exporter_process_ownership()
 
     def _should_export_batch(self, batch_strategy: BatchExportStrategy, num_iterations: int) -> bool:
         if not self._queue or self._shutdown_timeout_exceeded:
@@ -140,9 +194,12 @@ class BatchProcessor(Generic[Telemetry]):
         return False
 
     def _at_fork_reinit(self):
+        inherited_record_count = len(self._queue)
         self._export_lock = threading.Lock()
         self._worker_awaken = threading.Event()
         self._queue.clear()
+        recovery = self._ownership_boundary.recover_in_child(inherited_record_count)
+        self._recover_exporter_after_fork(recovery)
         self._worker_thread = threading.Thread(
             name=f"OtelBatch{self._exporting}RecordProcessor",
             target=self.worker,
@@ -188,8 +245,14 @@ class BatchProcessor(Generic[Telemetry]):
                 batch = [self._queue.pop() for _ in range(count)]
                 # Record on submission to the exporter.
                 self._metrics.finish_items(count)
+                ownership_context = (
+                    process_ownership_context(self._ownership_boundary.ownership)
+                    if self._process_ownership_enabled
+                    else contextlib.nullcontext()
+                )
                 try:
-                    self._exporter.export(batch)
+                    with ownership_context:
+                        self._exporter.export(batch)
                 except Exception:  # pylint: disable=broad-exception-caught
                     _logger.exception("Exception while exporting %s.", self._exporting)
                 detach(token)

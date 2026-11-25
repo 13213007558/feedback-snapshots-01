@@ -31,6 +31,9 @@ from opentelemetry.sdk._logs import (
 from opentelemetry.sdk._shared_internal import (
     BatchProcessor,
     DuplicateFilter,
+    PendingBatchCheckpoint,
+    ProcessOwnership,
+    ProcessOwnershipBoundary,
 )
 from opentelemetry.sdk._shared_internal._processor_metrics import (
     create_processor_metrics,
@@ -271,6 +274,7 @@ class BatchLogRecordProcessor(LogRecordProcessor):
         max_queue_size: int | None = None,
         *,
         meter_provider: MeterProvider | None = None,
+        enable_process_ownership: bool = False,
     ):
         if max_queue_size is None:
             max_queue_size = BatchLogRecordProcessor._default_max_queue_size()
@@ -305,6 +309,7 @@ class BatchLogRecordProcessor(LogRecordProcessor):
                 capacity=max_queue_size,
                 enabled=parse_boolean_environment_variable(OTEL_PYTHON_SDK_INTERNAL_METRICS_ENABLED),
             ),
+            enable_process_ownership=enable_process_ownership,
         )
 
     def on_emit(self, log_record: ReadWriteLogRecord) -> None:
@@ -323,6 +328,21 @@ class BatchLogRecordProcessor(LogRecordProcessor):
             limits=log_record.limits,
         )
         return self._batch_processor.emit(readable_log_record)
+
+    @property
+    def process_ownership_enabled(self) -> bool:
+        return self._batch_processor.process_ownership_enabled
+
+    @property
+    def process_ownership(self) -> ProcessOwnership:
+        return self._batch_processor.process_ownership
+
+    @property
+    def process_ownership_boundary(self) -> ProcessOwnershipBoundary:
+        return self._batch_processor.process_ownership_boundary
+
+    def checkpoint_process_ownership(self) -> PendingBatchCheckpoint:
+        return self._batch_processor.checkpoint_process_ownership()
 
     def shutdown(self):
         return self._batch_processor.shutdown()

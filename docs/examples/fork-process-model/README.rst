@@ -13,10 +13,40 @@ across a fork. Initializing the tracer provider, processor and exporter in each
 worker avoids inheriting those connections and is a useful approach for manual
 instrumentation with pre-fork servers such as Gunicorn and uWSGI.
 
-The hooks below show how to initialize tracing in each worker. They are an
-alternative to configuring tracing in the parent process, rather than a second
-initialization step for applications that already configure tracing through
-auto-instrumentation.
+Opt-in ownership and recovery boundary
+--------------------------------------
+
+Applications that need an auditable ownership token can construct either batch
+processor with ``enable_process_ownership=True``. Exporters that implement
+``ProcessOwnershipAwareExporter`` opt in automatically. The processor exposes
+``process_ownership`` and ``process_ownership_boundary``; call
+``checkpoint_process_ownership()`` before forking to record how many records
+were admitted to the queue but not yet submitted to the exporter.
+
+After a fork, the child detaches its copied queue, increments
+``ProcessOwnership.generation`` and stores a ``ForkRecoveryBoundary`` in
+``process_ownership_boundary.recovery``. The report's
+``inherited_batch_finalizer`` is ``"parent_processor"``. In other words, the
+child exports only records admitted in its new process generation; the parent's
+original processor remains responsible for flushing and acknowledging the
+inherited batch. Records popped into an in-progress exporter call immediately
+before the fork are likewise finalized by the surviving parent call, not by the
+child.
+
+Exporters can implement ``bind_process_ownership()`` and
+``recover_after_fork()`` to reopen process-local files, sessions or
+connections. Inside ``export()``, ``current_process_ownership()`` returns the
+ownership token for the current batch, which local audit exporters can write
+alongside their acknowledgement.
+
+The hooks make process identity and the recovery point observable; they do not
+make an inherited network connection safe if the exporter itself does not reset
+it. Initializing SDK components in each worker remains the strongest boundary.
+
+The server lifecycle hooks below show how to initialize tracing in each worker.
+They are an alternative to configuring tracing in the parent process, rather
+than a second initialization step for applications that already configure
+tracing through auto-instrumentation.
 
 For signal-specific auto-instrumentation support and workarounds, see the
 `Python auto-instrumentation troubleshooting guide

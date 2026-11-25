@@ -19,6 +19,9 @@ from opentelemetry.context import (
 from opentelemetry.metrics import MeterProvider, get_meter_provider
 from opentelemetry.sdk._shared_internal import (
     BatchProcessor,
+    PendingBatchCheckpoint,
+    ProcessOwnership,
+    ProcessOwnershipBoundary,
 )
 from opentelemetry.sdk._shared_internal._processor_metrics import (
     create_processor_metrics,
@@ -166,6 +169,7 @@ class BatchSpanProcessor(SpanProcessor):
         export_timeout_millis: float | None = None,
         *,
         meter_provider: MeterProvider | None = None,
+        enable_process_ownership: bool = False,
     ):
         if max_queue_size is None:
             max_queue_size = BatchSpanProcessor._default_max_queue_size()
@@ -201,12 +205,28 @@ class BatchSpanProcessor(SpanProcessor):
                 capacity=max_queue_size,
                 enabled=parse_boolean_environment_variable(OTEL_PYTHON_SDK_INTERNAL_METRICS_ENABLED),
             ),
+            enable_process_ownership=enable_process_ownership,
         )
 
     # Added for backward compatibility. Not recommended to directly access/use underlying exporter.
     @property
     def span_exporter(self):
         return self._batch_processor._exporter  # pylint: disable=protected-access
+
+    @property
+    def process_ownership_enabled(self) -> bool:
+        return self._batch_processor.process_ownership_enabled
+
+    @property
+    def process_ownership(self) -> ProcessOwnership:
+        return self._batch_processor.process_ownership
+
+    @property
+    def process_ownership_boundary(self) -> ProcessOwnershipBoundary:
+        return self._batch_processor.process_ownership_boundary
+
+    def checkpoint_process_ownership(self) -> PendingBatchCheckpoint:
+        return self._batch_processor.checkpoint_process_ownership()
 
     def on_start(self, span: Span, parent_context: Context | None = None) -> None:
         pass

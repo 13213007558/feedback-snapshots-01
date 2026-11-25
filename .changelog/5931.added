@@ -1,0 +1,1 @@
+`opentelemetry-sdk`: add opt-in process ownership and fork recovery metadata for batch log and span processors
