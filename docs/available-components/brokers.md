@@ -222,6 +222,12 @@ and middlewares of the `MultiBroker` — only on the execution side.
 Use `MultiBroker.with_result_backend()` to set a result backend:
 it propagates the backend to all inner brokers, keeping client-side
 polling and worker-side saving in sync.
+
+Because several inner brokers can deliver the same task name, a task can
+be bound to an approved delivery channel with `allowed_sources`. Every
+delivery from the composite is annotated with the inner broker that
+produced it, so the receiver rejects unapproved channels before resolving
+dependencies. See [Trusted delivery source](../guide/trusted-delivery-source.md).
 :::
 
 If all of your queues live in a single RabbitMQ broker, prefer the native

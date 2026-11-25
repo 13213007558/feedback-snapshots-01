@@ -4,7 +4,8 @@ from collections.abc import AsyncGenerator
 from logging import getLogger
 from typing import TYPE_CHECKING, Any, NoReturn
 
-from taskiq.abc.broker import AckableMessage, AsyncBroker
+from taskiq.abc.broker import AsyncBroker
+from taskiq.acks import SourcedMessage
 from taskiq.message import BrokerMessage
 from taskiq.utils import merge_async_iterables
 
@@ -159,7 +160,7 @@ class MultiBroker(AsyncBroker):
             )
         await target_broker.kick(message)
 
-    async def listen(self) -> AsyncGenerator["bytes | AckableMessage", None]:
+    async def listen(self) -> AsyncGenerator[SourcedMessage, None]:
         """
         Listen to all inner brokers simultaneously.
 
@@ -167,12 +168,17 @@ class MultiBroker(AsyncBroker):
         into a single generator, so the worker receives messages
         from every broker at the same time.
 
+        Every yielded delivery is wrapped in ``SourcedMessage`` with the
+        inner broker that actually produced it. The worker needs this
+        to decide which channel is allowed to run a task, since several
+        inner brokers may deliver the same task name.
+
         If one of the inner brokers fails, it's excluded from
         listening, but all remaining brokers keep working. Only when
         every inner broker is down, this generator ends and the worker
         restarts.
 
-        :yield: incoming messages from all inner brokers.
+        :yield: incoming messages annotated with their source broker.
         :return: nothing.
         """
         merged = merge_async_iterables(
@@ -184,7 +190,7 @@ class MultiBroker(AsyncBroker):
     async def _listen_one(
         self,
         inner_broker: AsyncBroker,
-    ) -> AsyncGenerator["bytes | AckableMessage", None]:
+    ) -> AsyncGenerator[SourcedMessage, None]:
         """
         Listen to a single inner broker, degrading on its failure.
 
@@ -192,14 +198,26 @@ class MultiBroker(AsyncBroker):
         and this generator ends, so the failed broker is excluded
         from the merged listening, but doesn't stop the whole worker.
 
+        Deliveries are annotated with ``inner_broker`` as their source,
+        unless the inner broker already provided a more specific source.
+
         :param inner_broker: broker to listen to.
-        :yield: incoming messages from the inner broker.
+        :yield: incoming messages annotated with their source broker.
         :return: nothing.
         """
         iterator = inner_broker.listen()
         try:
-            async for message in iterator:
-                yield message
+            async for raw_delivery in iterator:
+                if isinstance(raw_delivery, SourcedMessage):
+                    if raw_delivery.source is None:
+                        yield SourcedMessage(
+                            raw_delivery.message,
+                            inner_broker,
+                        )
+                        continue
+                    yield raw_delivery
+                    continue
+                yield SourcedMessage(raw_delivery, inner_broker)
         except Exception as exc:
             logger.exception(
                 "Inner broker %s failed: %r. "

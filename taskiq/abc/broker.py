@@ -20,7 +20,7 @@ from uuid import uuid4
 
 from taskiq.abc.middleware import TaskiqMiddleware
 from taskiq.abc.serializer import TaskiqSerializer
-from taskiq.acks import AckableMessage
+from taskiq.acks import AckableMessage, SourcedMessage
 from taskiq.decor import AsyncTaskiqDecoratedTask
 from taskiq.events import TaskiqEvents
 from taskiq.exceptions import TaskBrokerMismatchError
@@ -47,6 +47,24 @@ _FuncParams = ParamSpec("_FuncParams")
 _ReturnType = TypeVar("_ReturnType")
 
 EventHandler: TypeAlias = Callable[[TaskiqState], Awaitable[None] | None]
+
+
+def _pop_allowed_sources(labels: dict[str, Any]) -> tuple[Any, ...] | None:
+    """
+    Extract the trusted ``allowed_sources`` declaration from task keywords.
+
+    ``allowed_sources`` is not a regular label: it stays on the registered
+    task only and is never serialized into a message.
+
+    :param labels: keyword arguments passed to the task decorator.
+    :return: tuple of approved brokers or None.
+    """
+    allowed = labels.pop("allowed_sources", None)
+    if allowed is None:
+        return None
+    if isinstance(allowed, AsyncBroker):
+        return (allowed,)
+    return tuple(allowed)
 
 logger = getLogger("taskiq")
 
@@ -238,7 +256,9 @@ class AsyncBroker(ABC):
         """
 
     @abstractmethod
-    def listen(self) -> AsyncGenerator[bytes | AckableMessage, None]:
+    def listen(
+        self,
+    ) -> AsyncGenerator[bytes | AckableMessage | SourcedMessage, None]:
         """
         This function listens to new messages and yields them.
 
@@ -250,6 +270,11 @@ class AsyncBroker(ABC):
 
         If your messages was wrapped in AckableMessage dataclass,
         taskiq will call ack when finish processing message.
+
+        Brokers that merge several delivery channels should wrap each
+        delivery in ``SourcedMessage`` with the broker that produced it.
+        The receiver uses this trusted channel to bind the authorization
+        context of the task; it is never read from the message payload.
 
         :yield: incoming messages.
         :return: nothing.
@@ -296,11 +321,25 @@ class AsyncBroker(ABC):
         >>> def my_func():
         >>>     ...
 
+        Labels are sent over the wire and can be changed by middlewares.
+        Use the ``allowed_sources`` keyword to bind a task to the brokers
+        that are allowed to run it. It's never serialized and is checked
+        by the receiver against the broker that actually delivered the
+        message. Deliveries from other brokers are rejected before any
+        dependency is resolved.
+
+        >>> @task(allowed_sources=(internal_broker,))
+        >>> async def connect_to_database():
+        >>>     ...
+
         :param task_name: custom name of a task, defaults to decorated function's name.
         :param labels: some addition labels for task.
+        :param allowed_sources: brokers allowed to run this task. Defaults
+            to no restriction.
 
         :returns: decorator function or AsyncTaskiqDecoratedTask.
         """
+        allowed_sources = _pop_allowed_sources(labels)
 
         def make_decorated_task(
             inner_labels: dict[str, str | int],
@@ -339,6 +378,7 @@ class AsyncBroker(ABC):
                         labels=inner_labels,
                         task_name=inner_task_name,
                         return_type=return_type,  # type: ignore
+                        allowed_sources=allowed_sources,
                     ),
                 )
 

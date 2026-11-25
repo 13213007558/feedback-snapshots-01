@@ -18,10 +18,22 @@ from taskiq_dependencies import DependencyGraph
 
 from taskiq.abc.broker import AckableMessage, AsyncBroker
 from taskiq.abc.middleware import TaskiqMiddleware
-from taskiq.acks import AckController, AcknowledgeType, parse_acknowledge_type
+from taskiq.acks import (
+    AckController,
+    AcknowledgeType,
+    BrokerDelivery,
+    SourcedMessage,
+    parse_acknowledge_type,
+)
 from taskiq.context import Context
-from taskiq.exceptions import NoResultError
+from taskiq.decor import AsyncTaskiqDecoratedTask
+from taskiq.exceptions import NoResultError, SourceNotAuthorizedError
 from taskiq.message import TaskiqMessage
+from taskiq.receive_context import (
+    ReceiveContext,
+    get_receive_context,
+    use_receive_context,
+)
 from taskiq.receiver.params_parser import parse_params
 from taskiq.result import TaskiqResult
 from taskiq.state import TaskiqState
@@ -41,7 +53,7 @@ class _QueueSignal(Enum):
 class _PrefetchedMessage:
     """A delivery and its admission-capacity ownership."""
 
-    data: bytes | AckableMessage
+    data: BrokerDelivery
     owns_delivery_slot: bool
 
 
@@ -49,8 +61,8 @@ class _PrefetchedMessage:
 class _PrefetchState:
     """State owned by one broker listener."""
 
-    iterator: AsyncGenerator[bytes | AckableMessage, None]
-    current_message: asyncio.Task[bytes | AckableMessage] | None = None
+    iterator: AsyncGenerator[BrokerDelivery, None]
+    current_message: asyncio.Task[BrokerDelivery] | None = None
     owns_delivery_slot: bool = False
 
 
@@ -138,9 +150,9 @@ class Receiver:
         self.sem_prefetch = asyncio.Semaphore(delivery_capacity)
         self.is_process_pool = isinstance(executor, ProcessPoolExecutor)
 
-    async def callback(  # noqa: C901, PLR0912
+    async def callback(
         self,
-        message: bytes | AckableMessage,
+        message: BrokerDelivery,
         raise_err: bool = False,
     ) -> None:
         """
@@ -149,12 +161,25 @@ class Receiver:
         This method is used to process message,
         that came from brokers.
 
+        The delivery channel is resolved before deserialization: brokers
+        that merge several sources wrap deliveries in ``SourcedMessage``,
+        otherwise the receiving broker itself is the source. The resulting
+        ``ReceiveContext`` is bound to the task execution context before
+        middlewares run and before dependencies are resolved, so
+        authorization decisions can rely on the channel that actually
+        delivered the message, not on message labels.
+
         :raises Exception: if raise_err is true,
             and exception were found while saving result.
         :param message: received message.
         :param raise_err: raise an error if cannot save result in
             result_backend.
         """
+        source: AsyncBroker = self.broker
+        if isinstance(message, SourcedMessage):
+            if message.source is not None:
+                source = message.source
+            message = message.message
         ack_controller = AckController(
             message.ack if isinstance(message, AckableMessage) else None,
         )
@@ -173,6 +198,34 @@ class Receiver:
                 await ack_controller.ack()
             return
         logger.debug("Received message: %s", taskiq_msg)
+        receive_context = ReceiveContext(
+            broker=self.broker,
+            source=source,
+            task_name=taskiq_msg.task_name,
+            task_id=taskiq_msg.task_id,
+        )
+        with use_receive_context(receive_context):
+            await self._process_message(
+                taskiq_msg,
+                ack_controller,
+                raise_err=raise_err,
+            )
+
+    async def _process_message(  # noqa: C901, PLR0912
+        self,
+        taskiq_msg: TaskiqMessage,
+        ack_controller: AckController,
+        raise_err: bool = False,
+    ) -> None:
+        """
+        Authorize and run one already parsed message.
+
+        The caller must have bound the receive context of this delivery.
+
+        :param taskiq_msg: parsed incoming message.
+        :param ack_controller: acknowledgement controller for the delivery.
+        :param raise_err: re-raise result backend errors.
+        """
         task = self.broker.find_task(taskiq_msg.task_name)
         if task is None:
             logger.warning(
@@ -181,6 +234,10 @@ class Receiver:
             )
             if ack_controller.is_ackable:
                 await ack_controller.ack()
+            return
+        rejection = self._get_rejection(task)
+        if rejection is not None:
+            await self._reject_message(taskiq_msg, rejection, ack_controller, raise_err)
             return
         logger.debug(
             "Function for task %s is resolved. Executing...",
@@ -249,14 +306,113 @@ class Receiver:
                 f"Invalid ack_type label {ack_type!r} for task {message.task_name}.",
             ) from exc
 
-    async def run_task(  # noqa: C901, PLR0912, PLR0915
+    def _get_rejection(
+        self,
+        task: AsyncTaskiqDecoratedTask[Any, Any],
+    ) -> SourceNotAuthorizedError | None:
+        """
+        Check the trusted delivery source against the task declaration.
+
+        The check uses the receive context bound by the receiver from the
+        actual delivery channel. Message labels and arguments are never
+        consulted, so senders and middlewares cannot grant access.
+
+        :param task: resolved task definition.
+        :return: rejection error or None when the delivery is allowed.
+        """
+        receive_context = get_receive_context()
+        allowed_sources = getattr(task, "allowed_sources", None)
+        if receive_context is None or allowed_sources is None:
+            return None
+        # `matches` accepts both the broker that accepted the delivery and
+        # the inner channel that produced it, so a task can be bound to a
+        # composite broker or to one specific inner broker.
+        if receive_context.matches(*allowed_sources):
+            return None
+        logger.warning(
+            "Task %s was rejected: delivery source is not authorized.",
+            task.task_name,
+        )
+        return SourceNotAuthorizedError(task_name=task.task_name)
+
+    async def _reject_message(
+        self,
+        message: TaskiqMessage,
+        error: SourceNotAuthorizedError,
+        ack_controller: AckController,
+        raise_err: bool,
+    ) -> None:
+        """
+        Store a rejection result without executing the task.
+
+        No middleware runs and no dependency is resolved, so a rejected
+        delivery cannot open resources or trigger retries. The result is
+        saved and the delivery is acknowledged, leaving only the explicit
+        rejection outcome.
+
+        :param message: rejected message.
+        :param error: rejection reason.
+        :param ack_controller: acknowledgement controller of the delivery.
+        :param raise_err: re-raise result backend errors.
+        """
+        result: TaskiqResult[Any] = TaskiqResult(
+            is_err=True,
+            log=None,
+            return_value=None,
+            execution_time=0.0,
+            error=error,
+            labels=message.labels,
+        )
+        try:
+            await self.broker.result_backend.set_result(message.task_id, result)
+        except Exception as exc:
+            logger.exception("Can't set rejection result in result backend.")
+            if raise_err:
+                raise exc
+        if ack_controller.is_ackable:
+            await ack_controller.ack()
+
+    async def run_task(
         self,
         target: Callable[..., Any],
         message: TaskiqMessage,
         ack_controller: AckController | None = None,
     ) -> TaskiqResult[Any]:
         """
-        This function actually executes functions.
+        Execute a task with a trusted receive context.
+
+        When called from :meth:`callback` the delivery channel is already
+        bound. Direct calls (for example from custom listeners) bind the
+        receiving broker itself as the source, so dependencies always see
+        an immutable context that matches the broker that accepted the
+        message.
+
+        :param target: function to execute.
+        :param message: received message.
+        :param ack_controller: acknowledgement controller for the delivery.
+        :return: result of execution.
+        """
+        if get_receive_context() is not None:
+            return await self._execute_task(target, message, ack_controller)
+        receive_context = ReceiveContext(
+            broker=self.broker,
+            source=self.broker,
+            task_name=message.task_name,
+            task_id=message.task_id,
+        )
+        with use_receive_context(receive_context):
+            return await self._execute_task(target, message, ack_controller)
+
+    async def _execute_task(  # noqa: C901, PLR0912, PLR0915
+        self,
+        target: Callable[..., Any],
+        message: TaskiqMessage,
+        ack_controller: AckController | None = None,
+    ) -> TaskiqResult[Any]:
+        """
+        Actually execute functions.
+
+        The trusted receive context must already be bound by the caller.
 
         It has all needed parameters in
         message.
@@ -277,12 +433,34 @@ class Receiver:
         returned = None
         found_exception: BaseException | None = None
         signature = None
-        if message.task_name not in self.known_tasks:
-            self._prepare_task(message.task_name, target)
+        # Use the task identity bound before middleware execution. A
+        # middleware may rewrite the message, but it cannot redirect the
+        # dependency graph or the authorization context to another task.
+        receive_context = get_receive_context()
+        task_name = (
+            receive_context.task_name if receive_context is not None
+            else message.task_name
+        )
+        # Defense in depth for direct calls that bypass callback: never
+        # resolve dependencies for a delivery whose source is not allowed.
+        task = self.broker.find_task(task_name)
+        if task is not None:
+            rejection = self._get_rejection(task)
+            if rejection is not None:
+                return TaskiqResult(
+                    is_err=True,
+                    log=None,
+                    return_value=None,
+                    execution_time=0.0,
+                    error=rejection,
+                    labels=message.labels,
+                )
+        if task_name not in self.known_tasks:
+            self._prepare_task(task_name, target)
         if self.validate_params:
-            signature = self.task_signatures.get(message.task_name)
-        dependency_graph = self.dependency_graphs.get(message.task_name)
-        parse_params(signature, self.task_hints.get(message.task_name) or {}, message)
+            signature = self.task_signatures.get(task_name)
+        dependency_graph = self.dependency_graphs.get(task_name)
+        parse_params(signature, self.task_hints.get(task_name) or {}, message)
 
         dep_ctx = None
         # Kwargs are defined in another variable,
@@ -290,14 +468,20 @@ class Receiver:
         # kwargs resolved by dependency injector.
         kwargs = {}
         if dependency_graph:
-            # Create a context for dependency resolving.
-            broker_ctx = self.broker.custom_dependency_context
-            broker_ctx.update(
+            # Build a per-execution context. The trusted receive context
+            # is added only to this mapping, so it can't leak into other
+            # deliveries or be replaced through the shared broker context.
+            execution_ctx = Context(message, self.broker, ack_controller)
+            self.broker.custom_dependency_context.update(
                 {
-                    Context: Context(message, self.broker, ack_controller),
+                    Context: execution_ctx,
                     TaskiqState: self.broker.state,
                 },
             )
+            broker_ctx = dict(self.broker.custom_dependency_context)
+            broker_ctx[Context] = execution_ctx
+            if receive_context is not None:
+                broker_ctx[ReceiveContext] = receive_context
             dep_ctx = dependency_graph.async_ctx(
                 broker_ctx,
                 self.broker.dependency_overrides or None,
@@ -515,7 +699,7 @@ class Receiver:
         state: _PrefetchState,
         finish_event: asyncio.Event,
         finish_waiter: asyncio.Task[bool],
-    ) -> bytes | AckableMessage | None:
+    ) -> BrokerDelivery | None:
         """Acquire capacity and wait for one delivery or the finish signal."""
         if not await self._acquire_delivery_slot(
             state,
@@ -597,7 +781,7 @@ class Receiver:
         state: _PrefetchState,
     ) -> _PrefetchedMessage | None:
         """Close the pending read and iterator, retaining their first error."""
-        late_message: bytes | AckableMessage | None = None
+        late_message: BrokerDelivery | None = None
         current_message = state.current_message
         state.current_message = None
         if current_message is not None:

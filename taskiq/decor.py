@@ -50,12 +50,18 @@ class AsyncTaskiqDecoratedTask(Generic[_FuncParams, _ReturnType]):
         original_func: Callable[_FuncParams, _ReturnType],
         labels: dict[str, Any],
         return_type: type[_ReturnType] | None = None,
+        allowed_sources: tuple[Any, ...] | None = None,
     ) -> None:
         self.broker = broker
         self.task_name = task_name
         self.original_func = original_func
         self.labels = labels
         self.return_type = return_type
+        # Trusted, receiver-side declaration of which brokers may run
+        # this task. It is kept outside `labels`, because labels travel
+        # over the wire and can be forged by senders or rewritten by
+        # middlewares. None means no restriction is declared.
+        self.allowed_sources = allowed_sources
 
         # This is a hack to make ProcessPoolExecutor work
         # with decorated functions.

@@ -96,6 +96,15 @@ class TaskRejectedError(TaskiqError):
     __template__ = "Task was rejected"
 
 
+class SourceNotAuthorizedError(TaskRejectedError):
+    """Delivery channel is not allowed to run the requested task."""
+
+    __template__ = (
+        "Task {task_name} was rejected: the delivery source is not authorized"
+    )
+    task_name: str
+
+
 class ScheduledTaskCancelledError(TaskiqError):
     """Scheduled task was cancelled and not sent to the queue."""
 

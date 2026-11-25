@@ -308,3 +308,8 @@ or puts it back to the queue.
 
 Also, with context you'll be able to get current message that was received by the broker
 or even an instance of a broker that received a message. This may be useful for lib developers.
+
+Workers can consume several delivery channels, and a task can require that
+it runs only for an approved channel. See
+[Trusted delivery source](./trusted-delivery-source.md) for `allowed_sources`,
+`ReceiveContext` and how the receiver decides before dependencies are resolved.

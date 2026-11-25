@@ -9,7 +9,7 @@ from taskiq.abc.formatter import TaskiqFormatter
 from taskiq.abc.middleware import TaskiqMiddleware
 from taskiq.abc.result_backend import AsyncResultBackend
 from taskiq.abc.schedule_source import ScheduleSource
-from taskiq.acks import AckableMessage, AcknowledgeType
+from taskiq.acks import AckableMessage, AcknowledgeType, SourcedMessage
 from taskiq.brokers.inmemory_broker import InMemoryBroker
 from taskiq.brokers.multi_broker import MultiBroker
 from taskiq.brokers.shared_broker import async_shared_broker
@@ -22,6 +22,7 @@ from taskiq.exceptions import (
     ResultIsReadyError,
     SecurityError,
     SendTaskError,
+    SourceNotAuthorizedError,
     TaskiqError,
     TaskiqResultTimeoutError,
 )
@@ -32,6 +33,7 @@ from taskiq.middlewares import (
     SimpleRetryMiddleware,
     SmartRetryMiddleware,
 )
+from taskiq.receive_context import ReceiveContext, get_receive_context
 from taskiq.result import TaskiqResult
 from taskiq.scheduler.scheduled_task import ScheduledTask
 from taskiq.scheduler.scheduler import TaskiqScheduler
@@ -53,6 +55,7 @@ __all__ = [
     "MultiBroker",
     "NoResultError",
     "PrometheusMiddleware",
+    "ReceiveContext",
     "ResultGetError",
     "ResultIsReadyError",
     "ScheduleSource",
@@ -61,6 +64,8 @@ __all__ = [
     "SendTaskError",
     "SimpleRetryMiddleware",
     "SmartRetryMiddleware",
+    "SourceNotAuthorizedError",
+    "SourcedMessage",
     "TaskiqDepends",
     "TaskiqError",
     "TaskiqEvents",
@@ -75,4 +80,5 @@ __all__ = [
     "__version__",
     "async_shared_broker",
     "gather",
+    "get_receive_context",
 ]

@@ -1,10 +1,14 @@
 import enum
 from collections.abc import Awaitable, Callable
-from typing import Any
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
 
 from taskiq.utils import maybe_awaitable
+
+if TYPE_CHECKING:  # pragma: no cover
+    from taskiq.abc.broker import AsyncBroker
 
 
 @enum.unique
@@ -55,6 +59,28 @@ class AckableMessage(BaseModel):
 
     data: bytes
     ack: Callable[[], Awaitable[None] | None]
+
+
+@dataclass(frozen=True, slots=True)
+class SourcedMessage:
+    """
+    A delivery together with the channel that produced it.
+
+    Brokers that merge multiple sources (for example ``MultiBroker``)
+    yield this wrapper, so the receiver can bind the actual delivery
+    channel to the task execution context. The source is a broker
+    instance and never comes from the serialized message, therefore it
+    can't be forged through labels or arguments.
+
+    :param message: raw delivery payload.
+    :param source: broker whose listener produced the message.
+    """
+
+    message: bytes | AckableMessage
+    source: "AsyncBroker | None" = None
+
+
+BrokerDelivery = bytes | AckableMessage | SourcedMessage
 
 
 class AckController:

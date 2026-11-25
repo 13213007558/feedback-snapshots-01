@@ -4,6 +4,7 @@ from taskiq.abc.broker import AsyncBroker
 from taskiq.acks import AckController
 from taskiq.exceptions import NoResultError, TaskRejectedError
 from taskiq.message import TaskiqMessage
+from taskiq.receive_context import ReceiveContext, get_receive_context
 
 if TYPE_CHECKING:  # pragma: no cover
     from taskiq.state import TaskiqState
@@ -23,6 +24,20 @@ class Context:
         self._ack_controller = ack_controller
         self.state: TaskiqState = None  # type: ignore
         self.state = broker.state
+
+    @property
+    def receive_context(self) -> ReceiveContext | None:
+        """
+        Trusted provenance of the current delivery.
+
+        The value is bound by the receiver from the channel that actually
+        delivered the message. It is not read from message labels, so it
+        cannot be forged by senders or replaced by middlewares. It is None
+        when the context runs outside an inbound delivery.
+
+        :return: receive context or None.
+        """
+        return get_receive_context()
 
     @property
     def is_ackable(self) -> bool:
