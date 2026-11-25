@@ -128,6 +128,7 @@ module Sidekiq
           busy: stats.workers_size,
           enqueued: stats.enqueued,
           retries: stats.retry_size,
+          rejected: stats.rejected_size,
           scheduled: stats.scheduled_size,
           dead: stats.dead_size
         }
@@ -159,8 +160,8 @@ module Sidekiq
 
       def render_stats_section(tui, frame, area)
         stats = @data[:stats]
-        keys = ["Processed", "Failed", "Busy", "Enqueued", "Retries", "Scheduled", "Dead"]
-        values = %i[processed failed busy enqueued retries scheduled dead].map { |k| number_with_delimiter(stats[k]) }
+        keys = ["Processed", "Failed", "Busy", "Enqueued", "Retries", "Rejected", "Scheduled", "Dead"]
+        values = %i[processed failed busy enqueued retries rejected scheduled dead].map { |k| number_with_delimiter(stats[k]) }
         render_kv_section(tui, frame, area, title: "Statistics", keys:, values:)
       end
 

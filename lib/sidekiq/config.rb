@@ -2,6 +2,7 @@
 
 require "forwardable"
 require "sidekiq/redis_connection"
+require "sidekiq/retry_policy"
 
 module Sidekiq
   # Sidekiq::Config represents the global configuration for an instance of Sidekiq.
@@ -73,6 +74,31 @@ module Sidekiq
     def_delegators :@options, :[], :[]=, :fetch, :key?, :has_key?, :merge!, :dig
     attr_reader :capsules
     attr_accessor :thread_priority
+
+    # The process-wide retry capability policy. Fallback approvals made here
+    # apply to every capsule in this process.
+    def retry_policy
+      @retry_policy ||= Sidekiq::RetryPolicy.new(self)
+    end
+
+    # Approve +queue+ as a retry fallback for jobs which may run with
+    # +capability+. Approvals are visible to every process sharing Redis.
+    #
+    #   Sidekiq.configure_server do |config|
+    #     config.approve_retry_fallback("low", capability: "billing")
+    #   end
+    def approve_retry_fallback(queue, capability:)
+      retry_policy.approve_fallback(queue, capability: capability)
+    end
+
+    def revoke_retry_fallback(queue, capability:)
+      retry_policy.revoke_fallback(queue, capability: capability)
+    end
+
+    # @return [Array<String>] queues approved for the given capability
+    def approved_retry_fallbacks(capability)
+      retry_policy.approved_fallbacks(capability)
+    end
 
     def inspect
       "#<#{self.class.name} @options=#{

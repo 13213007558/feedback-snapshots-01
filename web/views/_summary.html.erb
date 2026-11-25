@@ -26,6 +26,12 @@
     </a>
   </article>
   <article>
+    <a href="<%= root_path %>rejected">
+      <span id="txtRejected" class="count" data-nwp><%= stats.rejected_size %></span>
+      <span class="desc"><%= t('Rejected') %></span>
+    </a>
+  </article>
+  <article>
     <a href="<%= root_path %>scheduled">
       <span id="txtScheduled" class="count" data-nwp><%= stats.scheduled_size %></span>
       <span class="desc"><%= t('Scheduled') %></span>

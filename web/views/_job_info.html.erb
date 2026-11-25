@@ -101,6 +101,20 @@
             <td><%= relative_time(job.at) if job['retry_count'] %></td>
           </tr>
         <% end %>
+        <% if type == :rejected %>
+          <tr>
+            <th><%= t('RejectionReason') %></th>
+            <td><code><%= h job['rejection_reason'] %></code></td>
+          </tr>
+          <tr>
+            <th><%= t('RequiredCapability') %></th>
+            <td><code><%= h Array(job['required_capability']).join(", ") %></code></td>
+          </tr>
+          <tr>
+            <th><%= t('ActualCapability') %></th>
+            <td><code><%= h Array(job['actual_capability']).join(", ") %></code></td>
+          </tr>
+        <% end %>
         <% config.custom_job_info_rows&.each do |helper| %>
           <% helper.add_pair(job) do |name, value| %>
             <tr>

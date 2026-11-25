@@ -1,0 +1,65 @@
+<%= erb :_job_info, locals: { job: @rejected, type: :rejected } %>
+
+<section>
+  <header>
+    <h2><%= t('RejectionReason') %></h2>
+  </header>
+
+  <div class="table_container">
+    <table>
+      <tbody>
+        <tr>
+          <th><%= t('RejectionReason') %></th>
+          <td><code><%= h @rejected['rejection_reason'] %></code></td>
+        </tr>
+        <tr>
+          <th><%= t('RejectedByCapsule') %></th>
+          <td><code><%= h @rejected['rejected_by_capsule'] %></code></td>
+        </tr>
+        <tr>
+          <th><%= t('RejectedQueue') %></th>
+          <td><code><%= h @rejected['rejected_queue'] %></code></td>
+        </tr>
+        <tr>
+          <th><%= t('RejectedAt') %></th>
+          <td><%= relative_time(Time.at(@rejected.score).utc) %></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <header>
+    <h2><%= t('Error') %></h2>
+  </header>
+
+  <div class="table_container">
+    <table>
+      <tbody>
+        <tr>
+          <th><%= t('ErrorClass') %></th>
+          <td><code><%= h @rejected['error_class'] %></code></td>
+        </tr>
+        <tr>
+          <th><%= t('ErrorMessage') %></th>
+          <td><%= h(@rejected['error_message']) %></td>
+        </tr>
+        <% if @rejected.error_backtrace %>
+          <tr>
+            <th><%= t('ErrorBacktrace') %></th>
+            <td><code><%= @rejected.error_backtrace.join("<br/>") %></code></td>
+          </tr>
+        <% end %>
+      </tbody>
+    </table>
+  </div>
+
+  <form action="<%= root_path %>rejected/<%= job_params(@rejected, @rejected.score) %>" method="post">
+    <%= csrf_tag %>
+    <a class="btn btn-default" href="<%= root_path %>rejected"><%= t('GoBack') %></a>
+    <input class="btn btn-primary" type="submit" name="retry" value="<%= t('RetryNow') %>">
+    <input class="btn btn-danger" type="submit" name="delete" value="<%= t('Delete') %>">
+    <input class="btn btn-danger" type="submit" name="kill" value="<%= t('Kill') %>">
+  </form>
+</section>

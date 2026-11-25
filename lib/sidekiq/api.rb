@@ -72,6 +72,11 @@ module Sidekiq
       stat :dead_size
     end
 
+    # Number of retries retained because they could not be safely delivered.
+    def rejected_size
+      stat :rejected_size
+    end
+
     def enqueued
       stat :enqueued
     end
@@ -149,12 +154,13 @@ module Sidekiq
           pipeline.zcard("schedule")
           pipeline.zcard("retry")
           pipeline.zcard("dead")
+          pipeline.zcard("rejected")
           pipeline.scard("processes")
           pipeline.lindex("queue:default", -1)
         end
       }
 
-      default_queue_latency = if (entry = pipe1_res[6])
+      default_queue_latency = if (entry = pipe1_res[7])
         job = begin
           Sidekiq.load_json(entry)
         rescue
@@ -172,7 +178,8 @@ module Sidekiq
         scheduled_size: pipe1_res[2],
         retry_size: pipe1_res[3],
         dead_size: pipe1_res[4],
-        processes_size: pipe1_res[5],
+        rejected_size: pipe1_res[5],
+        processes_size: pipe1_res[6],
 
         default_queue_latency: default_queue_latency
       }
@@ -645,6 +652,7 @@ module Sidekiq
       remove_job do |message|
         msg = Sidekiq.load_json(message)
         msg["retry_count"] -= 1 if msg["retry_count"]
+        Sidekiq::RetryPolicy.clear_rejection!(msg) if parent.is_a?(RejectedSet)
         Sidekiq::Client.push(msg)
       end
     end
@@ -745,10 +753,12 @@ module Sidekiq
 
     def retry_all
       c = Sidekiq::Client.new
+      rejected = is_a?(RejectedSet)
       pop_each do |msg, _|
         job = Sidekiq.load_json(msg)
         # Manual retries should not count against the retry limit.
         job["retry_count"] -= 1 if job["retry_count"]
+        Sidekiq::RetryPolicy.clear_rejection!(job) if rejected
         c.push(job)
       end
     end
@@ -922,6 +932,22 @@ module Sidekiq
   class RetrySet < JobSet
     def initialize
       super("retry")
+    end
+  end
+
+  ##
+  # Retries which were not delivered because the target queue or capsule could
+  # not safely execute them with the capability recorded when the job first
+  # failed. The original failure fields are preserved; the rejection fields
+  # (rejection_reason, required_capability, actual_capability) explain why the
+  # retry was retained.
+  #
+  #   Sidekiq::RejectedSet.new.each do |entry|
+  #     puts entry["rejection_reason"], entry["error_class"], entry["error_message"]
+  #   end
+  class RejectedSet < JobSet
+    def initialize
+      super("rejected")
     end
   end
 

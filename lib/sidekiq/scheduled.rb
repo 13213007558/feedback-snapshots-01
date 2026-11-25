@@ -36,7 +36,24 @@ module Sidekiq
             # going wrong between the time jobs are popped from the scheduled queue and when
             # they are pushed onto a work queue and losing the jobs.
             while !@done && (job = zpopbyscore(conn, keys: [sorted_set], argv: [Time.now.to_f.to_s]))
-              @client.push(Sidekiq.load_json(job))
+              if sorted_set == "retry"
+                message = Sidekiq.load_json(job)
+
+                # A retry is only redelivered if the queue it targets is still
+                # safe for the capability recorded when it first failed.
+                # Recheck at delivery time: approvals can be granted or revoked
+                # and a capsule's capabilities can change during the backoff
+                # window.
+                if (rejection = retry_rejection(message))
+                  retain_rejected_retry(message, rejection)
+                  logger.debug { "rejected retry #{message["jid"]}: #{rejection.reason}" }
+                  next
+                end
+
+                @client.push(message)
+              else
+                @client.push(Sidekiq.load_json(job))
+              end
               logger.debug { "enqueued #{sorted_set}: #{job}" }
             end
           end
@@ -48,6 +65,32 @@ module Sidekiq
       end
 
       private
+
+      def retry_rejection(message)
+        @config.retry_policy.authorize_delivery(message, @config)
+      end
+
+      # Move a retry which failed its delivery check into the "rejected"
+      # sorted set, preserving every original failure field so operators can
+      # inspect what was refused and why.
+      def retain_rejected_retry(message, rejection)
+        now = Time.now.to_f
+        record = @config.retry_policy.rejection_record(message, rejection, rejected_at: now)
+        payload = Sidekiq.dump_json(record)
+
+        redis do |conn|
+          conn.multi do |transaction|
+            transaction.zadd("rejected", now.to_s, payload)
+            transaction.zremrangebyscore("rejected", "-inf", now - @config[:dead_timeout_in_seconds])
+            transaction.zremrangebyrank("rejected", 0, - @config[:dead_max_jobs])
+          end
+        end
+      rescue => ex
+        # If retention fails we must not lose the job: put it back where the
+        # poller found it so the next pass can try again.
+        logger.warn("Failed to retain rejected retry #{message["jid"]}: #{ex.message}")
+        redis { |conn| conn.zadd("retry", Time.now.to_f.to_s, Sidekiq.dump_json(message)) }
+      end
 
       def zpopbyscore(conn, keys: nil, argv: nil)
         if @lua_zpopbyscore_sha.nil?

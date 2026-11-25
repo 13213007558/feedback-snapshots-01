@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "sidekiq/component"
+require "sidekiq/retry_policy"
 
 module Sidekiq
   # A Sidekiq::Capsule is the set of resources necessary to
@@ -27,6 +28,16 @@ module Sidekiq
     attr_reader :mode
     attr_reader :weights
 
+    # The execution capability this capsule grants to the jobs it runs.
+    # Jobs record the capability of the capsule which first ran them and
+    # retries are only delivered to a capsule with an equivalent capability.
+    #
+    #   config.capsule("billing") do |cap|
+    #     cap.capability = "billing"
+    #     cap.queues = %w[billing]
+    #   end
+    attr_accessor :capability
+
     def_delegators :@config, :[], :[]=, :fetch, :key?, :has_key?, :merge!, :dig, :thread_priority
 
     def initialize(name, config)
@@ -36,10 +47,23 @@ module Sidekiq
       @weights = {"default" => 0}
       @concurrency = config[:concurrency]
       @mode = :strict
+      @capability = nil
+    end
+
+    # The normalized capability, e.g. ["billing"]. nil means unclassified.
+    def capabilities
+      Sidekiq::RetryPolicy.normalize_capability(@capability)
+    end
+
+    def retry_policy
+      @config.retry_policy
     end
 
     def to_h
-      {concurrency: concurrency, mode: mode, weights: weights}
+      hash = {concurrency: concurrency, mode: mode, weights: weights}
+      caps = capabilities
+      hash[:capability] = caps if caps
+      hash
     end
 
     def fetcher

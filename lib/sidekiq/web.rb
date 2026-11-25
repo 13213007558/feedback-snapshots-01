@@ -21,6 +21,7 @@ module Sidekiq
       "Busy" => "busy",
       "Queues" => "queues",
       "Retries" => "retries",
+      "Rejected" => "rejected",
       "Scheduled" => "scheduled",
       "Dead" => "morgue",
       "Metrics" => "metrics",

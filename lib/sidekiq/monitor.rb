@@ -41,6 +41,7 @@ class Sidekiq::Monitor
       puts "       Busy: #{delimit stats.workers_size}"
       puts "   Enqueued: #{delimit stats.enqueued}"
       puts "    Retries: #{delimit stats.retry_size}"
+      puts "   Rejected: #{delimit stats.rejected_size}" if stats.respond_to?(:rejected_size)
       puts "  Scheduled: #{delimit stats.scheduled_size}"
       puts "       Dead: #{delimit stats.dead_size}"
     end

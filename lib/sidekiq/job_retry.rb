@@ -2,6 +2,7 @@
 
 require "zlib"
 require "sidekiq/component"
+require "sidekiq/retry_policy"
 
 module Sidekiq
   ##
@@ -35,6 +36,9 @@ module Sidekiq
   #
   #  * 'queue' - the queue for the initial job
   #  * 'retry_queue' - if job retries should be pushed to a different (e.g. lower priority) queue
+  #  * 'capability' - the execution capability of the capsule which first ran the job.
+  #      A retry is only delivered to an equivalent capsule (and, when routed to
+  #      another queue, only to a queue approved for that capability).
   #  * 'retry_count' - number of times we've retried so far.
   #  * 'error_message' - the message from the exception
   #  * 'error_class' - the exception class
@@ -149,6 +153,13 @@ module Sidekiq
     def process_retry(jobinst, msg, queue, exception)
       max_retry_attempts = retry_attempts_from(msg["retry"], @max_retries)
 
+      # Capture the capability of the capsule which is executing this attempt
+      # before the retry is stored. The retry payload keeps the *original*
+      # queue and capability: the delivery side compares them with the actual
+      # capsule and queue at retry time so a route change during the backoff
+      # window cannot silently widen the job's authority.
+      record_execution_capability(msg, queue)
+
       msg["queue"] = (msg["retry_queue"] || queue)
 
       m = exception_message(exception)
@@ -212,6 +223,37 @@ module Sidekiq
         Time.at(item)
       else
         Time.at(item / 1000, item % 1000, :millisecond)
+      end
+    end
+
+    # Record the capability under which this job first executed. Only the
+    # capsule which actually holds the work may set it: an existing value is
+    # never overwritten by a later, wider execution environment.
+    #
+    # The first failure is the one with no `failed_at` (Sidekiq adds that field
+    # immediately afterwards). At that point the executing capsule is
+    # authoritative keyed on the queue the job was actually fetched from, so a
+    # client-supplied "capability"/"origin_queue" is discarded. Later failures
+    # keep both fields as recorded by the previous attempt.
+    def record_execution_capability(msg, queue)
+      caps = Sidekiq::RetryPolicy.normalize_capability(@config.capability) if @config.respond_to?(:capability)
+      # @config may be a Config (tests and legacy callers) rather than a Capsule.
+      caps ||= Sidekiq::RetryPolicy.normalize_capability(@config[:capability]) if @config.respond_to?(:[])
+
+      if msg["failed_at"].nil?
+        if caps
+          msg["capability"] = caps.join(",")
+          msg["origin_queue"] = queue.to_s
+        else
+          # Unclassified capsule: leave the job unclassified rather than
+          # trusting an unverified client-supplied value.
+          msg.delete("capability")
+          msg.delete("origin_queue")
+        end
+      elsif msg["capability"].nil? && caps
+        # A retry queued before this feature existed: adopt the capsule which
+        # is executing it now. We cannot know the original capability.
+        msg["capability"] = caps.join(",")
       end
     end
 

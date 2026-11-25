@@ -286,6 +286,64 @@ module Sidekiq
         redirect_with_query("#{root_path}retries")
       end
 
+      get "/rejected" do
+        x = url_params("substr")
+
+        if x && x != ""
+          @rejected = search(Sidekiq::RejectedSet.new, x)
+        else
+          @count = url_count
+          (@current_page, @total_size, @rejected) = page("rejected", url_params("page"), @count)
+          @rejected = @rejected.map { |msg, score| Sidekiq::SortedEntry.new(nil, score, msg) }
+        end
+
+        erb(:rejected)
+      end
+
+      get "/rejected/:key" do
+        @rejected = Sidekiq::RejectedSet.new.fetch(*parse_key(route_params(:key))).first
+
+        if @rejected.nil?
+          redirect "#{root_path}rejected"
+        else
+          erb(:rejected_job)
+        end
+      end
+
+      post "/rejected" do
+        redirect(request.path) unless url_params("key")
+
+        url_params("key").each do |key|
+          job = Sidekiq::RejectedSet.new.fetch(*parse_key(key)).first
+          retry_or_delete_or_kill job, request.params if job
+        end
+
+        redirect_with_query("#{root_path}rejected")
+      end
+
+      post "/rejected/all/delete" do
+        Sidekiq::RejectedSet.new.clear
+        redirect "#{root_path}rejected"
+      end
+
+      post "/rejected/all/retry" do
+        Sidekiq::RejectedSet.new.retry_all
+        redirect "#{root_path}rejected"
+      end
+
+      post "/rejected/all/kill" do
+        Sidekiq::RejectedSet.new.kill_all
+        redirect "#{root_path}rejected"
+      end
+
+      post "/rejected/:key" do
+        job = Sidekiq::RejectedSet.new.fetch(*parse_key(route_params(:key))).first
+
+        retry_or_delete_or_kill job, request.params if job
+
+        redirect_with_query("#{root_path}rejected")
+      end
+
       get "/scheduled" do
         x = url_params("substr")
 
@@ -359,6 +417,7 @@ module Sidekiq
             enqueued: sidekiq_stats.enqueued,
             scheduled: sidekiq_stats.scheduled_size,
             retries: sidekiq_stats.retry_size,
+            rejected: sidekiq_stats.rejected_size,
             dead: sidekiq_stats.dead_size,
             default_latency: sidekiq_stats.default_queue_latency
           },

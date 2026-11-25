@@ -188,12 +188,17 @@ module Sidekiq
       ack = false
       Thread.handle_interrupt(IGNORE_SHUTDOWN_INTERRUPTS) do
         Thread.handle_interrupt(ALLOW_SHUTDOWN_INTERRUPTS) do
-          dispatch(job_hash, queue, jobstr) do |instance|
-            config.server_middleware.invoke(instance, job_hash, queue) do
-              execute_job(instance, job_hash["args"])
+          if (rejection = retry_rejection(job_hash, queue))
+            retain_rejected_retry(jobstr, rejection)
+            ack = true
+          else
+            dispatch(job_hash, queue, jobstr) do |instance|
+              config.server_middleware.invoke(instance, job_hash, queue) do
+                execute_job(instance, job_hash["args"])
+              end
             end
+            ack = true
           end
-          ack = true
         rescue Sidekiq::Shutdown
           # Had to force kill this job because it didn't finish
           # within the timeout.  Don't acknowledge the work since
@@ -226,6 +231,39 @@ module Sidekiq
 
     def execute_job(instance, cloned_args)
       instance.perform(*cloned_args)
+    end
+
+    # A retry may have been enqueued while its route was approved and then
+    # delivered after the target capsule was widened (or the approval was
+    # revoked). Recheck the recorded capability against this capsule at the
+    # moment of execution: the capsule which actually runs the job is the
+    # authority, not the client or poller which queued it.
+    #
+    # Only payloads which carry the retry fingerprint (origin_queue, written
+    # alongside capability on the first failure) are checked. A client-supplied
+    # "capability" on a first push is never trusted.
+    def retry_rejection(job_hash, queue)
+      return nil unless @capsule.retry_policy.retry_payload?(job_hash)
+
+      @capsule.retry_policy.authorize(job_hash, capsule: @capsule, queue: queue)
+    end
+
+    def retain_rejected_retry(jobstr, rejection)
+      now = Time.now.to_f
+      record = Sidekiq.load_json(jobstr)
+      record = @capsule.retry_policy.rejection_record(record, rejection, rejected_at: now, queue: record["queue"])
+      record["rejected_by"] = @capsule.name.to_s
+      payload = Sidekiq.dump_json(record)
+
+      redis do |conn|
+        conn.multi do |transaction|
+          transaction.zadd("rejected", now.to_s, payload)
+          transaction.zremrangebyscore("rejected", "-inf", now - @config[:dead_timeout_in_seconds])
+          transaction.zremrangebyrank("rejected", 0, - @config[:dead_max_jobs])
+        end
+      end
+      logger.info { "Retry rejected #{record["class"]} job #{record["jid"]}: #{rejection.reason}" }
+      true
     end
 
     # Ruby doesn't provide atomic counters out of the box so we'll

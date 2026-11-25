@@ -8,6 +8,7 @@
   - [Sidekiq::Config](#sidekiqconfig)
   - [Sidekiq::Capsule](#sidekiqcapsule)
   - [Use Cases](#use-cases)
+  - [Retry Capability Continuity](#retry-capability-continuity)
   - [Redis Pools](#redis-pools)
   - [Sidekiq::Component](#sidekiqcomponent)
 <!--toc:end-->
@@ -86,6 +87,60 @@ end
 ```
 
 The contents of `config/sidekiq.yml` configure the default capsule.
+
+## Retry Capability Continuity
+
+A job which uses `retry_queue` is routed to another queue when it fails. That
+route must not silently change the authority the job runs with: a worker
+processing a "low priority" retry queue might be configured with much wider
+permissions than the worker which first ran the job.
+
+Each capsule can declare an execution `capability`:
+
+```ruby
+Sidekiq.configure_server do |config|
+  config.capsule("billing") do |capsule|
+    capsule.capability = "billing"
+    capsule.queues = %w(billing)
+  end
+
+  config.capsule("billing-backup") do |capsule|
+    capsule.capability = "billing"
+    capsule.queues = %w(billing-backup)
+  end
+end
+```
+
+When a job fails, Sidekiq records the capability of the capsule which actually
+ran it in the retry payload (`capability`) along with the queue it was fetched
+from (`origin_queue`). When the retry is delivered, Sidekiq re-checks:
+
+1. the capsule about to execute the retry has an **equivalent** capability
+   (neither wider nor narrower), and
+2. the retry is on its `origin_queue`, or the operator has approved the target
+   queue as a fallback for that capability.
+
+Approvals are explicit, evaluated at delivery time, and visible to every
+process through Redis:
+
+```ruby
+Sidekiq.configure_server do |config|
+  config.approve_retry_fallback("billing-backup", capability: "billing")
+  # config.revoke_retry_fallback("billing-backup", capability: "billing")
+end
+```
+
+Because the check happens when the retry is delivered and again when the
+processor is about to execute it, widening a capsule (or revoking an approval)
+during the backoff window causes the retry to be rejected rather than run with
+more authority. Rejected retries are retained in the `rejected` sorted set with
+their original failure fields (`error_class`, `error_message`, `failed_at`,
+`retry_count`, ...) plus the reason (`rejection_reason`,
+`required_capability`, `actual_capability`). Inspect them with
+`Sidekiq::RejectedSet` or the "Rejected" tab in the Web UI.
+
+Jobs pushed without a capability (legacy payloads and deployments which do not
+use capsules) are unaffected.
 
 ## Redis Pools
 

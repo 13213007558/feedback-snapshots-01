@@ -66,6 +66,15 @@ en:
   Quiet: Quiet
   QuietAll: Quiet All
   Realtime: Real-time
+  Rejected: Rejected
+  RejectedAt: Rejected At
+  RejectedRetries: Rejected Retries
+  RejectedByCapsule: Rejected By Capsule
+  RejectedQueue: Target Queue
+  RejectionReason: Rejection Reason
+  RequiredCapability: Required Capability
+  ActualCapability: Actual Capability
+  NoRejectedRetriesFound: No rejected retries were found
   Retries: Retries
   RetryAll: Retry All
   RetryCount: Retry Count
