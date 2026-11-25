@@ -23,7 +23,11 @@ from tempfile import TemporaryDirectory
 
 import pytest
 
-from joblib._store_backends import FileSystemStoreBackend, StoreBackendBase
+from joblib._store_backends import (
+    FileSystemStoreBackend,
+    StoreBackendBase,
+    UnreachableLimitWarning,
+)
 from joblib.hashing import hash
 from joblib.memory import (
     _FUNCTION_HASHES,
@@ -1183,6 +1187,92 @@ def test_memory_clear(tmpdir):
 
     # Check that the cache for functions hash is also reset.
     assert not g._check_previous_func_code(stacklevel=4)
+
+
+def test_memorized_func_retain_and_release(tmpdir):
+    memory, _, cached = _setup_toy_cache(tmpdir)
+
+    # Retaining a non-cached result is rejected.
+    with raises(KeyError):
+        cached.retain(1000)
+
+    cached.retain(0)
+    cached.retain(1)
+    retained = {
+        item.path
+        for item in memory.store_backend.get_items()
+        if item.retained
+    }
+    assert len(retained) == 2
+
+    # reduce_size reclaims everything but the retained audit evidence.
+    with warns(UnreachableLimitWarning):
+        memory.reduce_size(items_limit=0)
+    surviving = {item.path for item in memory.store_backend.get_items()}
+    assert surviving == retained
+
+    # Once released, the evidence becomes reclaimable again.
+    cached.release(0)
+    cached.release(1)
+    memory.reduce_size(items_limit=0)
+    assert memory.store_backend.get_items() == []
+
+
+def test_memorized_result_retain(tmpdir):
+    memory = Memory(location=tmpdir.strpath, verbose=0)
+
+    @memory.cache()
+    def get_value(arg):
+        return arg * 2
+
+    result = get_value.call_and_shelve(21)
+    result.retain()
+
+    items = memory.store_backend.get_items()
+    assert len(items) == 1
+    assert items[0].retained
+
+    # The retained value is still readable and survives a reduction.
+    assert result.get() == 42
+    with warns(UnreachableLimitWarning):
+        memory.reduce_size(items_limit=0)
+    assert result.get() == 42
+
+    result.release()
+    memory.reduce_size(items_limit=0)
+    assert memory.store_backend.get_items() == []
+
+
+def test_reduced_size_feedback_when_retained_blocks_limit(tmpdir):
+    memory, _, cached = _setup_toy_cache(tmpdir)
+    cached.retain(0)
+    cached.retain(1)
+
+    with warns(UnreachableLimitWarning, match="audit evidence"):
+        stats = memory.store_backend.enforce_store_limits(bytes_limit=10)
+
+    # Reclaimable items are gone but the retained evidence keeps the cache
+    # over the requested capacity.
+    assert stats["limit_reached"] is False
+    assert stats["final_items"] == 2
+    assert all(item.retained for item in memory.store_backend.get_items())
+
+
+def test_reduce_size_no_warning_when_limit_met_with_retention(tmpdir):
+    memory, _, cached = _setup_toy_cache(tmpdir)
+    cached.retain(0)
+
+    import warnings
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        stats = memory.store_backend.enforce_store_limits(items_limit=1)
+
+    assert not any(
+        issubclass(w.category, UnreachableLimitWarning) for w in caught
+    )
+    assert stats["limit_reached"] is True
+    assert stats["final_items"] == 1
 
 
 def fast_func_with_complex_output():

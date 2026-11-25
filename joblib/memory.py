@@ -254,6 +254,14 @@ class MemorizedResult(Logger):
         """Clear value from cache"""
         self.store_backend.clear_item(self._call_id)
 
+    def retain(self):
+        """Mark this cached result as audit evidence to keep."""
+        self.store_backend.retain_item(self._call_id)
+
+    def release(self):
+        """Reverse :meth:`retain` on this cached result."""
+        self.store_backend.release_item(self._call_id)
+
     def __repr__(self):
         return "{}(location={!r}, call_id={!r})".format(
             self.__class__.__name__, self.store_backend.location, self._call_id
@@ -286,6 +294,13 @@ class NotMemorizedResult(object):
     def clear(self):
         self.valid = False
         self.value = None
+
+    def retain(self):
+        # No cache is activated, retaining is a no-op.
+        pass
+
+    def release(self):
+        pass
 
     def __repr__(self):
         if self.valid:
@@ -341,6 +356,13 @@ class NotMemorizedFunc(object):
 
     def check_call_in_cache(self, *args, **kwargs):
         return False
+
+    def retain(self, *args, **kwargs):
+        # No cache is activated, retaining is a no-op.
+        pass
+
+    def release(self, *args, **kwargs):
+        pass
 
 
 ###############################################################################
@@ -648,6 +670,26 @@ class MemorizedFunc(Logger):
         """
         call_id = (self.func_id, self._get_args_id(*args, **kwargs))
         return self._is_in_cache_and_valid(call_id)
+
+    def retain(self, *args, **kwargs):
+        """Mark the cached result of a call as audit evidence to keep.
+
+        Retained results are never removed by ``Memory.reduce_size``, even
+        when the cache is over its byte, item or age limit. A result has to
+        be cached before it can be retained.
+        """
+        call_id = (self.func_id, self._get_args_id(*args, **kwargs))
+        if not self.store_backend.contains_item(call_id):
+            raise KeyError(
+                "Cannot retain a result that is not cached. Call the "
+                "memorized function first to compute and cache its output."
+            )
+        self.store_backend.retain_item(call_id)
+
+    def release(self, *args, **kwargs):
+        """Reverse :meth:`retain` for the cached result of a call."""
+        call_id = (self.func_id, self._get_args_id(*args, **kwargs))
+        self.store_backend.release_item(call_id)
 
     # ------------------------------------------------------------------------
     # Private interface

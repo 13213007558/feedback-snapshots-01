@@ -20,11 +20,28 @@ from .backports import concurrency_safe_rename
 from .disk import memstr_to_bytes, mkdirp, rm_subdirs
 from .logger import format_time
 
-CacheItemInfo = collections.namedtuple("CacheItemInfo", "path size last_access")
+CacheItemInfo = collections.namedtuple(
+    "CacheItemInfo", "path size last_access retained stat"
+)
+
+# Name of the marker file dropped inside a cache item directory to flag it as
+# audit evidence that must survive cache size reduction.
+RETAINED_MARKER_FILENAME = ".joblib-retained"
 
 
 class CacheWarning(Warning):
     """Warning to capture dump failures except for PicklingError."""
+
+    pass
+
+
+class UnreachableLimitWarning(CacheWarning):
+    """Warning issued when cache limits cannot be met.
+
+    This happens when retained items (audit evidence) alone already exceed the
+    requested byte or item limit, so the cache is still over the limit once
+    every reclaimable item has been removed.
+    """
 
     pass
 
@@ -130,6 +147,17 @@ class StoreBackendBase(metaclass=ABCMeta):
         filesystem).
         """
 
+    def retain_item(self, call_id):
+        """Mark an item as audit evidence so it is never reclaimed.
+
+        Retained items are kept by ``enforce_store_limits`` even when the
+        cache is over its byte, item or age limit. Concrete backends that do
+        not override this method simply ignore retention requests.
+        """
+
+    def release_item(self, call_id):
+        """Remove the audit-evidence marker put by ``retain_item``."""
+
     @abstractmethod
     def configure(self, location, verbose=0, backend_options=dict()):
         """Configures the store.
@@ -233,6 +261,23 @@ class StoreBackendMixin(object):
         if self._item_exists(item_path):
             self.clear_location(item_path)
 
+    def retain_item(self, call_id):
+        """Mark an item as audit evidence so it is never reclaimed."""
+        item_path = os.path.join(self.location, *call_id)
+        self.create_location(item_path)
+        marker = os.path.join(item_path, RETAINED_MARKER_FILENAME)
+        if not self._item_exists(marker):
+            with self._open_item(marker, "wb") as f:
+                f.write(b"retained audit evidence\n")
+
+    def release_item(self, call_id):
+        """Remove the audit-evidence marker put by ``retain_item``."""
+        marker = os.path.join(
+            self.location, *call_id, RETAINED_MARKER_FILENAME
+        )
+        if self._item_exists(marker):
+            self._unlink_item(marker)
+
     def contains_item(self, call_id):
         """Check if there is an item at the id, given as a list of str."""
         item_path = os.path.join(self.location, *call_id)
@@ -314,34 +359,177 @@ class StoreBackendMixin(object):
         """Clear the whole store content."""
         self.clear_location(self.location)
 
-    def enforce_store_limits(self, bytes_limit, items_limit=None, age_limit=None):
+    def enforce_store_limits(
+        self, bytes_limit=None, items_limit=None, age_limit=None
+    ):
         """
         Remove the store's oldest files to enforce item, byte, and age limits.
-        """
-        items_to_delete = self._get_items_to_delete(bytes_limit, items_limit, age_limit)
 
+        Retained items (audit evidence flagged through ``retain_item``) are
+        never removed. When the retained items alone prevent reaching the
+        requested limit, an ``UnreachableLimitWarning`` is raised.
+
+        Returns
+        -------
+        stats: dict
+            A summary of the eviction run with the keys ``initial_size``,
+            ``final_size``, ``initial_items``, ``final_items``,
+            ``deleted_items``, ``retained_items`` and ``limit_reached``.
+        """
+        # The list of items is scanned once: every deletion decision below is
+        # made against this snapshot. Concurrent writers may replace an item
+        # afterwards, and each candidate is re-checked against the snapshot
+        # before being unlinked so that a freshly written value is not lost.
+        items = self.get_items()
+        items_to_delete = self._get_items_to_delete(
+            bytes_limit, items_limit, age_limit, items=items
+        )
+
+        initial_size = sum(item.size for item in items)
+        initial_items = len(items)
+        retained_items = sum(1 for item in items if item.retained)
+
+        # Control point: the scan has produced its deletion decisions but no
+        # deletion has happened yet. A concurrent writer can now replace the
+        # items that were seen as reclaimable.
+        self._after_eviction_scan(items, items_to_delete)
+
+        snapshot = {
+            item.path: (item.stat, item.retained) for item in items_to_delete
+        }
+        deleted_items = 0
         for item in items_to_delete:
+            if not self._is_still_evictable(item, snapshot[item.path]):
+                # The entry was removed or replaced since the scan: the
+                # cleaner is only accountable for what it actually saw, so it
+                # leaves the current value untouched.
+                continue
+
             if self.verbose > 10:
                 print("Deleting item {0}".format(item))
             try:
+                # Second control point, right before the unlink, giving
+                # concurrent writers their last chance to replace the item.
+                self._before_eviction_delete(item)
+                if not self._is_still_evictable(item, snapshot[item.path]):
+                    continue
                 self.clear_location(item.path)
             except OSError:
                 # Even with ignore_errors=True shutil.rmtree can raise OSError
                 # with:
                 # [Errno 116] Stale file handle if another process has deleted
                 # the folder already.
-                pass
+                continue
+            deleted_items += 1
 
-    def _get_items_to_delete(self, bytes_limit, items_limit=None, age_limit=None):
+        surviving = self.get_items()
+        final_size = sum(item.size for item in surviving)
+        final_items = len(surviving)
+
+        limit_reached = self._limits_are_met(
+            bytes_limit, items_limit, age_limit, surviving
+        )
+        if not limit_reached:
+            surviving_retained = sum(1 for item in surviving if item.retained)
+            warnings.warn(
+                "Cache limits could not be enforced: "
+                f"{surviving_retained} retained item(s) used as audit "
+                "evidence already exceed the requested limit. Reclaimable "
+                "items have been removed but the retained evidence is kept.",
+                UnreachableLimitWarning,
+                stacklevel=2,
+            )
+
+        return {
+            "initial_size": initial_size,
+            "final_size": final_size,
+            "initial_items": initial_items,
+            "final_items": final_items,
+            "deleted_items": deleted_items,
+            "retained_items": retained_items,
+            "limit_reached": limit_reached,
+        }
+
+    def _after_eviction_scan(self, items, items_to_delete):
+        """Control point called once the eviction scan is done.
+
+        The default implementation is a no-op. Tests subclass the backend and
+        override it to pause the cleaner and drive concurrent writers.
+        """
+
+    def _before_eviction_delete(self, item):
+        """Control point called right before a candidate item is deleted.
+
+        The default implementation is a no-op. Tests subclass the backend and
+        override it to interleave a concurrent replacement.
+        """
+
+    @staticmethod
+    def _is_still_evictable(item, snapshot):
+        """Check that an item may still be deleted after the scan.
+
+        ``snapshot`` holds the ``(stat, retained)`` pair captured during the
+        scan, where ``stat`` describes the item's ``output.pkl`` file. The
+        item is left alone if it has disappeared, been replaced (its inode,
+        size or mtime changed), or been marked as retained in the meantime.
+        """
+        scanned_stat, was_retained = snapshot
+        if was_retained:
+            return False
+        output_filename = os.path.join(item.path, "output.pkl")
+        try:
+            current_stat = os.stat(output_filename)
+        except OSError:
+            return False
+        if current_stat.st_ino != scanned_stat.st_ino:
+            return False
+        if (current_stat.st_size, current_stat.st_mtime_ns) != (
+            scanned_stat.st_size,
+            scanned_stat.st_mtime_ns,
+        ):
+            return False
+        return not os.path.exists(
+            os.path.join(item.path, RETAINED_MARKER_FILENAME)
+        )
+
+    @staticmethod
+    def _limits_are_met(bytes_limit, items_limit, age_limit, items):
+        if not items:
+            return True
+        if isinstance(bytes_limit, str):
+            bytes_limit = memstr_to_bytes(bytes_limit)
+        if bytes_limit is not None:
+            current_size = sum(item.size for item in items)
+            if current_size > bytes_limit:
+                return False
+        if items_limit is not None and len(items) > items_limit:
+            return False
+        if age_limit is not None:
+            deadline = datetime.datetime.now() - age_limit
+            if min(item.last_access for item in items) <= deadline:
+                return False
+        return True
+
+    def _get_items_to_delete(
+        self, bytes_limit, items_limit=None, age_limit=None, items=None
+    ):
         """
         Get items to delete to keep the store under size, file, & age limits.
+
+        Retained audit-evidence items are never returned as deletion
+        candidates, even when they are the oldest or the largest.
         """
         if isinstance(bytes_limit, str):
             bytes_limit = memstr_to_bytes(bytes_limit)
 
-        items = self.get_items()
+        if items is None:
+            items = self.get_items()
         if not items:
             return []
+
+        # Retained items are untouchable: they keep occupying space and count
+        # towards the limits but cannot be reclaimed.
+        deletable = [item for item in items if not item.retained]
 
         size = sum(item.size for item in items)
 
@@ -372,13 +560,13 @@ class StoreBackendMixin(object):
 
         # We want to delete first the cache items that were accessed a
         # long time ago
-        items.sort(key=operator.attrgetter("last_access"))
+        deletable.sort(key=operator.attrgetter("last_access"))
 
         items_to_delete = []
         size_so_far = 0
         items_so_far = 0
 
-        for item in items:
+        for item in deletable:
             if (
                 (size_so_far >= to_delete_size)
                 and items_so_far >= to_delete_items
@@ -499,6 +687,8 @@ def _split_decorator(cls):
         "get_item_info",
         "get_metadata",
         "store_metadata",
+        "retain_item",
+        "release_item",
     ]:
         setattr(cls, method, split_method_decorator(getattr(StoreBackendMixin, method)))
     return cls
@@ -550,13 +740,25 @@ class FileSystemStoreBackend(StoreBackendBase, StoreBackendMixin):
             try:
                 full_filenames = [os.path.join(dirpath, fn) for fn in filenames]
                 dirsize = sum(os.path.getsize(fn) for fn in full_filenames)
+                # Snapshot of the output file identity. Concurrent writers
+                # replace ``output.pkl`` atomically, so a changed inode, size
+                # or mtime reveals a replacement between the eviction scan
+                # and the actual unlink.
+                output_stat = os.stat(output_filename)
             except OSError:
                 # Either output_filename or one of the files in
                 # dirpath does not exist any more. We assume this
                 # directory is being cleaned by another process already
                 continue
 
-            items.append(CacheItemInfo(dirpath, dirsize, last_access))
+            retained = os.path.exists(
+                os.path.join(dirpath, RETAINED_MARKER_FILENAME)
+            )
+            items.append(
+                CacheItemInfo(
+                    dirpath, dirsize, last_access, retained, output_stat
+                )
+            )
 
         return items
 

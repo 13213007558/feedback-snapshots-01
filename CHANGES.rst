@@ -32,6 +32,14 @@ In Development
   dumping failure.
   https://github.com/joblib/joblib/pull/1922
 
+- Cached results can now be marked as retained audit evidence through
+  ``MemorizedFunc.retain`` and ``MemorizedResult.retain``. Retained items are
+  never removed by ``Memory.reduce_size``; when they alone prevent reaching the
+  requested limit an ``UnreachableLimitWarning`` is issued. Cache eviction is
+  also concurrency-safe: a cleaner only deletes an item if it has not been
+  replaced or retained by another process after its scan, and returns a summary
+  of the eviction run.
+
 - Fix ``hash`` to correctly handle ``type(None)``, ``type(NotImplemented)`` and
   ``type(...)``.
   https://github.com/joblib/joblib/pull/1928
