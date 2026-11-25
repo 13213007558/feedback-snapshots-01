@@ -110,6 +110,31 @@ module Sidekiq
       end
     end
 
+    # Publish a payload that was normalized and approved before a database
+    # transaction committed. Unlike {#push}, this method does not normalize the
+    # payload or run client middleware again; callers are responsible for
+    # preparing it through the transactional approval API.
+    #
+    # Returns the payload's pre-allocated JID.
+    def push_prepared(payload)
+      raise ArgumentError, "prepared payload must be a Hash" unless payload.is_a?(Hash)
+      raise ArgumentError, "prepared payload must contain a jid" unless payload["jid"]
+
+      raw_push([wire_payload(payload)])
+      payload["jid"]
+    end
+
+    # Publish a small, already-approved group with one raw Redis push.
+    # Returns the pre-allocated JIDs in approval order.
+    def push_prepared_bulk(payloads)
+      payloads = Array(payloads)
+      return [] if payloads.empty?
+      raise ArgumentError, "prepared payloads must all be Hashes with jids" unless payloads.all? { |payload| payload.is_a?(Hash) && payload["jid"] }
+
+      raw_push(payloads.map { |payload| wire_payload(payload) })
+      payloads.map { |payload| payload["jid"] }
+    end
+
     ##
     # Push a large number of jobs to Redis. This method cuts out the redis
     # network round trip latency. It pushes jobs in batches if more than
@@ -256,6 +281,13 @@ module Sidekiq
     end
 
     private
+
+    def wire_payload(payload)
+      # atomic_push adds enqueued_at to the top-level Hash. Approval payloads
+      # are frozen, so hand Redis a mutable top-level copy while retaining the
+      # approved nested objects.
+      payload.dup
+    end
 
     def raw_push(payloads)
       @redis_pool.with do |conn|
