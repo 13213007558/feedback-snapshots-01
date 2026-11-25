@@ -56,11 +56,24 @@ class ThreadLocalContext(BaseContext):
             self.thread_local.transaction = None
         return transaction
 
-    def set_transaction(self, transaction: "elasticapm.traces.Transaction") -> None:
+    def set_transaction(self, transaction: "elasticapm.traces.Transaction") -> object:
         """
-        Set the transaction for the current execution context
+        Set the transaction for the current execution context.
+
+        Returns the previously active transaction, which can be passed to
+        :meth:`reset_transaction` to restore it.
         """
+        previous = getattr(self.thread_local, "transaction", None)
         self.thread_local.transaction = transaction
+        return previous
+
+    def reset_transaction(self, token: object) -> None:
+        """
+        Restore the transaction that was active before the matching
+        :meth:`set_transaction` call. For the thread-local backend the token is
+        simply the previous transaction value.
+        """
+        self.thread_local.transaction = token
 
     def get_span(self) -> "elasticapm.traces.Span":
         """

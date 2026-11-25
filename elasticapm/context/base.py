@@ -35,9 +35,27 @@ if TYPE_CHECKING:
 
 
 class BaseContext(object):
-    def set_transaction(self, transaction: "elasticapm.traces.Transaction") -> None:
+    def set_transaction(self, transaction: "elasticapm.traces.Transaction") -> object:
         """
-        Set the transaction for the current execution context
+        Set the transaction for the current execution context.
+
+        Implementations may return an opaque token that can be passed to
+        :meth:`reset_transaction` to restore the context that was active before
+        this call. Callers that do not need to restore the previous context may
+        ignore the return value.
+        """
+        raise NotImplementedError
+
+    def reset_transaction(self, token: object) -> None:
+        """
+        Restore the transaction context that was active before the matching
+        :meth:`set_transaction` call returned ``token``.
+
+        Tokens are backend specific and must be treated as opaque. Reset is
+        best-effort: if the token does not belong to the current execution
+        context (for example it was created in a different :class:`asyncio.Task`),
+        the current context is cleared so that a stale transaction can never leak
+        into the next request.
         """
         raise NotImplementedError
 

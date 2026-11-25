@@ -994,15 +994,18 @@ class Tracer(object):
             execution_context.set_transaction(transaction)
         return transaction
 
-    def end_transaction(self, result=None, transaction_name=None, duration=None):
+    def end_transaction(self, result=None, transaction_name=None, duration=None, transaction: "Transaction" = None):
         """
-        End the current transaction and queue it for sending
-        :param result: result of the transaction, e.g. "OK" or 200
-        :param transaction_name: name of the transaction
-        :param duration: override duration, mostly useful for testing
-        :return:
+        End the current transaction and queue it for sending.
+
+        If an explicit ``transaction`` is provided it is ended regardless of
+        the transaction currently active in the execution context. This is used
+        by streaming integrations, where the chunks (and late failures) of
+        several requests can be interleaved on one event loop and the ambient
+        context must not be relied upon to identify the owning request.
         """
-        transaction = execution_context.get_transaction(clear=True)
+        if transaction is None:
+            transaction = execution_context.get_transaction(clear=True)
         if transaction:
             if transaction.name is None:
                 transaction.name = str(transaction_name) if transaction_name is not None else ""

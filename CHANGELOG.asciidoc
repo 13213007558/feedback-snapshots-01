@@ -18,12 +18,14 @@ endif::[]
 ===== Bug fixes
 ////
 
-//=== Unreleased
+=== Unreleased
 
 // Unreleased changes go here
 // When the next release happens, nest these changes under the "Python Agent version 6.x" heading
-//[float]
-//===== Features
+[float]
+===== Features
+
+* Add token based `execution_context.reset_transaction()` and an explicit `transaction=` argument to `Client.end_transaction()` so request context can be detached and later re-attached. New `elasticapm.bind_stream()` / `elasticapm.transaction_scope()` helpers keep late async stream events (including failures) linked to the correct request transaction when multiple streams are interleaved on one event loop, and reclaim the context on exit so the next request cannot inherit it.
 //
 //[float]
 //===== Bug fixes

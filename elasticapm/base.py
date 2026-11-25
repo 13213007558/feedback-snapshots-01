@@ -318,18 +318,21 @@ class Client(object):
                 transaction_type, trace_parent=trace_parent, start=start, auto_activate=auto_activate, links=links
             )
 
-    def end_transaction(self, name=None, result="", duration=None):
+    def end_transaction(self, name=None, result="", duration=None, transaction=None):
         """
         End the current transaction.
 
         :param name: optional name of the transaction
         :param result: result of the transaction, e.g. "OK" or "HTTP 2xx"
         :param duration: override duration, mostly useful for testing
+        :param transaction: optional explicit transaction to end instead of the
+            one active in the execution context. Useful for streaming workloads
+            where several requests' streams are interleaved on one event loop.
         :return: the ended transaction object
         """
         if duration is not None and not isinstance(duration, timedelta):
             duration = timedelta(seconds=duration)
-        transaction = self.tracer.end_transaction(result, name, duration=duration)
+        transaction = self.tracer.end_transaction(result, name, duration=duration, transaction=transaction)
         return transaction
 
     def close(self) -> None:

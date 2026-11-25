@@ -59,11 +59,31 @@ class ContextVarsContext(BaseContext):
         except LookupError:
             return None
 
-    def set_transaction(self, transaction: "elasticapm.traces.Transaction") -> None:
+    def set_transaction(self, transaction: "elasticapm.traces.Transaction") -> contextvars.Token:
         """
-        Set the transaction for the current execution context
+        Set the transaction for the current execution context.
+
+        Returns a :class:`contextvars.Token` that can be passed to
+        :meth:`reset_transaction` to restore the previously active transaction.
         """
-        self.elasticapm_transaction_var.set(transaction)
+        return self.elasticapm_transaction_var.set(transaction)
+
+    def reset_transaction(self, token: contextvars.Token) -> None:
+        """
+        Reset the transaction variable using a token returned by
+        :meth:`set_transaction`.
+
+        If the token was created in a different :class:`contextvars.Context`
+        (e.g. a different :class:`asyncio.Task`) or has already been used,
+        :meth:`contextvars.ContextVar.reset` raises ``ValueError``. In that case
+        we detach the current context by setting the transaction to ``None`` so
+        a late callback can never leave the next request inheriting this one's
+        transaction.
+        """
+        try:
+            self.elasticapm_transaction_var.reset(token)
+        except ValueError:
+            self.elasticapm_transaction_var.set(None)
 
     def get_span(self) -> "elasticapm.traces.Span":
         """

@@ -63,12 +63,17 @@ except Exception:
 if sys.version_info <= (3, 5):
     raise DeprecationWarning("The Elastic APM agent requires Python 3.6+")
 
-from elasticapm.contrib.asyncio.traces import async_capture_span  # noqa: F401 E402
+from elasticapm.contrib.asyncio.traces import (  # noqa: F401 E402
+    async_capture_span,
+    bind_stream,
+    transaction_scope,
+)
 
 __all__ = (
     "Client",
     "VERSION",
     "async_capture_span",
+    "bind_stream",
     "capture_serverless",
     "capture_span",
     "get_client",
@@ -87,5 +92,6 @@ __all__ = (
     "setup_logging",
     "trace_parent_from_headers",
     "trace_parent_from_string",
+    "transaction_scope",
     "uninstrument",
 )
