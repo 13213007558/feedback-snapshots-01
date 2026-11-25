@@ -34,7 +34,6 @@ from ._constants import (
 )
 from ._data_utils import dict_to_selector, sort_versions
 from ._exceptions import APITimeoutError, ServerError
-from ._vendored.asyncache import cached  # type: ignore
 from ._version import __version__
 
 if TYPE_CHECKING:
@@ -86,6 +85,9 @@ class Api:
         self._serviceaccount = kwargs.get("serviceaccount")
         self._session: httpx.AsyncClient | None = None
         self._timeout = None
+        self._initialized = False
+        self._initialization_lock = anyio.Lock()
+        self._api_resources_cache: TTLCache = TTLCache(maxsize=1, ttl=60 * 60 * 6)
         self.auth = KubeAuth(
             url=self._url,
             kubeconfig=self._kubeconfig,
@@ -106,8 +108,12 @@ class Api:
 
     def __await__(self):
         async def f():
-            await self.auth
-            await self._check_version()
+            if not self._initialized:
+                async with self._initialization_lock:
+                    if not self._initialized:
+                        await self.auth
+                        await self._check_version()
+                        self._initialized = True
             return self
 
         return f().__await__()
@@ -124,8 +130,9 @@ class Api:
 
     async def _create_session(self) -> None:
         headers = {"User-Agent": self.__version__, "content-type": "application/json"}
-        if self.auth.token:
-            headers["Authorization"] = f"Bearer {self.auth.token}"
+        token = getattr(self.auth, "token", None)
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
         if self._session:
             with contextlib.suppress(RuntimeError):
                 await self._session.aclose()
@@ -183,6 +190,11 @@ class Api:
         auth_attempts = 0
         ssl_attempts = 0
         while True:
+            headers = dict(kwargs.get("headers") or {})
+            token = getattr(self.auth, "token", None)
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+            kwargs["headers"] = headers
             try:
                 if stream:
                     assert self._session
@@ -273,6 +285,7 @@ class Api:
                     if e.code in (401, 403) and auth_attempts < 3:
                         auth_attempts += 1
                         await self.auth.reauthenticate()
+                        await self._create_session()
                         continue
                     else:
                         raise
@@ -692,9 +705,21 @@ class Api:
 
     # Cache for 6 hours because kubectl does
     # https://github.com/kubernetes/cli-runtime/blob/980bedf450ab21617b33d68331786942227fe93a/pkg/genericclioptions/config_flags.go#L297
-    @cached(TTLCache(1, 60 * 60 * 6))
     async def async_api_resources(self) -> list[dict]:
-        return await self.async_api_resources_uncached()
+        """Get the Kubernetes API resources."""
+        cache_key = ("api_resources",)
+        cache = getattr(self, "_api_resources_cache", None)
+        if cache is None:
+            cache = TTLCache(maxsize=1, ttl=60 * 60 * 6)
+            self._api_resources_cache = cache
+        try:
+            return cache[cache_key]
+        except KeyError:
+            pass
+
+        resources = await self.async_api_resources_uncached()
+        cache[cache_key] = resources
+        return resources
 
     async def async_api_resources_uncached(self) -> list[dict]:
         """Get the Kubernetes API resources."""
@@ -778,5 +803,5 @@ def hash_kwargs(kwargs: dict):
     key_kwargs = copy.copy(kwargs)
     for key in key_kwargs:
         if isinstance(key_kwargs[key], dict):
-            key_kwargs[key] = json.dumps(key_kwargs[key])
+            key_kwargs[key] = json.dumps(key_kwargs[key], sort_keys=True)
     return frozenset(key_kwargs.items())

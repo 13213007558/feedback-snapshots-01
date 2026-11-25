@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, patch
 
 import anyio
+import httpx
 import pytest
 from packaging.version import parse as parse_version
 
@@ -157,6 +158,152 @@ async def test_api_factory_with_kubeconfig(k8s_cluster, serviceaccount) -> None:
     p3 = await Pod({"metadata": {"name": "baz"}}, api=k3)
     assert p3.api is k3
     assert p3.api is not k2
+
+
+def _identity_kubeconfig(token: str, namespace: str) -> dict:
+    return {
+        "apiVersion": "v1",
+        "kind": "Config",
+        "current-context": "identity",
+        "clusters": [
+            {"name": "cluster", "cluster": {"server": "https://identity.example"}}
+        ],
+        "contexts": [
+            {
+                "name": "identity",
+                "context": {
+                    "cluster": "cluster",
+                    "user": "identity-user",
+                    "namespace": namespace,
+                },
+            }
+        ],
+        "users": [{"name": "identity-user", "user": {"token": token}}],
+    }
+
+
+async def test_api_factory_keeps_identities_separate_and_reusable() -> None:
+    api_class = kr8s.asyncio.Api
+    api_class._instances.clear()
+    first_config = _identity_kubeconfig("first-token", "first-namespace")
+    second_config = _identity_kubeconfig("second-token", "second-namespace")
+
+    with patch.object(kr8s.asyncio.Api, "_check_version", new=AsyncMock()):
+        first = await kr8s.asyncio.api(kubeconfig=first_config)
+        first_repeat = await kr8s.asyncio.api(kubeconfig=dict(first_config))
+        second = await kr8s.asyncio.api(kubeconfig=second_config)
+        second_repeat = await kr8s.asyncio.api(kubeconfig=dict(second_config))
+
+        assert first is first_repeat
+        assert second is second_repeat
+        assert first is not second
+        assert first.auth.token == "first-token"
+        assert first.namespace == "first-namespace"
+        assert second.auth.token == "second-token"
+        assert second.namespace == "second-namespace"
+
+        refresh = AsyncMock(side_effect=RuntimeError("refresh failed"))
+        with patch.object(first.auth, "reauthenticate", new=refresh):
+            first_after_failed_refresh = await kr8s.asyncio.api(
+                kubeconfig=dict(first_config)
+            )
+            refresh.assert_not_awaited()
+
+    assert first_after_failed_refresh is first
+    api_class._instances.clear()
+
+
+def test_sync_api_factory_keeps_identity_reusable() -> None:
+    api_class = kr8s.Api
+    api_class._instances.clear()
+
+    async def skip_version_check(self) -> None:
+        return None
+
+    with patch.object(api_class, "_check_version", new=skip_version_check):
+        first_config = _identity_kubeconfig("sync-token", "sync-first-namespace")
+        first = kr8s.api(kubeconfig=first_config)
+        repeat = kr8s.api(kubeconfig=dict(first_config))
+        second = kr8s.api(
+            kubeconfig=_identity_kubeconfig("sync-token", "sync-second-namespace")
+        )
+
+    assert first is repeat
+    assert first is not second
+    assert first.namespace == "sync-first-namespace"
+    assert second.namespace == "sync-second-namespace"
+    api_class._instances.clear()
+
+
+async def test_api_discovery_cache_is_scoped_to_identity() -> None:
+    api_class = kr8s.asyncio.Api
+    api_class._instances.clear()
+    first_config = _identity_kubeconfig("first-token", "first-namespace")
+    second_config = _identity_kubeconfig("second-token", "second-namespace")
+    first_resources = [{"identity": "first-token"}]
+    second_resources = [{"identity": "second-token"}]
+    uncached = AsyncMock(side_effect=[first_resources, second_resources])
+
+    with patch.object(api_class, "_check_version", new=AsyncMock()):
+        with patch.object(api_class, "async_api_resources_uncached", new=uncached):
+            first = await kr8s.asyncio.api(kubeconfig=first_config)
+            second = await kr8s.asyncio.api(kubeconfig=second_config)
+
+            assert await first.async_api_resources() == first_resources
+            assert await second.async_api_resources() == second_resources
+            assert await first.async_api_resources() == first_resources
+            assert await second.async_api_resources() == second_resources
+            assert uncached.await_count == 2
+
+    kr8s.asyncio.Api._instances.clear()
+
+
+async def test_call_api_and_refresh_failure_stay_identity_scoped() -> None:
+    records = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        records.append((request.headers.get("Authorization"), request.url.path))
+        return httpx.Response(200, json={"items": []})
+
+    async def create_session(self) -> None:
+        self._session = httpx.AsyncClient(
+            base_url=self.auth.server,
+            transport=httpx.MockTransport(handler),
+        )
+
+    api_class = kr8s.asyncio.Api
+    api_class._instances.clear()
+    first_config = _identity_kubeconfig("first-token", "first-namespace")
+    second_config = _identity_kubeconfig("second-token", "second-namespace")
+
+    with patch.object(api_class, "_check_version", new=AsyncMock()):
+        with patch.object(api_class, "_create_session", new=create_session):
+            first = await kr8s.asyncio.api(kubeconfig=first_config)
+            second = await kr8s.asyncio.api(kubeconfig=second_config)
+
+            async with first.call_api(
+                "GET", version="v1", url="pods", namespace="first-namespace"
+            ) as response:
+                await response.aread()
+
+            refresh = AsyncMock(side_effect=RuntimeError("refresh failed"))
+            with patch.object(first.auth, "reauthenticate", new=refresh):
+                with pytest.raises(RuntimeError, match="refresh failed"):
+                    await first.reauthenticate()
+
+            first.namespace = "changed-namespace"
+            assert second.namespace == "second-namespace"
+
+            async with second.call_api(
+                "GET", version="v1", url="pods", namespace="second-namespace"
+            ) as response:
+                await response.aread()
+
+    assert records == [
+        ("Bearer first-token", "/api/v1/namespaces/first-namespace/pods"),
+        ("Bearer second-token", "/api/v1/namespaces/second-namespace/pods"),
+    ]
+    api_class._instances.clear()
 
 
 def test_version_sync():
