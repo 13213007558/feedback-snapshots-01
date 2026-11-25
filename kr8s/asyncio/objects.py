@@ -17,6 +17,7 @@ from kr8s._objects import (
     CronJob,
     CustomResourceDefinition,
     DaemonSet,
+    DeleteResult,
     Deployment,
     Endpoints,
     Event,
@@ -54,6 +55,7 @@ from kr8s._objects import (
 
 __all__ = [
     "APIObject",
+    "DeleteResult",
     "Binding",
     "ClusterRole",
     "ClusterRoleBinding",

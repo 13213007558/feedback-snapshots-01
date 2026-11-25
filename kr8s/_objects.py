@@ -9,6 +9,7 @@ import re
 import sys
 import time
 from collections.abc import AsyncGenerator, Generator
+from dataclasses import dataclass, field
 from typing import (
     Any,
     BinaryIO,
@@ -46,6 +47,62 @@ from kr8s.portforward import LocalPortType
 from kr8s.portforward import PortForward as SyncPortForward
 
 JSONPATH_CONDITION_EXPRESSION = r"jsonpath='{(?P<expression>.*?)}'=(?P<condition>.*)"
+
+# Outcome states reported by :meth:`APIObject.async_safe_delete`.
+DELETE_STATUS_DELETED = "deleted"
+DELETE_STATUS_ALREADY_ABSENT = "already_absent"
+DELETE_STATUS_REPLACED = "replaced"
+DELETE_STATUS_CONFLICT = "conflict"
+DELETE_STATUS_UNKNOWN = "unknown"
+
+
+class _ObservationFailed:
+    """Sentinel for a reconciliation request that could not reach the server."""
+
+
+OBSERVATION_FAILED = _ObservationFailed()
+
+
+@dataclass
+class DeleteResult:
+    """Outcome of a precondition-guarded :meth:`APIObject.async_safe_delete` call.
+
+    A safe delete only ever targets the object instance identified by the
+    captured identity (``metadata.uid`` and optionally ``resourceVersion``).
+    Every DELETE request carries that identity as Kubernetes ``preconditions``,
+    so a different object that reuses the same name is never removed.
+
+    Attributes:
+        status: One of ``"deleted"``, ``"already_absent"``, ``"replaced"``,
+            ``"conflict"`` or ``"unknown"``.
+        uid: The object identity the delete was scoped to.
+        resource_version: The resource version captured with the identity, if any.
+        observed_uid: The uid currently stored under the object name when the
+            state could be reconciled, otherwise ``None``.
+        preconditions: The exact preconditions sent on every DELETE request.
+        delete_attempts: Number of DELETE requests actually issued.
+        next_actions: Human-readable steps the caller can safely take next.
+        detail: Optional explanation, in particular why the state is uncertain.
+    """
+
+    status: str
+    uid: str
+    resource_version: str | None = None
+    observed_uid: str | None = None
+    preconditions: dict[str, str] = field(default_factory=dict)
+    delete_attempts: int = 0
+    next_actions: list[str] = field(default_factory=list)
+    detail: str | None = None
+
+    @property
+    def deleted(self) -> bool:
+        """``True`` only when the targeted instance is confirmed gone."""
+        return self.status == DELETE_STATUS_DELETED
+
+    @property
+    def certain(self) -> bool:
+        """``False`` when a network failure leaves the outcome ambiguous."""
+        return self.status != DELETE_STATUS_UNKNOWN
 
 
 class APIObject:
@@ -429,6 +486,326 @@ class APIObject:
                     f"Object {self.name} does not exist in {self.namespace}"
                 ) from e
             raise e
+
+    async def safe_delete(
+        self,
+        propagation_policy: str | None = None,
+        grace_period: int | None = None,
+        force: bool = False,
+        *,
+        uid: str | None = None,
+        resource_version: str | None = None,
+        max_retries: int = 3,
+    ) -> DeleteResult:
+        """Delete only the object instance matching the captured identity.
+
+        This is the identity-checked counterpart of :meth:`delete`. The DELETE
+        request is guarded by Kubernetes ``preconditions`` so a different object
+        reusing the same name is never deleted. The plain :meth:`delete`
+        interface keeps working unchanged.
+
+        Args:
+            propagation_policy: The deletion propagation policy.
+            grace_period: The grace period for deletion.
+            force: Force deletion. (Equivalent to setting grace_period to 0)
+            uid: Identity the delete is scoped to. Defaults to the uid currently
+                held by this object.
+            resource_version: Optional optimistic-locking token. Defaults to the
+                current ``metadata.resourceVersion`` when present.
+            max_retries: DELETE requests to attempt when the connection fails
+                before the server outcome is known.
+
+        Returns:
+            A :class:`DeleteResult` describing the conservative outcome and the
+            actions the caller can take next.
+        """
+        return await self.async_safe_delete(
+            propagation_policy=propagation_policy,
+            grace_period=grace_period,
+            force=force,
+            uid=uid,
+            resource_version=resource_version,
+            max_retries=max_retries,
+        )
+
+    async def async_safe_delete(
+        self,
+        propagation_policy: str | None = None,
+        grace_period: int | None = None,
+        force: bool = False,
+        *,
+        uid: str | None = None,
+        resource_version: str | None = None,
+        max_retries: int = 3,
+    ) -> DeleteResult:
+        """Delete this object while pinning the request to its identity.
+
+        The method captures the object identity once, then reuses it for every
+        retry. A connection loss is reconciled by identity (uid) rather than by
+        name, so an object recreated with the same name is always preserved.
+        """
+        if grace_period and force:
+            raise ValueError("Cannot set both grace_period and force")
+        uid = uid or self.metadata.get("uid")
+        if not uid:
+            raise ValueError(
+                "Cannot safe-delete without a uid; refresh the object or pass "
+                "the uid captured when it was last verified"
+            )
+        if resource_version is None:
+            resource_version = self.metadata.get("resourceVersion")
+        preconditions: dict[str, str] = {"uid": uid}
+        if resource_version:
+            preconditions["resourceVersion"] = resource_version
+
+        data: dict[str, Any] = {"preconditions": preconditions}
+        if propagation_policy:
+            data["propagationPolicy"] = propagation_policy
+        if grace_period:
+            data["gracePeriodSeconds"] = grace_period
+        elif force:
+            data["gracePeriodSeconds"] = 0
+        content = json.dumps(data)
+
+        assert self.api
+        attempts = 0
+        while True:
+            attempts += 1
+            try:
+                async with self.api.call_api(
+                    "DELETE",
+                    version=self.version,
+                    url=f"{self.endpoint}/{self.name}",
+                    namespace=self.namespace,
+                    content=content,
+                ):
+                    pass
+                return DeleteResult(
+                    status=DELETE_STATUS_DELETED,
+                    uid=uid,
+                    resource_version=resource_version,
+                    observed_uid=uid,
+                    preconditions=dict(preconditions),
+                    delete_attempts=attempts,
+                    next_actions=["No further action needed; the object is gone."],
+                    detail="The API server acknowledged the delete.",
+                )
+            except ServerError as err:
+                status_code = err.response.status_code if err.response else None
+                if status_code == 404:
+                    return await self._reconcile_missing_object(
+                        uid, resource_version, preconditions, attempts
+                    )
+                if status_code == 409:
+                    observed_uid = await self._peek_uid()
+                    if isinstance(observed_uid, _ObservationFailed):
+                        return self._unknown_result(
+                            uid,
+                            resource_version,
+                            preconditions,
+                            attempts,
+                            observed_uid=None,
+                            detail="Preconditions failed and the state could not be "
+                            "reconciled because the connection failed.",
+                        )
+                    if observed_uid is not None and observed_uid != uid:
+                        return DeleteResult(
+                            status=DELETE_STATUS_REPLACED,
+                            uid=uid,
+                            resource_version=resource_version,
+                            observed_uid=observed_uid,
+                            preconditions=dict(preconditions),
+                            delete_attempts=attempts,
+                            next_actions=[
+                                "A different object now uses the same name and was "
+                                "left untouched.",
+                                "Inspect the new object before deciding whether to "
+                                "delete it explicitly.",
+                            ],
+                            detail="The API server rejected the preconditions.",
+                        )
+                    return DeleteResult(
+                        status=DELETE_STATUS_CONFLICT,
+                        uid=uid,
+                        resource_version=resource_version,
+                        observed_uid=observed_uid,
+                        preconditions=dict(preconditions),
+                        delete_attempts=attempts,
+                        next_actions=[
+                            "Refresh the object and retry only if the uid still "
+                            "matches the identity you intend to remove.",
+                        ],
+                        detail=str(err),
+                    )
+                raise err
+            except (httpx.TransportError, httpx.TimeoutException):
+                # The server outcome is unknown, so reconcile by identity rather
+                # than trusting the name. Only an ambiguous observation warrants
+                # another identity-pinned DELETE attempt.
+                observed_uid = await self._peek_uid()
+                if isinstance(observed_uid, _ObservationFailed):
+                    if attempts >= max_retries:
+                        return self._unknown_result(
+                            uid,
+                            resource_version,
+                            preconditions,
+                            attempts,
+                            observed_uid=None,
+                            detail="Both the DELETE and the reconciliation request "
+                            "failed before the server outcome was known.",
+                        )
+                    continue
+                if observed_uid is None or observed_uid != uid:
+                    return self._classify_observed_uid(
+                        observed_uid,
+                        uid,
+                        resource_version,
+                        preconditions,
+                        attempts,
+                        deleted_detail="Reconciliation found no object under the name.",
+                        replaced_detail="Reconciliation found a new uid after the "
+                        "connection failure.",
+                    )
+                if attempts >= max_retries:
+                    return self._unknown_result(
+                        uid,
+                        resource_version,
+                        preconditions,
+                        attempts,
+                        observed_uid=observed_uid,
+                    )
+
+    async def _reconcile_missing_object(
+        self,
+        uid: str,
+        resource_version: str | None,
+        preconditions: dict[str, str],
+        attempts: int,
+    ) -> DeleteResult:
+        """Reconcile a 404 by identity, never by name."""
+        observed_uid = await self._peek_uid()
+        if isinstance(observed_uid, _ObservationFailed):
+            return self._unknown_result(
+                uid,
+                resource_version,
+                preconditions,
+                attempts,
+                observed_uid=None,
+                detail="The server reported 404 but the state could not be "
+                "reconciled because the connection failed.",
+            )
+        return self._classify_observed_uid(
+            observed_uid,
+            uid,
+            resource_version,
+            preconditions,
+            attempts,
+            absent_status=DELETE_STATUS_ALREADY_ABSENT,
+            absent_detail="The API server reports no object with this name.",
+            deleted_detail="The targeted instance disappeared during deletion.",
+            replaced_detail="The name exists again but its uid no longer matches.",
+        )
+
+    def _classify_observed_uid(
+        self,
+        observed_uid: str | None,
+        uid: str,
+        resource_version: str | None,
+        preconditions: dict[str, str],
+        attempts: int,
+        deleted_detail: str,
+        replaced_detail: str,
+        absent_status: str = DELETE_STATUS_DELETED,
+        absent_detail: str | None = None,
+    ) -> DeleteResult:
+        """Turn an observed uid (or ``None`` for absent) into a result."""
+        if observed_uid is None:
+            return DeleteResult(
+                status=absent_status,
+                uid=uid,
+                resource_version=resource_version,
+                observed_uid=None,
+                preconditions=dict(preconditions),
+                delete_attempts=attempts,
+                next_actions=(
+                    ["No further action needed; the object is gone."]
+                    if absent_status == DELETE_STATUS_DELETED
+                    else [
+                        "No object exists under this name; nothing further to delete.",
+                    ]
+                ),
+                detail=absent_detail or deleted_detail,
+            )
+        if observed_uid == uid:
+            return DeleteResult(
+                status=DELETE_STATUS_DELETED,
+                uid=uid,
+                resource_version=resource_version,
+                observed_uid=observed_uid,
+                preconditions=dict(preconditions),
+                delete_attempts=attempts,
+                next_actions=["No further action needed; the object is gone."],
+                detail=deleted_detail,
+            )
+        return DeleteResult(
+            status=DELETE_STATUS_REPLACED,
+            uid=uid,
+            resource_version=resource_version,
+            observed_uid=observed_uid,
+            preconditions=dict(preconditions),
+            delete_attempts=attempts,
+            next_actions=[
+                "A different object now uses the same name and was left untouched.",
+                "Inspect the new object before deciding whether to delete it "
+                "explicitly.",
+            ],
+            detail=replaced_detail,
+        )
+
+    def _unknown_result(
+        self,
+        uid: str,
+        resource_version: str | None,
+        preconditions: dict[str, str],
+        attempts: int,
+        observed_uid: str | None,
+        detail: str = "The connection failed before the server outcome was known.",
+    ) -> DeleteResult:
+        """Build the conservative result used whenever the outcome is ambiguous."""
+        return DeleteResult(
+            status=DELETE_STATUS_UNKNOWN,
+            uid=uid,
+            resource_version=resource_version,
+            observed_uid=observed_uid,
+            preconditions=dict(preconditions),
+            delete_attempts=attempts,
+            next_actions=[
+                "The targeted instance may still exist; retry safe_delete with the "
+                "same uid to bound the request to this instance.",
+            ],
+            detail=detail,
+        )
+
+    async def _peek_uid(self) -> str | None | _ObservationFailed:
+        """Return the uid stored under the name, ``None`` if absent.
+
+        A connection failure is reported as :data:`OBSERVATION_FAILED` rather
+        than ``None`` so it can never be mistaken for the object being gone.
+        """
+        assert self.api
+        try:
+            async with self.api.call_api(
+                "GET",
+                version=self.version,
+                url=f"{self.endpoint}/{self.name}",
+                namespace=self.namespace,
+                raise_for_status=False,
+            ) as resp:
+                if resp.status_code != 200:
+                    return None
+                return resp.json().get("metadata", {}).get("uid")
+        except (httpx.TransportError, httpx.TimeoutException):
+            return OBSERVATION_FAILED
 
     async def refresh(self) -> None:
         """Refresh this object from Kubernetes."""
@@ -976,6 +1353,25 @@ class APIObjectSyncMixin(APIObject):
             propagation_policy=propagation_policy,
             grace_period=grace_period,
             force=force,
+        )
+
+    def safe_delete(  # type: ignore[override]
+        self,
+        propagation_policy: str | None = None,
+        grace_period: int | None = None,
+        force: bool = False,
+        *,
+        uid: str | None = None,
+        resource_version: str | None = None,
+        max_retries: int = 3,
+    ) -> DeleteResult:
+        return as_sync_func(self.async_safe_delete)(
+            propagation_policy=propagation_policy,
+            grace_period=grace_period,
+            force=force,
+            uid=uid,
+            resource_version=resource_version,
+            max_retries=max_retries,
         )
 
     def refresh(self) -> None:  # type: ignore[override]

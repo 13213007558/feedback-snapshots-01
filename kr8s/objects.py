@@ -46,6 +46,7 @@ from ._objects import (
 from ._objects import (
     DaemonSet as _DaemonSet,
 )
+from ._objects import DeleteResult as _DeleteResult
 from ._objects import (
     Deployment as _Deployment,
 )
@@ -147,6 +148,10 @@ from .portforward import PortForward
 
 if TYPE_CHECKING:
     from kr8s import Api
+
+
+#: Outcome of an identity-pinned :meth:`APIObject.safe_delete` call.
+DeleteResult = _DeleteResult
 
 
 class APIObject(APIObjectSyncMixin):

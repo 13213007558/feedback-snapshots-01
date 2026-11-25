@@ -110,6 +110,70 @@ await pod.delete()
 
 `````
 
+### Safe deletion with identity preconditions
+
+{py:func}`.delete() <kr8s.objects.APIObject.delete()>` removes whatever object
+currently holds the name. If a connection drops mid-request, or another object is
+recreated with the same name, retrying by name alone can delete the wrong
+instance. {py:func}`.safe_delete() <kr8s.objects.APIObject.safe_delete()>` pins
+every DELETE request to the identity captured from the object
+(`metadata.uid`, and `resourceVersion` when available) using Kubernetes
+`preconditions`. A same-name object with a different uid is never removed.
+
+The call returns a {py:class}`~kr8s.objects.DeleteResult` with a conservative
+`status` (`deleted`, `already_absent`, `replaced`, `conflict` or `unknown`), the
+exact `preconditions` that were sent, how many DELETE requests were issued, and
+`next_actions` describing what the caller can safely do next. Retries always
+reuse the original identity; after a connection loss the state is reconciled by
+uid, never inferred from the current name. The plain `.delete()` interface
+continues to work exactly as before.
+
+`````{tab-set}
+
+````{tab-item} Sync
+:sync: sync
+```python
+# Capture the identity of the object you verified, then delete it
+pod.refresh()
+result = pod.safe_delete()
+
+print(result.status)
+# "deleted"
+print(result.preconditions)
+# {"uid": "...", "resourceVersion": "..."}
+print(result.next_actions)
+# ["No further action needed; the object is gone."]
+
+# If "unknown" is returned, retry with the same uid to stay bounded to
+# that specific instance.
+if not result.certain:
+    result = pod.safe_delete(uid=result.uid)
+```
+````
+
+````{tab-item} Async
+:sync: async
+```python
+# Capture the identity of the object you verified, then delete it
+await pod.refresh()
+result = await pod.safe_delete()
+
+print(result.status)
+# "deleted"
+print(result.preconditions)
+# {"uid": "...", "resourceVersion": "..."}
+print(result.next_actions)
+# ["No further action needed; the object is gone."]
+
+# If "unknown" is returned, retry with the same uid to stay bounded to
+# that specific instance.
+if not result.certain:
+    result = await pod.safe_delete(uid=result.uid)
+```
+````
+
+`````
+
 Some objects also have additional methods that are unique to them. For example {py:class}`Pod <kr8s.objects.Pod>` has {py:func}`.logs() <kr8s.objects.Pod.logs()>`, {py:func}`.ready() <kr8s.objects.Pod.ready()>` and {py:func}`.exec() <kr8s.objects.Pod.exec()>`.
 
 `````{tab-set}
