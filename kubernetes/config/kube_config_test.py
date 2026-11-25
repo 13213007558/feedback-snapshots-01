@@ -363,7 +363,7 @@ class TestConfigNode(BaseTestCase):
 class FakeConfig:
 
     FILE_KEYS = ["ssl_ca_cert", "key_file", "cert_file"]
-    IGNORE_KEYS = ["refresh_api_key_hook"]
+    IGNORE_KEYS = ["refresh_api_key_hook", "provenance", "audit_log"]
 
     def __init__(self, token=None, **kwargs):
         self.api_key = {}
@@ -375,29 +375,33 @@ class FakeConfig:
         self.__dict__.update(kwargs)
 
     def __eq__(self, other):
-        if len(self.__dict__) != len(other.__dict__):
+        self_dict = {
+            k: v for k, v in self.__dict__.items()
+            if k not in self.IGNORE_KEYS}
+        other_dict = {
+            k: v for k, v in other.__dict__.items()
+            if k not in self.IGNORE_KEYS}
+        if len(self_dict) != len(other_dict):
             return
-        for k, v in self.__dict__.items():
-            if k in self.IGNORE_KEYS:
-                continue
-            if k not in other.__dict__:
+        for k, v in self_dict.items():
+            if k not in other_dict:
                 return
             if k in self.FILE_KEYS:
-                if v and other.__dict__[k]:
+                if v and other_dict[k]:
                     try:
-                        with open(v) as f1, open(other.__dict__[k]) as f2:
+                        with open(v) as f1, open(other_dict[k]) as f2:
                             if f1.read() != f2.read():
                                 return
                     except OSError:
                         # fall back to only compare filenames in case we are
                         # testing the passing of filenames to the config
-                        if other.__dict__[k] != v:
+                        if other_dict[k] != v:
                             return
                 else:
-                    if other.__dict__[k] != v:
+                    if other_dict[k] != v:
                         return
             else:
-                if other.__dict__[k] != v:
+                if other_dict[k] != v:
                     return
         return True
 
@@ -1793,6 +1797,79 @@ class TestKubeConfigMerger(BaseTestCase):
 
         # new token
         self.assertEqual(provider.value['id-token'], "token-changed")
+
+
+class TestKubeConfigAuditProvenance(BaseTestCase):
+
+    def _loader(self, active_context, audit_log, **kwargs):
+        return KubeConfigLoader(
+            config_dict=TestKubeConfigLoader.TEST_KUBE_CONFIG,
+            active_context=active_context,
+            audit_log=audit_log,
+            **kwargs)
+
+    def test_successful_load_records_selection_and_request_provenance(self):
+        from kubernetes.config.audit import (AuditLog, EVENT_REQUEST,
+                                              EVENT_SELECTION)
+        audit_log = AuditLog()
+        loader = self._loader("simple_token", audit_log)
+        client_config = FakeConfig()
+        loader.load_and_set(client_config)
+
+        provenance = loader.record_request()
+        self.assertEqual("simple_token", provenance.context)
+        self.assertEqual("simple_token", provenance.user)
+        self.assertEqual("default", provenance.cluster)
+        self.assertEqual("token", provenance.auth_method)
+        self.assertEqual(1, provenance.credential_generation)
+
+        selection = audit_log.events(EVENT_SELECTION)
+        self.assertEqual(1, len(selection))
+        requests = audit_log.events(EVENT_REQUEST)
+        self.assertEqual(1, len(requests))
+        self.assertEqual("simple_token",
+                         requests[0].provenance.context)
+
+    def test_gcp_refresh_failure_attributes_to_decision_provenance(self):
+        from kubernetes.config.audit import (AuditLog,
+                                              EVENT_CREDENTIAL_REFRESH,
+                                              EVENT_CREDENTIAL_REFRESH_FAILED)
+        audit_log = AuditLog()
+        loader = self._loader(
+            "expired_gcp", audit_log,
+            get_google_credentials=lambda: _raise_exception(
+                "gcp unavailable"))
+
+        with self.assertRaises(Exception):
+            loader.load_and_set(FakeConfig())
+
+        refresh = audit_log.events(EVENT_CREDENTIAL_REFRESH)
+        failures = audit_log.events(EVENT_CREDENTIAL_REFRESH_FAILED)
+        self.assertEqual(1, len(refresh))
+        self.assertEqual(1, len(failures))
+        # Start and failure carry the identical, frozen provenance.
+        self.assertEqual(refresh[0].provenance,
+                         failures[0].provenance)
+        self.assertEqual("expired_gcp",
+                         failures[0].provenance.context)
+        self.assertEqual("auth-provider",
+                         failures[0].provenance.auth_method)
+        self.assertEqual(1,
+                         failures[0].provenance.credential_generation)
+        self.assertEqual("failed", failures[0].status)
+        self.assertIn("gcp unavailable", failures[0].error)
+
+    def test_diagnostics_contain_no_token_material(self):
+        from kubernetes.config.audit import AuditLog
+        audit_log = AuditLog()
+        loader = self._loader("simple_token", audit_log)
+        loader.load_and_set(FakeConfig())
+        loader.record_request()
+
+        serialized = repr(audit_log.diagnostics())
+        self.assertNotIn(TEST_DATA, serialized)
+        self.assertNotIn(TEST_DATA_BASE64, serialized)
+        self.assertNotIn(TEST_BASIC_TOKEN, serialized)
 
 
 if __name__ == '__main__':

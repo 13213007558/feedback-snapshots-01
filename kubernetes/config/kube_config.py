@@ -32,6 +32,7 @@ from requests_oauthlib import OAuth2Session
 from kubernetes.client import ApiClient, Configuration
 from kubernetes.config.exec_provider import ExecProvider
 
+from . import audit
 from .config_exception import ConfigException
 from .dateutil import UTC, format_rfc3339, parse_rfc3339
 
@@ -189,13 +190,42 @@ class CommandTokenSource:
             expiry=parse_rfc3339(data['credential']['token_expiry']))
 
 
+class _RefreshAttempt:
+    """Context manager for a single credential acquisition.
+
+    It records the start of the refresh against a provenance snapshot that is
+    frozen before the acquisition runs.  If the acquisition raises, the
+    failure is recorded against that same snapshot and the exception is
+    re-raised, so a delayed error still maps to the decision-time selection.
+    """
+
+    def __init__(self, audit_log, provenance):
+        self._audit_log = audit_log
+        self._provenance = provenance
+
+    @property
+    def provenance(self):
+        return self._provenance
+
+    def __enter__(self):
+        self._audit_log.record_credential_refresh(self._provenance)
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if exc_value is not None:
+            self._audit_log.record_credential_refresh_failed(
+                self._provenance, exc_value)
+        return False
+
+
 class KubeConfigLoader:
 
     def __init__(self, config_dict, active_context=None,
                  get_google_credentials=None,
                  config_base_path="",
                  config_persister=None,
-                 temp_file_path=None):
+                 temp_file_path=None,
+                 audit_log=None):
 
         if config_dict is None:
             raise ConfigException(
@@ -209,6 +239,13 @@ class KubeConfigLoader:
         self._current_context = None
         self._user = None
         self._cluster = None
+        # Provenance / audit state.  Only non-secret source identifiers are
+        # recorded; full configs and tokens never enter the audit log.
+        self._audit_log = audit_log or audit.get_default_audit_log()
+        # Bumped whenever credentials are (re)acquired, so each request can be
+        # matched to the exact credential generation it actually used.
+        self._credential_generation = 0
+        self._auth_method = None
         self.set_active_context(active_context)
         self._config_base_path = config_base_path
         self._config_persister = config_persister
@@ -281,6 +318,63 @@ class KubeConfigLoader:
         self._cluster = self._config['clusters'].get_with_name(
             self._current_context['context']['cluster'])['cluster']
 
+    def _node_path(self, node):
+        """Return the source kubeconfig path of a ConfigNode, if known."""
+        if isinstance(node, ConfigNode):
+            return node.path
+        return None
+
+    def _context_names(self):
+        """Return the (context, cluster, user) names currently selected."""
+        context_entry = self._current_context.value
+        context_name = context_entry.get('name')
+        context_body = context_entry.get('context', {})
+        return (context_name,
+                context_body.get('cluster'),
+                context_body.get('user'))
+
+    def provenance(self):
+        """Build an immutable snapshot of allowed source identifiers.
+
+        This captures the selected context/cluster/user, the kubeconfig file
+        each piece of material came from (relevant when one context references
+        a user defined in another file), the active auth method and the
+        current credential generation.  It never contains secrets.
+        """
+        context_name, cluster_name, user_name = self._context_names()
+        return audit.SelectionProvenance(
+            context=context_name,
+            cluster=cluster_name,
+            user=user_name,
+            config_path=self._node_path(self._config),
+            cluster_path=self._node_path(self._cluster),
+            user_path=self._node_path(self._user),
+            auth_method=self._auth_method,
+            credential_generation=self._credential_generation)
+
+    def _refresh_attempt(self, auth_method):
+        """Start a credential acquisition and capture its decision point.
+
+        The provenance snapshot is taken (and the credential generation
+        bumped) before the acquisition runs, so a failure that returns late
+        still attributes to the configuration/generation selected when the
+        refresh was initiated.  Use as a context manager; a raised exception
+        is recorded against the frozen snapshot and re-raised.
+        """
+        self._auth_method = auth_method
+        self._credential_generation += 1
+        snapshot = self.provenance()
+        return _RefreshAttempt(self._audit_log, snapshot)
+
+    def record_request(self, timestamp=None):
+        """Record that a Kubernetes request is using the current selection.
+
+        Returns the secret-free provenance snapshot attached to the request.
+        """
+        snapshot = self.provenance()
+        self._audit_log.record_request(snapshot, timestamp=timestamp)
+        return snapshot
+
     def _load_authentication(self):
         """Read authentication from kube-config user section if exists.
 
@@ -295,13 +389,30 @@ class KubeConfigLoader:
         """
         if not self._user:
             return
+        self._load_authentication_with_audit()
+
+    def _load_authentication_with_audit(self):
         if self._load_auth_provider_token():
-            return
-        if self._load_user_token():
-            return
-        if self._load_from_exec_plugin():
-            return
-        self._load_user_pass_token()
+            self._auth_method = 'auth-provider'
+        elif self._load_user_token():
+            self._auth_method = 'token'
+        elif 'exec' in self._user:
+            # The exec path audits its own refresh success/failure.  A failed
+            # plugin returns without configuring a token, so do not record a
+            # misleading selection as though another method had succeeded.
+            self._load_from_exec_plugin()
+            self._auth_method = 'exec'
+        else:
+            self._load_user_pass_token()
+            if 'username' in self._user and 'password' in self._user:
+                self._auth_method = 'basic-auth'
+        # A refreshing provider (gcp/exec) already bumped the generation inside
+        # its refresh attempt.  Static material (token file, basic auth) gets
+        # its single generation here, then the selected configuration is
+        # recorded once.
+        if self._credential_generation == 0:
+            self._credential_generation = 1
+        self._audit_log.record_selection(self.provenance())
 
     def _load_auth_provider_token(self):
         if 'auth-provider' not in self._user:
@@ -333,9 +444,10 @@ class KubeConfigLoader:
         if 'config' not in self._user['auth-provider']:
             self._user['auth-provider'].value['config'] = {}
         provider = self._user['auth-provider']['config']
-        credentials = self._get_google_credentials()
-        provider.value['access-token'] = credentials.token
-        provider.value['expiry'] = format_rfc3339(credentials.expiry)
+        with self._refresh_attempt('auth-provider'):
+            credentials = self._get_google_credentials()
+            provider.value['access-token'] = credentials.token
+            provider.value['expiry'] = format_rfc3339(credentials.expiry)
         if self._config_persister:
             self._config_persister()
 
@@ -441,34 +553,36 @@ class KubeConfigLoader:
             return
         try:
             base_path = self._get_base_path(self._cluster.path)
-            status = ExecProvider(self._user['exec'], base_path, self._cluster).run()
-            if 'token' in status:
-                self.token = "Bearer %s" % status['token']
-            elif 'clientCertificateData' in status:
-                # https://kubernetes.io/docs/reference/access-authn-authz/authentication/#input-and-output-formats
-                # Plugin has provided certificates instead of a token.
-                if 'clientKeyData' not in status:
-                    logging.error('exec: missing clientKeyData field in '
-                                  'plugin output')
+            with self._refresh_attempt('exec'):
+                status = ExecProvider(
+                    self._user['exec'], base_path, self._cluster).run()
+                if 'token' in status:
+                    self.token = "Bearer %s" % status['token']
+                elif 'clientCertificateData' in status:
+                    # https://kubernetes.io/docs/reference/access-authn-authz/authentication/#input-and-output-formats
+                    # Plugin has provided certificates instead of a token.
+                    if 'clientKeyData' not in status:
+                        logging.error('exec: missing clientKeyData field in '
+                                      'plugin output')
+                        return None
+                    self.cert_file = FileOrData(
+                        status, None,
+                        data_key_name='clientCertificateData',
+                        file_base_path=base_path,
+                        base64_file_content=False,
+                        temp_file_path=self._temp_file_path).as_file()
+                    self.key_file = FileOrData(
+                        status, None,
+                        data_key_name='clientKeyData',
+                        file_base_path=base_path,
+                        base64_file_content=False,
+                        temp_file_path=self._temp_file_path).as_file()
+                else:
+                    logging.error('exec: missing token or clientCertificateData '
+                                  'field in plugin output')
                     return None
-                self.cert_file = FileOrData(
-                    status, None,
-                    data_key_name='clientCertificateData',
-                    file_base_path=base_path,
-                    base64_file_content=False,
-                    temp_file_path=self._temp_file_path).as_file()
-                self.key_file = FileOrData(
-                    status, None,
-                    data_key_name='clientKeyData',
-                    file_base_path=base_path,
-                    base64_file_content=False,
-                    temp_file_path=self._temp_file_path).as_file()
-            else:
-                logging.error('exec: missing token or clientCertificateData '
-                              'field in plugin output')
-                return None
-            if 'expirationTimestamp' in status:
-                self.expiry = parse_rfc3339(status['expirationTimestamp'])
+                if 'expirationTimestamp' in status:
+                    self.expiry = parse_rfc3339(status['expirationTimestamp'])
             return True
         except Exception as e:
             logging.error(str(e))
@@ -541,6 +655,11 @@ class KubeConfigLoader:
         for key in keys:
             if key in self.__dict__:
                 setattr(client_configuration, key, getattr(self, key))
+        # Attach the secret-free provenance snapshot and the audit log so the
+        # actual request layer can record which config/credential generation
+        # was in force for each Kubernetes request.
+        client_configuration.provenance = self.provenance()
+        client_configuration.audit_log = self._audit_log
 
     def load_and_set(self, client_configuration):
         self._load_authentication()
@@ -756,7 +875,8 @@ def list_kube_config_contexts(config_file=None):
 def load_kube_config(config_file=None, context=None,
                      client_configuration=None,
                      persist_config=True,
-                     temp_file_path=None):
+                     temp_file_path=None,
+                     audit_log=None):
     """Loads authentication and cluster information from kube-config file
     and stores them in kubernetes.client.configuration.
 
@@ -768,6 +888,8 @@ def load_kube_config(config_file=None, context=None,
     :param persist_config: If True, config file will be updated when changed
         (e.g GCP token refresh).
     :param temp_file_path: store temp files path.
+    :param audit_log: optional :class:`kubernetes.config.audit.AuditLog` used
+        to record which config/credential generation each request uses.
     """
 
     if config_file is None:
@@ -776,7 +898,8 @@ def load_kube_config(config_file=None, context=None,
     loader = _get_kube_config_loader(
         filename=config_file, active_context=context,
         persist_config=persist_config,
-        temp_file_path=temp_file_path)
+        temp_file_path=temp_file_path,
+        audit_log=audit_log)
 
     if client_configuration is None:
         config = type.__call__(Configuration)
@@ -789,7 +912,8 @@ def load_kube_config(config_file=None, context=None,
 def load_kube_config_from_dict(config_dict, context=None,
                                client_configuration=None,
                                persist_config=True,
-                               temp_file_path=None):
+                               temp_file_path=None,
+                               audit_log=None):
     """Loads authentication and cluster information from config_dict file
     and stores them in kubernetes.client.configuration.
 
@@ -801,6 +925,8 @@ def load_kube_config_from_dict(config_dict, context=None,
     :param persist_config: If True, config file will be updated when changed
         (e.g GCP token refresh).
     :param temp_file_path: store temp files path.
+    :param audit_log: optional :class:`kubernetes.config.audit.AuditLog` used
+        to record which config/credential generation each request uses.
     """
     if config_dict is None:
         raise ConfigException(
@@ -810,7 +936,8 @@ def load_kube_config_from_dict(config_dict, context=None,
     loader = _get_kube_config_loader(
         config_dict=config_dict, active_context=context,
         persist_config=persist_config,
-        temp_file_path=temp_file_path)
+        temp_file_path=temp_file_path,
+        audit_log=audit_log)
 
     if client_configuration is None:
         config = type.__call__(Configuration)
@@ -824,7 +951,8 @@ def new_client_from_config(
         config_file=None,
         context=None,
         persist_config=True,
-        client_configuration=None):
+        client_configuration=None,
+        audit_log=None):
     """
     Loads configuration the same as load_kube_config but returns an ApiClient
     to be used with any API object. This will allow the caller to concurrently
@@ -834,7 +962,8 @@ def new_client_from_config(
         client_configuration = type.__call__(Configuration)
     load_kube_config(config_file=config_file, context=context,
                      client_configuration=client_configuration,
-                     persist_config=persist_config)
+                     persist_config=persist_config,
+                     audit_log=audit_log)
     return ApiClient(configuration=client_configuration)
 
 
@@ -843,7 +972,8 @@ def new_client_from_config_dict(
         context=None,
         persist_config=True,
         temp_file_path=None,
-        client_configuration=None):
+        client_configuration=None,
+        audit_log=None):
     """
     Loads configuration the same as load_kube_config_from_dict but returns an ApiClient
     to be used with any API object. This will allow the caller to concurrently
@@ -854,5 +984,6 @@ def new_client_from_config_dict(
     load_kube_config_from_dict(config_dict=config_dict, context=context,
                                client_configuration=client_configuration,
                                persist_config=persist_config,
-                               temp_file_path=temp_file_path)
+                               temp_file_path=temp_file_path,
+                               audit_log=audit_log)
     return ApiClient(configuration=client_configuration)
