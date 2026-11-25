@@ -15,7 +15,7 @@ import anyio
 import httpx
 import httpx_ws
 
-from ._exceptions import ConnectionClosedError, ServerError
+from ._exceptions import ConnectionClosedError, NotFoundError, ServerError
 from ._types import APIObjectWithPods
 
 LocalPortType = Union[Literal["match", "auto"], int, None]
@@ -40,6 +40,12 @@ class PortForward:
 
     .. warning:
         Currently Port Forwards only work when using ``asyncio`` and not ``trio``.
+
+    Once a Pod is selected, including from a Service's ready Pod list, it is
+    pinned for the lifetime of this forward. New connections reconnect to that
+    same instance and never choose a replacement from the current Service
+    endpoints. If the approved Pod disappears or its UID changes, this forward
+    stops and closes its local listeners.
 
     Args:
         resource:
@@ -116,9 +122,12 @@ class PortForward:
                 "resource must be a Pod or a resource with a ready_pods method"
             )
         self._resource = resource
-        self.pod = None
+        self.pod: APIObject | None = None
+        self._approved_pod_uid: str | None = None
+        self._terminal_error: BaseException | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._tasks: list[asyncio.Task] = []
+        self._connection_tasks: set[asyncio.Task[None]] = set()
         self._run_task = None
         self._bg_future: asyncio.Future | None = None
         self._bg_task: asyncio.Task | None = None
@@ -141,8 +150,9 @@ class PortForward:
         if self._bg_task is not None:
             return self.local_port
 
+        self._bg_future = self._loop.create_future()
+
         async def f():
-            self._bg_future = self._loop.create_future()
             async with self as port:
                 self.local_port = port
                 await self._bg_future
@@ -157,9 +167,41 @@ class PortForward:
         return await self.async_stop()
 
     async def async_stop(self) -> None:
-        if self._bg_future:
+        bg_task = self._bg_task
+        if self._bg_future and not self._bg_future.done():
             self._bg_future.set_result(None)
+        if bg_task is not None:
+            with suppress(Exception):
+                await bg_task
         self._bg_task = None
+        await self._close_servers()
+
+    async def _close_servers(self) -> None:
+        """Close and clear all local listeners and active connections."""
+        servers = self.servers.copy()
+        self.servers.clear()
+        for server in servers:
+            with suppress(Exception):
+                server.close()
+
+        current_task = asyncio.current_task()
+        connection_tasks = [
+            task for task in self._connection_tasks if task is not current_task
+        ]
+        for task in connection_tasks:
+            task.cancel()
+        if connection_tasks:
+            await asyncio.gather(*connection_tasks, return_exceptions=True)
+
+        for server in servers:
+            with suppress(Exception):
+                await server.wait_closed()
+
+    def _request_shutdown(self, exc: BaseException) -> None:
+        """Ask a background forward to exit without changing its target."""
+        self._terminal_error = exc
+        if self._bg_future is not None and not self._bg_future.done():
+            self._bg_future.set_result(None)
 
     async def run_forever(self) -> None:
         """Run the port forward forever.
@@ -184,45 +226,103 @@ class PortForward:
         if self.local_port == 0:
             self.local_port = self._find_available_port()
 
-        for address in self.address:
-            server = await asyncio.start_server(
-                self._sync_sockets, port=self.local_port, host=address
-            )
-            self.servers.append(server)
-
         try:
+            for address in self.address:
+                server = await asyncio.start_server(
+                    self._handle_connection, port=self.local_port, host=address
+                )
+                self.servers.append(server)
+
             for server in self.servers:
                 await server.start_serving()
             yield self.local_port
 
         finally:
-            # Ensure all servers are closed properly
-            for server in self.servers:
-                server.close()
-                await server.wait_closed()
-                self.servers.remove(server)
+            # Ensure every listener, including partial/multi-address binds, is closed.
+            await self._close_servers()
+
+    @staticmethod
+    def _pod_instance_uid(pod: APIObject) -> str | None:
+        """Return the Kubernetes UID that identifies this Pod generation."""
+        metadata = getattr(pod, "metadata", None)
+        get = getattr(metadata, "get", None)
+        if get is None:
+            return None
+        uid = get("uid")
+        return None if uid is None else str(uid)
+
+    def _approve_pod(self, pod: APIObject) -> APIObject:
+        """Pin the one actual Pod instance approved for this forward."""
+        if self.pod is None:
+            self.pod = pod
+        if self._approved_pod_uid is None:
+            self._approved_pod_uid = self._pod_instance_uid(self.pod)
+        self._assert_approved_pod()
+        return self.pod
+
+    def _assert_approved_pod(self) -> None:
+        """Ensure a refreshed Pod object still is the approved instance."""
+        if self.pod is None or self._approved_pod_uid is None:
+            return
+        current_uid = self._pod_instance_uid(self.pod)
+        if current_uid is not None and current_uid != self._approved_pod_uid:
+            raise ConnectionClosedError(
+                f"Approved Pod {self.pod.name} was replaced; "
+                "refusing to select a new Pod"
+            )
+
+    async def _verify_approved_pod_identity(self) -> None:
+        """Check the current UID for a same-name Pod replacement.
+
+        A failed verification request never clears the pinned Pod or consults
+        the Service list. It only skips the optional identity check; a missing
+        Pod or an observed UID mismatch is terminal for this forward.
+        """
+        if self.pod is None or self._approved_pod_uid is None:
+            return
+        refresh = getattr(self.pod, "async_refresh", None)
+        if refresh is None:
+            return
+        try:
+            await refresh()
+        except NotFoundError as exc:
+            raise ConnectionClosedError(
+                "Approved Pod no longer exists; "
+                "refusing to select a replacement"
+            ) from exc
+        except Exception:
+            return
+        self._assert_approved_pod()
 
     async def _select_pod(self) -> APIObject:
-        """Select a Pod to forward to."""
+        """Select the initially approved Pod to forward to."""
         from ._objects import Pod
 
+        if self.pod is not None:
+            return self._approve_pod(self.pod)
+
         if isinstance(self._resource, Pod):
-            return self._resource
+            return self._approve_pod(self._resource)
 
         if isinstance(self._resource, APIObjectWithPods):
             try:
-                return random.choice(await self._resource.async_ready_pods())
+                pod = random.choice(await self._resource.async_ready_pods())
             except IndexError:
                 pass
+            else:
+                return self._approve_pod(pod)
         raise RuntimeError("No ready pods found")
 
     @asynccontextmanager
     async def _connect_websocket(self):
-        """Connect to the Kubernetes portforward websocket."""
+        """Connect to the pinned Pod's Kubernetes portforward websocket."""
         connection_attempts = 0
+        if self.pod is None:
+            await self._select_pod()
+        assert self.pod is not None
+        await self._verify_approved_pod_identity()
         while True:
-            if not self.pod:
-                self.pod = await self._select_pod()
+            self._assert_approved_pod()
             try:
                 assert self.pod.api
                 async with self.pod.api.open_websocket(
@@ -239,19 +339,39 @@ class PortForward:
                     yield websocket
                     break
             except httpx_ws.HTTPXWSException as e:
-                self.pod = None
+                # Never clear the pinned Pod here. A replacement must not cause
+                # the next attempt to choose a different Service endpoint.
                 connection_attempts += 1
-                if connection_attempts > 5:
-                    if isinstance(
-                        e, httpx_ws.WebSocketUpgradeError
-                    ) and e.response.status_code in (401, 403):
-                        error_message = f"Permission denied: {e.response.status_code}"
+                if isinstance(e, httpx_ws.WebSocketUpgradeError):
+                    status_code = e.response.status_code
+                    if status_code in (401, 403):
+                        error_message = f"Permission denied: {status_code}"
                         with suppress(httpx.StreamClosed, httpx.ResponseNotRead):
                             await e.response.aread()
                             error_message = e.response.text
                         raise ServerError(error_message, response=e.response) from e
-                    raise ConnectionClosedError("Unable to connect to Pod") from e
+                    if status_code in (404, 410):
+                        raise ConnectionClosedError(
+                            "Approved Pod no longer exists; "
+                            "refusing to select a replacement"
+                        ) from e
+                if connection_attempts > 5:
+                    raise ConnectionClosedError(
+                        "Unable to connect to approved Pod"
+                    ) from e
                 await anyio.sleep(0.1 * connection_attempts)
+
+    async def _handle_connection(self, reader, writer) -> None:
+        """Track a local connection while it is forwarded."""
+        task = asyncio.current_task()
+        if task is not None:
+            self._connection_tasks.add(task)
+            task.add_done_callback(self._connection_tasks.discard)
+        try:
+            await self._sync_sockets(reader, writer)
+        finally:
+            if task is not None:
+                self._connection_tasks.discard(task)
 
     async def _sync_sockets(self, reader, writer) -> None:
         """Start two tasks to copy bytes from tcp=>websocket and websocket=>tcp."""
@@ -261,6 +381,15 @@ class PortForward:
                     async with anyio.create_task_group() as tg:
                         tg.start_soon(self._tcp_to_ws, ws, reader)
                         tg.start_soon(self._ws_to_tcp, ws, writer)
+        except BaseException as exc:
+            if not isinstance(exc, asyncio.CancelledError) and self.pod is not None:
+                # The pinned approval can no longer be fulfilled. Stop accepting
+                # new local connections and wake the background lifecycle; do
+                # not await server.wait_closed() from this active connection.
+                self._request_shutdown(exc)
+                for server in self.servers:
+                    server.close()
+            raise
         finally:
             writer.close()
 

@@ -123,7 +123,7 @@ async with pod.portforward(remote_port=1234) as local_port, httpx.AsyncClient() 
 `````
 
 ```{tip}
-This also works with {py:class}`Service <kr8s.objects.Service>` objects.
+This also works with {py:class}`Service <kr8s.objects.Service>` objects. A Service forward selects one ready Pod, records its UID, and keeps reconnecting to that selected instance instead of failing over through the current Service list. If Kubernetes reports the Pod missing or a refresh shows a different UID, the forward stops; create a new forward after the replacement instance is approved.
 ```
 
 ## Open a port forward permanently
