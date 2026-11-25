@@ -1,5 +1,10 @@
 # CHANGELOG
 
+## Version 7.2.0, 2026-11-25
+
+### Security (SEC)
+- Add a per-`PdfReader` resource budget limiting the number of decoded objects and the bytes consumed while decoding them (`decoded_object_limit`, `decoded_byte_limit`); shared objects are counted once and budget stops raise the new `ResourceBudgetExceededError`, distinct from malformed-file `PdfReadError`
+
 ## Version 7.1.1, 2026-11-18
 
 ### Security (SEC)

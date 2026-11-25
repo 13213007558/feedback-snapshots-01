@@ -41,6 +41,37 @@ for page in reader.pages:
 
 * `root_object_recovery_limit` limits the number of objects to read before stopping with Root object recovery in
   non-strict mode. It defaults to 10 000. Setting it to `None` will fully disable this limit.
+* `decoded_object_limit` limits the number of distinct objects decoded over the whole lifetime of the reader.
+  Fetching the metadata first and iterating over the pages afterwards share the same budget, and an object which is
+  referenced multiple times is decoded once and therefore only counted once. When the argument is not provided, the
+  global `Configuration.reader_maximum_decoded_object_count` value is used. Passing `None` disables the limit.
+* `decoded_byte_limit` limits the number of input bytes consumed while decoding the distinct objects over the whole
+  lifetime of the reader. The same sharing rules as for `decoded_object_limit` apply. When the argument is not
+  provided, the global `Configuration.reader_maximum_decoded_byte_count` value is used. Passing `None` disables the
+  limit.
+
+Exceeding one of these budgets raises
+{py:class}`~pypdf.errors.ResourceBudgetExceededError`, which is a security stop rather than an indication of a
+malformed document; corrupted files raise {py:class}`~pypdf.errors.PdfReadError` instead. The current counters are
+available through `reader.resource_budget`.
+
+```python
+from io import BytesIO
+from pypdf import PdfReader
+from pypdf.errors import PdfReadError, ResourceBudgetExceededError
+
+reader = PdfReader(BytesIO(pdf_data), decoded_object_limit=1_000, decoded_byte_limit=5_000_000)
+try:
+    _ = reader.metadata
+    for page in reader.pages:
+        _ = page.extract_text()
+except ResourceBudgetExceededError:
+    # The document requested more decoding work than the budget allows.
+    ...
+except PdfReadError:
+    # The document itself is malformed.
+    ...
+```
 
 If you want to employ custom limits for the *PdfWriter* as well, the currently preferred way
 is to initialize it from the reader, id est something like

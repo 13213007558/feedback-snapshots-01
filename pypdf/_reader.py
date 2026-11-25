@@ -46,9 +46,10 @@ if sys.version_info >= (3, 11):
 else:
     from typing_extensions import Self
 
-from ._configuration import apply_legacy_configuration
+from ._configuration import apply_legacy_configuration, get_configuration
 from ._doc_common import PdfDocCommon, convert_to_int
 from ._encryption import Encryption, PasswordType
+from ._resource_budget import ResourceBudget
 from ._utils import (
     WHITESPACES_AS_BYTES,
     StrByteType,
@@ -70,6 +71,7 @@ from .errors import (
     LimitReachedError,
     PdfReadError,
     PdfStreamError,
+    ResourceBudgetExceededError,
     WrongPasswordError,
 )
 from .generic import (
@@ -116,11 +118,26 @@ class PdfReader(PdfDocCommon):
             this security measure, pass ``None``.
         xref_stream_maximum_entries: The maximum number of entries which are
             allowed inside a stream-based cross-reference stream.
+        decoded_object_limit: The maximum number of distinct objects which
+            may be decoded over the whole lifetime of the reader. Metadata
+            access and page iteration share the same budget, and an object
+            referenced multiple times is only counted once. When unset, the
+            current
+            :attr:`~pypdf.Configuration.reader_maximum_decoded_object_count`
+            configuration value is used. Pass ``None`` to disable the limit.
+        decoded_byte_limit: The maximum number of input bytes which may be
+            consumed while decoding objects over the whole lifetime of the
+            reader. The same sharing rules as for ``decoded_object_limit``
+            apply. When unset, the current
+            :attr:`~pypdf.Configuration.reader_maximum_decoded_byte_count`
+            configuration value is used. Pass ``None`` to disable the limit.
 
     """
 
     xref: dict[int, dict[Any, Any]]
     trailer: DictionaryObject
+
+    _UNSET = object()
 
     def __init__(
         self,
@@ -130,12 +147,31 @@ class PdfReader(PdfDocCommon):
         *,
         root_object_recovery_limit: int | None = 10_000,
         xref_stream_maximum_entries: int = 2_000_000,
+        decoded_object_limit: int | None | object = _UNSET,
+        decoded_byte_limit: int | None | object = _UNSET,
     ) -> None:
         self.strict = strict
         self.flattened_pages: list[PageObject] | None = None
 
         #: Storage of parsed PDF objects.
         self.resolved_objects: dict[tuple[Any, Any], PdfObject | None] = {}
+
+        configuration = get_configuration()
+        maximum_object_count = (
+            configuration.reader_maximum_decoded_object_count
+            if decoded_object_limit is self._UNSET
+            else decoded_object_limit
+        )
+        maximum_byte_count = (
+            configuration.reader_maximum_decoded_byte_count
+            if decoded_byte_limit is self._UNSET
+            else decoded_byte_limit
+        )
+        #: Cumulative resource budget shared by all decoded objects.
+        self.resource_budget: ResourceBudget = ResourceBudget(
+            maximum_object_count=maximum_object_count,
+            maximum_byte_count=maximum_byte_count,
+        )
 
         self._startxref: int = 0
         self.xref_index = 0
@@ -270,6 +306,10 @@ class PdfReader(PdfDocCommon):
                 try:
                     obj = self.get_object(i + 1)
                 except MemoryError:  # pragma: no cover  # TODO: BLE001
+                    raise
+                except ResourceBudgetExceededError:
+                    # A resource budget stop must not be hidden as an ordinary
+                    # object recovery failure.
                     raise
                 except Exception:  # to be sure to capture all errors
                     obj = None
@@ -565,6 +605,10 @@ class PdfReader(PdfDocCommon):
                 # caching those stale versions would shadow the newer xref entry.
                 authoritative_stm, _idx = self.xref_objStm.get(obj_num, (None, None))
                 if authoritative_stm == stmnum:
+                    # The decoded bytes are charged once through the enclosing
+                    # object stream itself; embedded objects therefore only add
+                    # to the object count, not again to the byte count.
+                    self.resource_budget.charge(0, obj_num, 0)
                     self.cache_indirect_object(0, obj_num, obj)
 
                 if obj_num == indirect_reference.idnum:
@@ -662,7 +706,13 @@ class PdfReader(PdfDocCommon):
             if current_object in self._known_objects:
                 raise LimitReachedError(f"Detected loop with self reference for {indirect_reference!r}.")
             self._known_objects.add(current_object)
+            decode_start = self.stream.tell()
             retval = read_object(self.stream, self)
+            self.resource_budget.charge(
+                indirect_reference.generation,
+                indirect_reference.idnum,
+                self.stream.tell() - decode_start,
+            )
             self._known_objects.remove(current_object)
 
             # override encryption is used for the /Encrypt dictionary
@@ -696,7 +746,13 @@ class PdfReader(PdfDocCommon):
                 self.stream.seek(m.end(0) + 1)
                 skip_over_whitespace(self.stream)
                 self.stream.seek(-1, 1)
+                decode_start = self.stream.tell()
                 retval = read_object(self.stream, self)
+                self.resource_budget.charge(
+                    indirect_reference.generation,
+                    indirect_reference.idnum,
+                    self.stream.tell() - decode_start,
+                )
 
                 # override encryption is used for the /Encrypt dictionary
                 if not self._override_encryption and self._encryption is not None:
@@ -1271,6 +1327,11 @@ class PdfReader(PdfDocCommon):
             elif x.isdigit():
                 try:
                     xrefstream = self._read_pdf15_xref_stream(stream)
+                except ResourceBudgetExceededError:
+                    # A resource budget stop must not be relabeled as a
+                    # corrupted trailer; other limit errors keep their
+                    # historical wrapping behavior.
+                    raise
                 except Exception as exception:  # pragma: no cover
                     if TrailerKeys.ROOT in self.trailer:
                         logger_warning(
@@ -1373,6 +1434,9 @@ class PdfReader(PdfDocCommon):
             logger_warning("Invalid parent xref., rebuild xref", source=__name__)
             try:
                 self._rebuild_xref_table(stream)
+            except ResourceBudgetExceededError:
+                # Do not relabel a resource budget stop as an xref failure.
+                raise
             except Exception as exception:  # pragma: no cover
                 raise PdfReadError("Cannot rebuild xref") from exception  # pragma: no cover
             return None
@@ -1437,7 +1501,11 @@ class PdfReader(PdfDocCommon):
         """Read the cross-reference stream for PDF 1.5+."""
         stream.seek(-1, 1)
         stream_idnum, stream_generation = self.read_object_header(stream)
+        decode_start = stream.tell()
         xref_stream = cast(StreamObject, read_object(stream, self))
+        self.resource_budget.charge(
+            stream_generation, stream_idnum, stream.tell() - decode_start
+        )
         if cast(str, xref_stream["/Type"]) != "/XRef":
             raise PdfReadError(f"Unexpected type {xref_stream['/Type']!r}")
         self.cache_indirect_object(stream_generation, stream_idnum, xref_stream)

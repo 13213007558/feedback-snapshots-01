@@ -127,6 +127,19 @@ class Configuration:
     xfa_decoding_work_maximum_length: int = 300_000_000
     """The maximum allowed accumulated decoding work in bytes for the XFA form."""
 
+    reader_maximum_decoded_object_count: int = 10_000_000
+    """
+    The default maximum number of distinct objects which may be decoded by a single
+    :class:`~pypdf.PdfReader` instance over its whole lifetime. An object which is referenced
+    multiple times is decoded once and therefore only counted once.
+    """
+    reader_maximum_decoded_byte_count: int = 500_000_000
+    """
+    The default maximum number of input bytes which may be consumed while decoding objects with a
+    single :class:`~pypdf.PdfReader` instance over its whole lifetime. Bytes of an object which is
+    referenced multiple times are only counted once.
+    """
+
     jbig2dec_binary: str | None = dataclasses.field(default_factory=_determine_jbig2dec_binary)
     """
     The location of the ``jbig2dec`` binary.

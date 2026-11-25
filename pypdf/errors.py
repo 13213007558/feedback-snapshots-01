@@ -70,5 +70,20 @@ class LimitReachedError(PyPdfError):
     """Raised when a limit is reached."""
 
 
+class ResourceBudgetExceededError(LimitReachedError):
+    """
+    Raised when a :class:`~pypdf.PdfReader` exceeds its resource budget.
+
+    The resource budget bounds the cumulative number of decoded objects and
+    the cumulative number of bytes consumed while decoding them during the
+    whole lifetime of a single reader (for example fetching the metadata and
+    afterwards iterating over the pages share the same budget).
+
+    This is a security stop triggered by a resource budget, not an indication
+    that the PDF itself is malformed. Corrupt files raise
+    :class:`PdfReadError` (or one of its subclasses) instead.
+    """
+
+
 class XmpDocumentError(PyPdfError, RuntimeError):
     """Raised when the XMP XML document context is invalid or missing."""
