@@ -25,6 +25,7 @@ from taskiq.exceptions import (
     TaskiqError,
     TaskiqResultTimeoutError,
 )
+from taskiq.failure_categories import CategorizedTaskError, FailureCategory
 from taskiq.funcs import gather
 from taskiq.message import BrokerMessage, TaskiqMessage
 from taskiq.middlewares import (
@@ -35,6 +36,17 @@ from taskiq.middlewares import (
 from taskiq.result import TaskiqResult
 from taskiq.scheduler.scheduled_task import ScheduledTask
 from taskiq.scheduler.scheduler import TaskiqScheduler
+from taskiq.secure_results import (
+    DiagnosticGrant,
+    InMemoryRecordSink,
+    PublicTaskFailure,
+    PublicTaskFailureError,
+    PublicTaskStatus,
+    RecordSink,
+    RedactingResultBackend,
+    SecureResultBackend,
+    TaskDiagnostic,
+)
 from taskiq.state import TaskiqState
 from taskiq.task import AsyncTaskiqTask
 
@@ -48,19 +60,30 @@ __all__ = [
     "AsyncTaskiqDecoratedTask",
     "AsyncTaskiqTask",
     "BrokerMessage",
+    "CategorizedTaskError",
     "Context",
+    "DiagnosticGrant",
+    "FailureCategory",
     "InMemoryBroker",
+    "InMemoryRecordSink",
     "MultiBroker",
     "NoResultError",
     "PrometheusMiddleware",
+    "PublicTaskFailure",
+    "PublicTaskFailureError",
+    "PublicTaskStatus",
+    "RecordSink",
+    "RedactingResultBackend",
     "ResultGetError",
     "ResultIsReadyError",
     "ScheduleSource",
     "ScheduledTask",
+    "SecureResultBackend",
     "SecurityError",
     "SendTaskError",
     "SimpleRetryMiddleware",
     "SmartRetryMiddleware",
+    "TaskDiagnostic",
     "TaskiqDepends",
     "TaskiqError",
     "TaskiqEvents",

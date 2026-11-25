@@ -73,6 +73,33 @@ class AsyncTaskiqTask(Generic[_ReturnType]):
         except Exception as exc:
             raise ResultGetError from exc
 
+    async def get_public_status(self) -> Any:
+        """
+        Get the safe public status for this task.
+
+        Backends with native public status storage use it directly. Other
+        backends fall back to deriving a redacted status from their result.
+        """
+        getter = getattr(self.result_backend, "get_public_status", None)
+        if callable(getter):
+            return await getter(self.task_id)
+
+        from taskiq.secure_results import PublicTaskStatus
+
+        result = await self.get_result()
+        return PublicTaskStatus.from_result(self.task_id, result)
+
+    async def get_admin_result(
+        self,
+        *args: Any,
+        **kwargs: Any,
+    ) -> "TaskiqResult[_ReturnType]":
+        """Fetch full details through a backend's authorized diagnostic API."""
+        getter = getattr(self.result_backend, "get_admin_result", None)
+        if not callable(getter):
+            raise ResultGetError
+        return await getter(self.task_id, *args, **kwargs)
+
     async def wait_result(
         self,
         check_interval: float = 0.2,

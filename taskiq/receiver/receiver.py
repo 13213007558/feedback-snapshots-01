@@ -21,6 +21,7 @@ from taskiq.abc.middleware import TaskiqMiddleware
 from taskiq.acks import AckController, AcknowledgeType, parse_acknowledge_type
 from taskiq.context import Context
 from taskiq.exceptions import NoResultError
+from taskiq.failure_categories import classify_failure
 from taskiq.message import TaskiqMessage
 from taskiq.receiver.params_parser import parse_params
 from taskiq.result import TaskiqResult
@@ -218,12 +219,22 @@ class Receiver:
                 await maybe_awaitable(middleware.post_execute(taskiq_msg, result))
 
         try:
-            if not isinstance(result.error, NoResultError):
-                await self.broker.result_backend.set_result(taskiq_msg.task_id, result)
+            if isinstance(result.error, NoResultError):
+                await self.broker.result_backend.set_attempt_result(
+                    taskiq_msg.task_id,
+                    result,
+                )
+            else:
+                await self.broker.result_backend.set_result(
+                    taskiq_msg.task_id,
+                    result,
+                )
 
                 for middleware in reversed(self.broker.middlewares):
                     if middleware.__class__.post_save != TaskiqMiddleware.post_save:
-                        await maybe_awaitable(middleware.post_save(taskiq_msg, result))
+                        await maybe_awaitable(
+                            middleware.post_save(taskiq_msg, result),
+                        )
 
         except Exception as exc:
             logger.exception("Can't set result in result backend.")
@@ -392,6 +403,11 @@ class Receiver:
             log=None,
             return_value=returned,
             execution_time=round(execution_time, 2),
+            failure_category=(
+                classify_failure(found_exception)
+                if found_exception is not None
+                else None
+            ),
             error=found_exception,
             labels=message.labels,
         )

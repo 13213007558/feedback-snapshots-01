@@ -5,6 +5,7 @@ from typing import Any
 
 from taskiq.abc.middleware import TaskiqMiddleware
 from taskiq.exceptions import NoResultError
+from taskiq.failure_categories import classify_failure
 from taskiq.kicker import AsyncKicker
 from taskiq.message import TaskiqMessage
 from taskiq.result import TaskiqResult
@@ -108,6 +109,8 @@ class SimpleRetryMiddleware(TaskiqMiddleware):
             await kicker.kiq(*message.args, **message.kwargs)
 
             if self.no_result_on_retry:
+                result.failure_category = classify_failure(exception)
+                result.set_original_error(exception)
                 result.error = NoResultError()
 
         else:

@@ -4,7 +4,14 @@ import pickle
 import sys
 from typing import Any, Generic, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    field_serializer,
+    field_validator,
+)
 
 from taskiq.serialization import exception_to_python, prepare_exception
 
@@ -25,11 +32,22 @@ class TaskiqResult(BaseModel, Generic[_ReturnType]):
     log: str | None = None
     return_value: _ReturnType
     execution_time: float
+    failure_category: str | None = None
     labels: dict[str, Any] = Field(default_factory=dict)
 
     error: BaseException | None = None
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    _original_error: BaseException | None = PrivateAttr(default=None)
+
+    def set_original_error(self, error: BaseException | None) -> None:
+        """Store the original error behind a retry-suppression marker."""
+        self._original_error = error
+
+    def get_original_error(self) -> BaseException | None:
+        """Return an original error hidden from public serialization."""
+        return self._original_error
 
     @field_serializer("error")
     def serialize_error(self, value: BaseException) -> Any:
@@ -55,8 +73,8 @@ class TaskiqResult(BaseModel, Generic[_ReturnType]):
         return self
 
     def __getstate__(self) -> dict[Any, Any]:
-        dict = super().__getstate__()
-        vals: builtins.dict[str, Any] = dict["__dict__"]
+        state = super().__getstate__()
+        vals: builtins.dict[str, Any] = state["__dict__"]
 
         if "error" in vals and vals["error"] is not None:
             vals["error"] = prepare_exception(
@@ -64,7 +82,11 @@ class TaskiqResult(BaseModel, Generic[_ReturnType]):
                 pickle,
             )
 
-        return dict
+        private_values = state.get("__pydantic_private__")
+        if isinstance(private_values, dict):
+            private_values.pop("_original_error", None)
+
+        return state
 
     @field_validator("error", mode="before")
     @classmethod
