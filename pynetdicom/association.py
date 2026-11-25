@@ -20,6 +20,7 @@ from pydicom.tag import BaseTag
 from pydicom.uid import UID, ExplicitVRBigEndian, ImplicitVRLittleEndian
 
 from pynetdicom import _config, evt
+from pynetdicom._deid import deidentify_dataset
 from pynetdicom._globals import (
     DEFAULT_MAX_LENGTH,
     MODE_ACCEPTOR,
@@ -1799,6 +1800,12 @@ class Association(threading.Thread):
             If no accepted Presentation Context for `dataset` exists or if
             unable to encode the `dataset`.
 
+        pynetdicom.DeidentificationError
+            If the AE used to create the association has a
+            :attr:`~pynetdicom.ae.ApplicationEntity.deidentifier` set and the
+            dataset couldn't be de-identified. No C-STORE request is sent in
+            this case.
+
         See Also
         --------
 
@@ -1841,7 +1848,9 @@ class Association(threading.Thread):
         allow_conversion = True
         if not isinstance(dataset, Dataset):
             fpath = Path(dataset)
-            if not _config.STORE_SEND_CHUNKED_DATASET:
+            # Chunked sending bypasses decoding, which means the de-identifier
+            #   can't be applied, so decode instead when one is set
+            if not _config.STORE_SEND_CHUNKED_DATASET or self.ae.deidentifier:
                 dataset = dcmread(os.fspath(fpath))
             else:
                 dataset = None  # type: ignore[assignment]
@@ -1866,6 +1875,14 @@ class Association(threading.Thread):
                 sop_class = cast(UID, file_meta.MediaStorageSOPClassUID)
                 sop_instance = cast(UID, file_meta.MediaStorageSOPInstanceUID)
                 tsyntax = cast(UID, file_meta.TransferSyntaxUID)
+
+        # A deployment supplied de-identifier must be applied before the
+        #   dataset leaves the process, so before the presentation context is
+        #   selected and the dataset is encoded for the peer
+        if dataset:
+            dataset = deidentify_dataset(
+                cast(Dataset, dataset), self.ae.deidentifier
+            )
 
         if dataset:
             dataset = cast(Dataset, dataset)

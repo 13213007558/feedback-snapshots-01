@@ -35,3 +35,11 @@ Utilities
    :toctree: generated/
 
    debug_logger
+
+Exceptions
+----------
+
+.. autosummary::
+   :toctree: generated/
+
+   DeidentificationError

@@ -47,6 +47,47 @@ the *ae_title* keyword parameter in
 :meth:`AE.start_server()<pynetdicom.ae.ApplicationEntity.start_server>`.
 
 
+De-identifying outgoing datasets
+--------------------------------
+
+A deployment can supply a de-identification operation using the
+:attr:`~ApplicationEntity.deidentifier` property. Whenever it's set the
+operation is applied to every dataset sent by the AE using the Storage
+Service, before the dataset is encoded for the peer. This covers both direct
+C-STORE requests sent using
+:meth:`~pynetdicom.association.Association.send_c_store` and the C-STORE
+sub-operations generated when the AE acts as a Query/Retrieve SCP for C-GET and
+C-MOVE requests.
+
+.. code-block:: python
+
+    from copy import deepcopy
+
+    from pynetdicom import AE, DeidentificationError
+
+    def deidentify(ds):
+        ds = deepcopy(ds)
+        ds.PatientName = "ANONYMOUS"
+        ds.PatientID = ""
+        ds.PatientBirthDate = ""
+
+        return ds
+
+    ae = AE()
+    ae.deidentifier = deidentify
+
+The operation should return a new dataset rather than modifying the dataset
+passed to it, and the returned dataset must still be usable for C-STORE, that
+is, it must contain *SOP Class UID*, *SOP Instance UID* and the File Meta
+Information elements.
+
+If the operation raises an exception, returns ``None`` or returns an unusable
+dataset then no C-STORE request is sent and
+:class:`~pynetdicom.DeidentificationError` is raised. For C-GET and C-MOVE, the
+affected sub-operation is counted as a failure and the reason is included in
+the final response's *Error Comment*. The original values are never sent using
+another presentation context or transfer syntax as a fallback.
+
 References
 ..........
 

@@ -19,6 +19,8 @@ from pydicom.dataset import Dataset
 from pydicom.tag import Tag
 
 from pynetdicom import _config, evt
+from pynetdicom._deid import error_comment
+from pynetdicom._exceptions import DeidentificationError
 from pynetdicom._globals import (
     STATUS_CANCEL,
     STATUS_FAILURE,
@@ -1752,6 +1754,8 @@ class QueryRetrieveServiceClass(ServiceClass):
 
         # Store the SOP Instance UIDs from any failed C-STORE sub-operations
         failed_instances = []
+        # Store explanations for any failed C-STORE sub-operations
+        failed_reasons: list[str] = []
 
         def _add_failed_instance(ds: Dataset) -> None:
             if hasattr(ds, "SOPInstanceUID"):
@@ -1952,6 +1956,19 @@ class QueryRetrieveServiceClass(ServiceClass):
                     status_ds = self.assoc.send_c_store(dataset, msg_id=msg_id)
                     store_status_int = status_ds.Status
                     store_status = STORAGE_SERVICE_CLASS_STATUS[store_status_int]
+                except DeidentificationError as exc:
+                    # The dataset must never leave the process when it can't
+                    #   be de-identified, so this is a sub-operation failure
+                    uid = exc.sop_instance_uid or getattr(
+                        dataset, "SOPInstanceUID", ""
+                    )
+                    LOGGER.error(
+                        f"C-STORE sub-operation failed: unable to de-identify "
+                        f"SOP Instance '{uid}': {exc.reason}"
+                    )
+                    store_status_int = None
+                    store_status = (STATUS_FAILURE, "De-identification failed")
+                    failed_reasons.append(exc.reason)
                 except Exception as exc:
                     # An exception implies a C-STORE failure
                     LOGGER.warning("C-STORE sub-operation failed.")
@@ -2018,6 +2035,10 @@ class QueryRetrieveServiceClass(ServiceClass):
                 transfer_syntax.is_deflated,
             )
             rsp.Identifier = BytesIO(cast(bytes, bytestream))
+
+            # Explain any sub-operation failures in the final response
+            if failed_reasons:
+                rsp.ErrorComment = error_comment("; ".join(failed_reasons))
 
         rsp.NumberOfFailedSuboperations = store_results[1]
         rsp.NumberOfWarningSuboperations = store_results[2]
@@ -2179,6 +2200,8 @@ class QueryRetrieveServiceClass(ServiceClass):
 
         # Store the SOP Instance UIDs from any failed C-STORE sub-operations
         failed_instances = []
+        # Store explanations for any failed C-STORE sub-operations
+        failed_reasons: list[str] = []
 
         def _add_failed_instance(ds: Dataset) -> None:
             if hasattr(ds, "SOPInstanceUID"):
@@ -2359,6 +2382,19 @@ class QueryRetrieveServiceClass(ServiceClass):
 
                     store_status_int = status_ds.Status
                     store_status = STORAGE_SERVICE_CLASS_STATUS[store_status_int]
+                except DeidentificationError as exc:
+                    # The dataset must never leave the process when it can't
+                    #   be de-identified, so this is a sub-operation failure
+                    uid = exc.sop_instance_uid or getattr(
+                        dataset, "SOPInstanceUID", ""
+                    )
+                    LOGGER.error(
+                        f"C-STORE sub-operation failed: unable to de-identify "
+                        f"SOP Instance '{uid}': {exc.reason}"
+                    )
+                    store_status_int = None
+                    store_status = (STATUS_FAILURE, "De-identification failed")
+                    failed_reasons.append(exc.reason)
                 except Exception as exc:
                     # An exception implies a C-STORE failure
                     LOGGER.warning("C-STORE sub-operation failed.")
@@ -2429,6 +2465,10 @@ class QueryRetrieveServiceClass(ServiceClass):
                 transfer_syntax.is_deflated,
             )
             rsp.Identifier = BytesIO(cast(bytes, bytestream))
+
+            # Explain any sub-operation failures in the final response
+            if failed_reasons:
+                rsp.ErrorComment = error_comment("; ".join(failed_reasons))
 
         rsp.NumberOfFailedSuboperations = store_results[1]
         rsp.NumberOfWarningSuboperations = store_results[2]

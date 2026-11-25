@@ -42,6 +42,7 @@ assert PYNETDICOM_IMPLEMENTATION_UID.is_valid
 # Convenience imports
 # ruff: noqa: F401
 from pynetdicom import events as evt
+from pynetdicom._exceptions import DeidentificationError
 from pynetdicom._globals import (
     ALL_TRANSFER_SYNTAXES,
     DEFAULT_TRANSFER_SYNTAXES,
@@ -98,6 +99,7 @@ __all__ = [
     "AE",
     "ALL_TRANSFER_SYNTAXES",
     "DEFAULT_TRANSFER_SYNTAXES",
+    "DeidentificationError",
     "PYNETDICOM_IMPLEMENTATION_UID",
     "PYNETDICOM_IMPLEMENTATION_VERSION",
     "PYNETDICOM_UID_PREFIX",
