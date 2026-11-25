@@ -53,7 +53,7 @@ from sqlalchemy.sql.ddl import DropTable
 from sqlalchemy.sql.elements import BindParameter, literal
 from sqlalchemy.sql.type_api import TypeEngine
 
-from .._enums import CoalescePolicy, ConflictPolicy, JobOutcome
+from .._enums import CoalescePolicy, ConflictPolicy, JobOutcome, JobResultState
 from .._events import (
     DataStoreEvent,
     Event,
@@ -75,7 +75,15 @@ from .._exceptions import (
     SerializationError,
     TaskLookupError,
 )
-from .._structures import Job, JobResult, Schedule, ScheduleResult, Task
+from .._structures import (
+    Job,
+    JobResult,
+    JobResultClaim,
+    JobResultStatus,
+    Schedule,
+    ScheduleResult,
+    Task,
+)
 from .._utils import create_repr, current_async_library
 from ..abc import EventBroker
 from .base import BaseExternalDataStore
@@ -130,6 +138,7 @@ class _JobDiscard:
     schedule_id: str | None
     scheduled_fire_time: datetime | None
     result_expires_at: datetime
+    owner: str | None = None
     exception: Exception | None = None
 
 
@@ -339,6 +348,7 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
             Column("job_executor", Unicode(500), nullable=False),
             Column("max_running_jobs", Integer),
             Column("misfire_grace_time", interval_type),
+            Column("owner", Unicode(500)),
             Column("metadata", json_type, nullable=False),
             Column("running_jobs", Integer, nullable=False, server_default=literal(0)),
         )
@@ -375,6 +385,7 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
             Column("jitter", interval_type),
             Column("start_deadline", timestamp_type),
             Column("result_expiration_time", interval_type),
+            Column("owner", Unicode(500)),
             Column("metadata", json_type, nullable=False),
             Column("created_at", timestamp_type, nullable=False, index=True),
             Column("acquired_by", Unicode(500), index=True),
@@ -390,6 +401,10 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
             Column("expires_at", timestamp_type, nullable=False, index=True),
             Column("exception", LargeBinary),
             Column("return_value", LargeBinary),
+            Column("owner", Unicode(500)),
+            Column("claimed_by", Unicode(500)),
+            Column("claimed_at", timestamp_type),
+            Column("expired", Boolean, nullable=False, server_default=literal(False)),
         )
         return metadata
 
@@ -490,6 +505,7 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
             job_executor=task.job_executor,
             max_running_jobs=task.max_running_jobs,
             misfire_grace_time=task.misfire_grace_time,
+            owner=task.owner,
             metadata=task.metadata,
         )
         try:
@@ -505,6 +521,7 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
                     job_executor=task.job_executor,
                     max_running_jobs=task.max_running_jobs,
                     misfire_grace_time=task.misfire_grace_time,
+                    owner=task.owner,
                     metadata=task.metadata,
                 )
                 .where(self._t_tasks.c.id == task.id)
@@ -882,6 +899,7 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
                             self._t_jobs,
                             self._t_tasks.c.max_running_jobs,
                             self._t_tasks.c.running_jobs,
+                            self._t_tasks.c.owner.label("task_owner"),
                         )
                         .join(
                             self._t_tasks, self._t_tasks.c.id == self._t_jobs.c.task_id
@@ -920,6 +938,7 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
                         job_dict = row._asdict()
                         task_max_running_jobs = job_dict.pop("max_running_jobs")
                         task_running_jobs = job_dict.pop("running_jobs")
+                        task_owner = job_dict.pop("task_owner")
                         if task_max_running_jobs is not None:
                             task_job_slots_left.setdefault(
                                 row.task_id, task_max_running_jobs - task_running_jobs
@@ -939,6 +958,7 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
                                     schedule_id=row.schedule_id,
                                     scheduled_fire_time=row.scheduled_fire_time,
                                     result_expires_at=now + row.result_expiration_time,
+                                    owner=task_owner,
                                     exception=exc,
                                 )
                             )
@@ -954,6 +974,7 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
                                     schedule_id=row.schedule_id,
                                     scheduled_fire_time=row.scheduled_fire_time,
                                     result_expires_at=now + row.result_expiration_time,
+                                    owner=task_owner,
                                 )
                             )
                             continue
@@ -1024,6 +1045,7 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
                                 discard.schedule_id,
                                 discard.scheduled_fire_time,
                                 decrement_running_job_count=False,
+                                owner=discard.owner,
                             )
                         )
 
@@ -1043,10 +1065,12 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
         scheduled_fire_time: datetime | None = None,
         *,
         decrement_running_job_count: bool = True,
+        owner: str | None = None,
     ) -> JobReleased:
         # Record the job result
         if result.expires_at > result.finished_at:
             marshalled = result.marshal(self.serializer)
+            marshalled["owner"] = owner
             insert = self._t_job_results.insert().values(**marshalled)
             await self._execute(conn, insert)
 
@@ -1079,27 +1103,156 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
                         job.task_id,
                         job.schedule_id,
                         job.scheduled_fire_time,
+                        owner=job.owner,
                     )
 
         # Notify other schedulers
         await self._event_broker.publish(event)
 
     async def get_job_result(self, job_id: UUID) -> JobResult | None:
+        now = datetime.now(UTC)
         async for attempt in self._retry():
             with attempt:
                 async with self._begin_transaction() as conn:
-                    # Retrieve the result
+                    # Retrieve the result, unless it has already expired
                     query = self._t_job_results.select().where(
-                        self._t_job_results.c.job_id == job_id
+                        self._t_job_results.c.job_id == job_id,
+                        self._t_job_results.c.expired.is_(false()),
+                    )
+                    row = (await self._execute(conn, query)).one_or_none()
+                    if row is not None:
+                        if row.expires_at <= now:
+                            # The result has expired; leave a tombstone behind
+                            update = (
+                                self._t_job_results.update()
+                                .where(self._t_job_results.c.job_id == job_id)
+                                .values(
+                                    expired=True,
+                                    exception=None,
+                                    return_value=None,
+                                )
+                            )
+                            await self._execute(conn, update)
+                            row = None
+                        else:
+                            # Delete the result
+                            delete = self._t_job_results.delete().where(
+                                self._t_job_results.c.job_id == job_id
+                            )
+                            await self._execute(conn, delete)
+
+        return (
+            JobResult.unmarshal(self.serializer, self._result_columns(row))
+            if row
+            else None
+        )
+
+    def _result_columns(self, row: Any) -> dict[str, Any]:
+        result = row._asdict()
+        for key in ("owner", "claimed_by", "claimed_at", "expired"):
+            result.pop(key, None)
+
+        return result
+
+    async def observe_job_result(self, job_id: UUID) -> JobResultStatus:
+        now = datetime.now(UTC)
+        async for attempt in self._retry():
+            with attempt:
+                async with self._begin_transaction() as conn:
+                    query = select(
+                        self._t_job_results.c.finished_at,
+                        self._t_job_results.c.expires_at,
+                        self._t_job_results.c.claimed_at,
+                        self._t_job_results.c.expired,
+                    ).where(self._t_job_results.c.job_id == job_id)
+                    row = (await self._execute(conn, query)).one_or_none()
+
+        if row is None:
+            return JobResultStatus(job_id=job_id, state=JobResultState.pending)
+
+        if row.claimed_at is not None:
+            return JobResultStatus(
+                job_id=job_id,
+                state=JobResultState.claimed,
+                finished_at=row.finished_at,
+                expires_at=row.expires_at,
+            )
+
+        if row.expired or row.expires_at <= now:
+            return JobResultStatus(
+                job_id=job_id,
+                state=JobResultState.expired,
+                finished_at=row.finished_at,
+                expires_at=row.expires_at,
+            )
+
+        return JobResultStatus(
+            job_id=job_id,
+            state=JobResultState.ready,
+            finished_at=row.finished_at,
+            expires_at=row.expires_at,
+        )
+
+    async def claim_job_result(
+        self, job_id: UUID, *, owner: str
+    ) -> JobResultClaim:
+        now = datetime.now(UTC)
+        claimed_result: JobResult | None = None
+        async for attempt in self._retry():
+            with attempt:
+                async with self._begin_transaction() as conn:
+                    # Atomically claim the result, but only if it belongs to the
+                    # requesting party and has not expired or been claimed yet
+                    query = self._t_job_results.select().where(
+                        self._t_job_results.c.job_id == job_id,
+                        self._t_job_results.c.owner == owner,
+                        self._t_job_results.c.claimed_at.is_(None),
+                        self._t_job_results.c.expired.is_(false()),
+                        self._t_job_results.c.expires_at > now,
                     )
                     if row := (await self._execute(conn, query)).one_or_none():
-                        # Delete the result
-                        delete = self._t_job_results.delete().where(
-                            self._t_job_results.c.job_id == job_id
+                        update = (
+                            self._t_job_results.update()
+                            .where(
+                                self._t_job_results.c.job_id == job_id,
+                                self._t_job_results.c.claimed_at.is_(None),
+                            )
+                            .values(claimed_by=owner, claimed_at=now)
                         )
-                        await self._execute(conn, delete)
+                        update_result = await self._execute(conn, update)
+                        if update_result.rowcount == 1:
+                            claimed_result = JobResult.unmarshal(
+                                self.serializer,
+                                self._result_columns(row),
+                            )
 
-        return JobResult.unmarshal(self.serializer, row._asdict()) if row else None
+        status = await self.observe_job_result(job_id)
+        if claimed_result is not None:
+            status = attrs.evolve(status, state=JobResultState.claimed)
+            return JobResultClaim(status=status, result=claimed_result)
+
+        return JobResultClaim(status=status)
+
+    async def expire_job_result(self, job_id: UUID) -> None:
+        now = datetime.now(UTC)
+        async for attempt in self._retry():
+            with attempt:
+                async with self._begin_transaction() as conn:
+                    update = (
+                        self._t_job_results.update()
+                        .where(
+                            self._t_job_results.c.job_id == job_id,
+                            self._t_job_results.c.claimed_at.is_(None),
+                            self._t_job_results.c.expired.is_(false()),
+                            self._t_job_results.c.expires_at <= now,
+                        )
+                        .values(
+                            expired=True,
+                            exception=None,
+                            return_value=None,
+                        )
+                    )
+                    await self._execute(conn, update)
 
     async def extend_acquired_schedule_leases(
         self, scheduler_id: str, schedule_ids: set[str], duration: timedelta
@@ -1159,6 +1312,7 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
                                 job.task_id,
                                 job.schedule_id,
                                 job.scheduled_fire_time,
+                                owner=job.owner,
                             )
                             events.append(event)
 
@@ -1170,11 +1324,22 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
             with attempt:
                 events: list[Event] = []
                 async with self._begin_transaction() as conn:
-                    # Purge expired job results
-                    delete = self._t_job_results.delete().where(
-                        self._t_job_results.c.expires_at <= datetime.now(UTC)
+                    # Purge expired job results, but leave a tombstone behind so
+                    # observers and the owning business party can tell that the result
+                    # expired instead of receiving an ambiguous "not found"
+                    update = (
+                        self._t_job_results.update()
+                        .where(
+                            self._t_job_results.c.expires_at <= datetime.now(UTC),
+                            self._t_job_results.c.claimed_at.is_(None),
+                            self._t_job_results.c.expired.is_(false()),
+                        )                        .values(
+                            expired=True,
+                            exception=None,
+                            return_value=None,
+                        )
                     )
-                    await self._execute(conn, delete)
+                    await self._execute(conn, update)
 
                     # Finish any jobs whose leases have expired
                     now = datetime.now(UTC)
@@ -1185,6 +1350,9 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
                         self._t_jobs.c.scheduled_fire_time,
                         self._t_jobs.c.acquired_by,
                         self._t_jobs.c.result_expiration_time,
+                        self._t_tasks.c.owner.label("owner"),
+                    ).join(
+                        self._t_tasks, self._t_tasks.c.id == self._t_jobs.c.task_id
                     ).where(
                         self._t_jobs.c.acquired_by.isnot(None),
                         self._t_jobs.c.acquired_until < now,
@@ -1204,6 +1372,7 @@ class SQLAlchemyDataStore(BaseExternalDataStore):
                                 row.task_id,
                                 row.schedule_id,
                                 row.scheduled_fire_time,
+                                owner=row.owner,
                             )
                         )
 

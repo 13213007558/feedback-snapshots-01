@@ -40,6 +40,7 @@ from apscheduler import (
     JobLookupError,
     JobOutcome,
     JobReleased,
+    JobResultState,
     RunState,
     ScheduleAdded,
     ScheduleLookupError,
@@ -388,6 +389,40 @@ class TestAsyncScheduler:
                 assert result
                 assert result.outcome is JobOutcome.success
                 assert result.return_value == "returnvalue"
+
+    async def test_result_portal_claim_after_scheduler_run(
+        self, raw_datastore: DataStore
+    ) -> None:
+        async with AsyncExitStack() as exit_stack:
+            scheduler = await exit_stack.enter_async_context(
+                AsyncScheduler(data_store=raw_datastore)
+            )
+            job_id = await scheduler.add_job(
+                dummy_async_job,
+                result_expiration_time=10,
+                owner="business",
+            )
+            portal = scheduler.result_portal
+            assert (await portal.observe(job_id)).state is JobResultState.pending
+
+            await scheduler.start_in_background()
+            with fail_after(3):
+                status = await portal.wait_for_terminal_state(job_id, timeout=2)
+
+            assert status.state is JobResultState.ready
+
+            # An auditor can look at the result without consuming it
+            assert (await portal.observe(job_id)).state is JobResultState.ready
+
+            # The owning party can claim it exactly once
+            claim = await portal.claim(job_id, owner="business")
+            assert claim.claimed
+            assert claim.result is not None
+            assert claim.result.return_value == "returnvalue"
+
+            second_claim = await portal.claim(job_id, owner="business")
+            assert not second_claim.claimed
+            assert second_claim.status.state is JobResultState.claimed
 
     @pytest.mark.parametrize("success", [True, False])
     async def test_run_job(self, raw_datastore: DataStore, success: bool) -> None:

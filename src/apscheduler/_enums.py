@@ -91,6 +91,33 @@ class JobOutcome(Enum):
     abandoned = auto()
 
 
+class JobResultState(Enum):
+    """
+    Describes the lifecycle state of a job result as seen through the result portal.
+
+    .. attribute:: pending
+
+        the job has not finished yet, or it finished without leaving a stored result
+
+    .. attribute:: ready
+
+        a result is available for the owning business party to claim once
+
+    .. attribute:: claimed
+
+        the result was already claimed, so its payload can no longer be read
+
+    .. attribute:: expired
+
+        the result reached its expiration time before anyone claimed it
+    """
+
+    pending = auto()
+    ready = auto()
+    claimed = auto()
+    expired = auto()
+
+
 class ConflictPolicy(Enum):
     """
     Used to indicate what to do when trying to add a schedule whose ID conflicts with an

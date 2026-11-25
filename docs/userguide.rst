@@ -521,6 +521,55 @@ you need to pass an appropriate ``result_expiration_time`` parameter to
 :meth:`~Scheduler.get_job_result` with the job ID you got from
 :meth:`~Scheduler.add_job` to retrieve the result.
 
+Observing and claiming results from a portal
+============================================
+
+:meth:`~Scheduler.get_job_result` consumes the result as soon as it is read. This is
+not suitable for portals where one party (such as an audit team) needs to check whether
+a background task has finished, while another party (the business party owning the
+task) is entitled to the actual result exactly once.
+
+For such cases, use :attr:`~Scheduler.result_portal`. It provides three distinct
+operations:
+
+* :meth:`JobResultPortal.observe` returns a :class:`JobResultStatus` describing whether
+  the result is ``pending``, ``ready``, ``claimed`` or ``expired``. It never consumes
+  the result, so it can be called any number of times by any party.
+* :meth:`JobResultPortal.claim` hands the payload to the owning business party, once.
+  A party that does not own the job, or a party trying to claim a second time, receives
+  a status explaining why no payload was returned.
+* :meth:`JobResultPortal.wait_for_terminal_state` and
+  :meth:`JobResultPortal.wait_and_claim` wait until the result is no longer pending.
+  Expiry while waiting also ends the wait, so waiters do not block forever on a result
+  that can no longer appear.
+
+The owning party is set with the ``owner`` argument of :meth:`~Scheduler.configure_task`
+or :meth:`~Scheduler.add_job` (or the ``owner`` argument of the :func:`~apscheduler.task`
+decorator). Results only become claimable by that identifier.
+
+Here is an example::
+
+    job_id = scheduler.add_job(
+        my_task, result_expiration_time=timedelta(minutes=5), owner="billing"
+    )
+
+    # An auditor only observes the state; this does not consume the result
+    status = scheduler.result_portal.observe(job_id)
+    print(status.state)  # JobResultState.ready
+
+    # The owning business party claims the result exactly once
+    claim = scheduler.result_portal.claim(job_id, owner="billing")
+    if claim.claimed:
+        print(claim.result.return_value)
+
+    # Once expired (if it was not claimed), both parties see an explicit state
+    print(scheduler.result_portal.observe(job_id).state)  # JobResultState.expired
+
+.. note:: The observation and claim operations require a data store that implements
+   them. The built-in memory and SQLAlchemy data stores do so; custom data stores
+   should override :meth:`~abc.DataStore.observe_job_result` and
+   :meth:`~abc.DataStore.claim_job_result` accordingly.
+
 Context variables
 =================
 

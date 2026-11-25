@@ -18,6 +18,7 @@ from anyio.from_thread import BlockingPortal, start_blocking_portal
 from .. import current_scheduler
 from .._enums import CoalescePolicy, ConflictPolicy, RunState, SchedulerRole
 from .._events import Event, T_Event
+from .._result_portal import JobResultPortal
 from .._structures import Job, JobResult, MetadataType, Schedule, Task, TaskDefaults
 from .._utils import UnsetValue, create_repr, unset
 from ..abc import DataStore, EventBroker, JobExecutor, Subscription, Trigger
@@ -239,6 +240,7 @@ class Scheduler:
         job_executor: str | UnsetValue = unset,
         misfire_grace_time: float | timedelta | None | UnsetValue = unset,
         max_running_jobs: int | None | UnsetValue = unset,
+        owner: str | None | UnsetValue = unset,
         metadata: MetadataType | UnsetValue = unset,
     ) -> Task:
         portal = self._ensure_services_ready()
@@ -250,6 +252,7 @@ class Scheduler:
                 job_executor=job_executor,
                 misfire_grace_time=misfire_grace_time,
                 max_running_jobs=max_running_jobs,
+                owner=owner,
                 metadata=metadata,
             )
         )
@@ -273,6 +276,7 @@ class Scheduler:
         metadata: MetadataType | UnsetValue = unset,
         max_jitter: float | timedelta | None = None,
         job_result_expiration_time: float | timedelta = 0,
+        owner: str | None | UnsetValue = unset,
         conflict_policy: ConflictPolicy = ConflictPolicy.do_nothing,
     ) -> str:
         portal = self._ensure_services_ready()
@@ -290,6 +294,7 @@ class Scheduler:
                 misfire_grace_time=misfire_grace_time,
                 max_jitter=max_jitter,
                 job_result_expiration_time=job_result_expiration_time,
+                owner=owner,
                 metadata=metadata,
                 conflict_policy=conflict_policy,
             )
@@ -335,6 +340,7 @@ class Scheduler:
         job_executor: str | UnsetValue = unset,
         metadata: MetadataType | UnsetValue = unset,
         result_expiration_time: timedelta | float = 0,
+        owner: str | None | UnsetValue = unset,
     ) -> UUID:
         portal = self._ensure_services_ready()
         return portal.call(
@@ -346,6 +352,7 @@ class Scheduler:
                 job_executor=job_executor,
                 metadata=metadata,
                 result_expiration_time=result_expiration_time,
+                owner=owner,
             )
         )
 
@@ -357,6 +364,18 @@ class Scheduler:
         portal = self._ensure_services_ready()
         return portal.call(
             partial(self._async_scheduler.get_job_result, job_id, wait=wait)
+        )
+
+    @property
+    def result_portal(self) -> JobResultPortal:
+        """
+        A portal for observing and claiming job results without consuming them.
+
+        Unlike :meth:`get_job_result`, the portal separates read-only observation
+        (safe for auditors) from a single claim by the owning business party.
+        """
+        return JobResultPortal(
+            self._async_scheduler.data_store, self._async_scheduler.event_broker
         )
 
     def run_job(

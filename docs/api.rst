@@ -104,11 +104,23 @@ Enumerated types
 .. autoclass:: apscheduler.JobOutcome()
     :show-inheritance:
 
+.. autoclass:: apscheduler.JobResultState()
+    :show-inheritance:
+
 .. autoclass:: apscheduler.ConflictPolicy()
     :show-inheritance:
 
 .. autoclass:: apscheduler.CoalescePolicy()
     :show-inheritance:
+
+Job results
+-----------
+
+.. autoclass:: apscheduler.JobResult
+.. autoclass:: apscheduler.JobResultStatus
+.. autoclass:: apscheduler.JobResultClaim
+.. autoclass:: apscheduler.JobResultPortal
+   :members:
 
 Context variables
 -----------------

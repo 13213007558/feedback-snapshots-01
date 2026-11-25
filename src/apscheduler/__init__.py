@@ -9,6 +9,7 @@ from ._decorators import task as task
 from ._enums import CoalescePolicy as CoalescePolicy
 from ._enums import ConflictPolicy as ConflictPolicy
 from ._enums import JobOutcome as JobOutcome
+from ._enums import JobResultState as JobResultState
 from ._enums import RunState as RunState
 from ._enums import SchedulerRole as SchedulerRole
 from ._events import DataStoreEvent as DataStoreEvent
@@ -41,10 +42,13 @@ from ._exceptions import SerializationError as SerializationError
 from ._exceptions import TaskLookupError as TaskLookupError
 from ._retry import RetryMixin as RetryMixin
 from ._retry import RetrySettings as RetrySettings
+from ._result_portal import JobResultPortal as JobResultPortal
 from ._schedulers.async_ import AsyncScheduler as AsyncScheduler
 from ._schedulers.sync import Scheduler as Scheduler
 from ._structures import Job as Job
 from ._structures import JobResult as JobResult
+from ._structures import JobResultClaim as JobResultClaim
+from ._structures import JobResultStatus as JobResultStatus
 from ._structures import Schedule as Schedule
 from ._structures import ScheduleResult as ScheduleResult
 from ._structures import Task as Task

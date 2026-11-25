@@ -10,7 +10,7 @@ from attr.setters import frozen
 from attrs.validators import and_, gt, instance_of, matches_re, min_len, optional
 
 from ._converters import as_aware_datetime, as_enum, as_timedelta
-from ._enums import CoalescePolicy, JobOutcome
+from ._enums import CoalescePolicy, JobOutcome, JobResultState
 from ._utils import UnsetValue, unset
 from ._validators import if_not_unset, valid_metadata
 from .abc import Serializer, Trigger
@@ -41,6 +41,8 @@ class Task:
     :var ~datetime.timedelta | None misfire_grace_time: maximum number of seconds the
         run time of jobs created for this task are allowed to be late, compared to the
         scheduled run time
+    :var str | None owner: identifier of the business party that owns jobs of this task
+        and is allowed to claim their results
     :var metadata: key-value pairs for storing JSON compatible custom information
     """
 
@@ -59,6 +61,11 @@ class Task:
         default=None,
         converter=as_timedelta,
         validator=optional(instance_of(timedelta)),
+        on_setattr=frozen,
+    )
+    owner: str | None = attrs.field(
+        default=None,
+        validator=optional(and_(instance_of(str), min_len(1))),
         on_setattr=frozen,
     )
     metadata: MetadataType = attrs.field(validator=valid_metadata, factory=dict)
@@ -99,6 +106,8 @@ class TaskDefaults:
     :param ~datetime.timedelta | None misfire_grace_time: maximum number of seconds the
         run time of jobs created for this task are allowed to be late, compared to the
         scheduled run time
+    :param str | None owner: identifier of the business party that owns jobs of this
+        task (if not overridden per task)
     :var metadata: key-value pairs for storing JSON compatible custom information
     """
 
@@ -112,6 +121,10 @@ class TaskDefaults:
         converter=as_timedelta,
         validator=optional(instance_of(timedelta)),
         default=None,
+    )
+    owner: str | None | UnsetValue = attrs.field(
+        validator=if_not_unset(optional(and_(instance_of(str), min_len(1)))),
+        default=unset,
     )
     metadata: MetadataType = attrs.field(validator=valid_metadata, factory=dict)
 
@@ -277,6 +290,7 @@ class Job:
         scheduler after this time, it is considered to be misfired and will be aborted
     :var ~datetime.timedelta result_expiration_time: minimum amount of time to keep the
         result available for fetching in the data store
+    :var str | None owner: identifier of the business party that owns this job's result
     :var metadata: key-value pairs for storing JSON compatible custom information
     :var ~datetime.datetime created_at: the time at which the job was created
     :var str | None acquired_by: the unique identifier of the scheduler that has
@@ -306,6 +320,11 @@ class Job:
     )
     result_expiration_time: timedelta = attrs.field(
         converter=as_timedelta, default=timedelta(), repr=False, on_setattr=frozen
+    )
+    owner: str | None = attrs.field(
+        default=None,
+        validator=optional(and_(instance_of(str), min_len(1))),
+        on_setattr=frozen,
     )
     metadata: MetadataType = attrs.field(validator=valid_metadata, factory=dict)
     created_at: datetime = attrs.field(
@@ -438,3 +457,45 @@ class JobResult:
             return self.job_id == other.job_id
 
         return NotImplemented
+
+
+@attrs.define(kw_only=True, frozen=True)
+class JobResultStatus:
+    """
+    A read-only snapshot of a job result's lifecycle state.
+
+    This is what the result portal returns for observers such as an audit team: it
+    reveals whether the result is pending, ready, claimed or expired without consuming
+    the result itself.
+
+    :var ~uuid.UUID job_id: the unique identifier of the job
+    :var JobResultState state: the current lifecycle state of the result
+    :var ~datetime.datetime | None finished_at: when the job finished, if it has
+    :var ~datetime.datetime | None expires_at: when the result expires, if it has
+    """
+
+    job_id: UUID
+    state: JobResultState = attrs.field(converter=as_enum(JobResultState))
+    finished_at: datetime | None = attrs.field(
+        converter=as_aware_datetime, default=None
+    )
+    expires_at: datetime | None = attrs.field(converter=as_aware_datetime, default=None)
+
+
+@attrs.define(kw_only=True, frozen=True)
+class JobResultClaim:
+    """
+    The outcome of an attempt to claim a job result for its owning business party.
+
+    :var JobResultStatus status: the lifecycle state observed by the claim attempt
+    :var JobResult | None result: the claimed result, only present when the claim
+        succeeded
+    """
+
+    status: JobResultStatus
+    result: JobResult | None = attrs.field(default=None)
+
+    @property
+    def claimed(self) -> bool:
+        """``True`` if this claim attempt actually received the result payload."""
+        return self.result is not None

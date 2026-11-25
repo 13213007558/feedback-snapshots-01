@@ -24,7 +24,7 @@ from pymongo.asynchronous.collection import AsyncCollection
 from pymongo.asynchronous.mongo_client import AsyncMongoClient
 from pymongo.errors import ConnectionFailure, DuplicateKeyError
 
-from .._enums import CoalescePolicy, ConflictPolicy, JobOutcome
+from .._enums import CoalescePolicy, ConflictPolicy, JobOutcome, JobResultState
 from .._events import (
     DataStoreEvent,
     JobAcquired,
@@ -43,7 +43,15 @@ from .._exceptions import (
     SerializationError,
     TaskLookupError,
 )
-from .._structures import Job, JobResult, Schedule, ScheduleResult, Task
+from .._structures import (
+    Job,
+    JobResult,
+    JobResultClaim,
+    JobResultStatus,
+    Schedule,
+    ScheduleResult,
+    Task,
+)
 from .._utils import create_repr
 from ..abc import EventBroker
 from .base import BaseExternalDataStore
@@ -712,11 +720,16 @@ class MongoDBDataStore(BaseExternalDataStore):
         scheduled_fire_time: datetime | None = None,
         *,
         decrement_running_job_count: bool = True,
+        owner: str | None = None,
     ) -> JobReleased:
         # Record the job result
         if result.expires_at > result.finished_at:
             document = result.marshal(self.serializer)
             document["_id"] = document.pop("job_id")
+            document["owner"] = owner
+            document["claimed_by"] = None
+            document["claimed_at"] = None
+            document["expired"] = False
             marshal_document(document)
             await self._jobs_results.insert_one(document, session=session)
 
@@ -747,22 +760,129 @@ class MongoDBDataStore(BaseExternalDataStore):
                         job.task_id,
                         job.schedule_id,
                         job.scheduled_fire_time,
+                        owner=job.owner,
                     )
 
                     # Notify other schedulers
                     await self._event_broker.publish(event)
 
     async def get_job_result(self, job_id: UUID) -> JobResult | None:
+        now = datetime.now(UTC)
         async for attempt in self._retry():
             with attempt:
-                document = await self._jobs_results.find_one_and_delete({"_id": job_id})
+                document = await self._jobs_results.find_one(
+                    {"_id": job_id, "expired": False}
+                )
 
+        if not document:
+            return None
+
+        if document["expires_at"] <= now.timestamp():
+            # The result has expired; replace the payload with a tombstone
+            async for attempt in self._retry():
+                with attempt:
+                    await self._jobs_results.update_one(
+                        {"_id": job_id},
+                        {
+                            "$set": {"expired": True},
+                            "$unset": {"exception": True, "return_value": True},
+                        },
+                    )
+            return None
+
+        async for attempt in self._retry():
+            with attempt:
+                await self._jobs_results.delete_one({"_id": job_id})
+
+        document["job_id"] = document.pop("_id")
+        unmarshal_timestamps(document)
+        for key in ("owner", "claimed_by", "claimed_at", "expired"):
+            document.pop(key, None)
+
+        return JobResult.unmarshal(self.serializer, document)
+
+    async def observe_job_result(self, job_id: UUID) -> JobResultStatus:
+        now = datetime.now(UTC)
+        async for attempt in self._retry():
+            with attempt:
+                document = await self._jobs_results.find_one(
+                    {"_id": job_id},
+                    projection=[
+                        "finished_at",
+                        "finished_at_utcoffset",
+                        "expires_at",
+                        "expires_at_utcoffset",
+                        "claimed_at",
+                        "claimed_at_utcoffset",
+                        "expired",
+                    ],
+                )
+
+        if not document:
+            return JobResultStatus(job_id=job_id, state=JobResultState.pending)
+
+        unmarshal_timestamps(document)
+        if document.get("claimed_at"):
+            state = JobResultState.claimed
+        elif document.get("expired") or document["expires_at"] <= now:
+            state = JobResultState.expired
+        else:
+            state = JobResultState.ready
+
+        return JobResultStatus(
+            job_id=job_id,
+            state=state,
+            finished_at=document.get("finished_at"),
+            expires_at=document.get("expires_at"),
+        )
+
+    async def claim_job_result(
+        self, job_id: UUID, *, owner: str
+    ) -> JobResultClaim:
+        now = datetime.now(UTC)
+        async for attempt in self._retry():
+            with attempt:
+                document = await self._jobs_results.find_one_and_update(
+                    {
+                        "_id": job_id,
+                        "owner": owner,
+                        "claimed_at": None,
+                        "expired": False,
+                        "expires_at": {"$gt": now.timestamp()},
+                    },
+                    {"$set": {"claimed_by": owner, "claimed_at": now.timestamp()}},
+                )
+
+        status = await self.observe_job_result(job_id)
         if document:
             document["job_id"] = document.pop("_id")
             unmarshal_timestamps(document)
-            return JobResult.unmarshal(self.serializer, document)
-        else:
-            return None
+            for key in ("owner", "claimed_by", "claimed_at", "expired"):
+                document.pop(key, None)
+
+            return JobResultClaim(
+                status=attrs.evolve(status, state=JobResultState.claimed),
+                result=JobResult.unmarshal(self.serializer, document),
+            )
+
+        return JobResultClaim(status=status)
+
+    async def expire_job_result(self, job_id: UUID) -> None:
+        now = datetime.now(UTC)
+        async for attempt in self._retry():
+            with attempt:
+                await self._jobs_results.update_one(
+                    {
+                        "_id": job_id,
+                        "claimed_at": None,
+                        "expired": False,
+                        "expires_at": {"$lte": now.timestamp()},
+                    },
+                    {
+                        "$set": {"expired": True},
+                        "$unset": {"exception": True, "return_value": True},
+                    },
+                )
 
     async def extend_acquired_schedule_leases(
         self, scheduler_id: str, schedule_ids: set[str], duration: timedelta
@@ -832,10 +952,21 @@ class MongoDBDataStore(BaseExternalDataStore):
         async for attempt in self._retry():
             with attempt:
                 async with self._client.start_session() as session:
-                    # Purge expired job results
+                    # Purge expired job results, but leave a tombstone behind so
+                    # observers and the owning business party can tell that the result
+                    # expired instead of receiving an ambiguous "not found"
                     now = datetime.now(UTC)
-                    await self._jobs_results.delete_many(
-                        {"expires_at": {"$lte": now.timestamp()}}, session=session
+                    await self._jobs_results.update_many(
+                        {
+                            "expires_at": {"$lte": now.timestamp()},
+                            "claimed_at": None,
+                            "expired": False,
+                        },
+                        {
+                            "$set": {"expired": True},
+                            "$unset": {"exception": True, "return_value": True},
+                        },
+                        session=session,
                     )
 
                     # Find finished schedules

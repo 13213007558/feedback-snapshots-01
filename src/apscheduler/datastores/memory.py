@@ -10,7 +10,7 @@ from uuid import UUID
 import attrs
 
 from .. import JobOutcome
-from .._enums import ConflictPolicy
+from .._enums import ConflictPolicy, JobResultState
 from .._events import (
     JobAcquired,
     JobAdded,
@@ -23,7 +23,15 @@ from .._events import (
     TaskUpdated,
 )
 from .._exceptions import ConflictingIdError, TaskLookupError
-from .._structures import Job, JobResult, Schedule, ScheduleResult, Task
+from .._structures import (
+    Job,
+    JobResult,
+    JobResultClaim,
+    JobResultStatus,
+    Schedule,
+    ScheduleResult,
+    Task,
+)
 from .._utils import create_repr
 from .base import BaseDataStore
 
@@ -48,6 +56,9 @@ class MemoryDataStore(BaseDataStore):
     _jobs_by_task_id: dict[str, set[Job]] = attrs.Factory(partial(defaultdict, set))
     _jobs_by_schedule_id: dict[str, set[Job]] = attrs.Factory(partial(defaultdict, set))
     _job_results: dict[UUID, JobResult] = attrs.Factory(dict)
+    _job_result_owners: dict[UUID, str | None] = attrs.Factory(dict)
+    _claimed_job_results: dict[UUID, datetime] = attrs.Factory(dict)
+    _expired_job_results: dict[UUID, JobResultStatus] = attrs.Factory(dict)
 
     def __repr__(self) -> str:
         return create_repr(self)
@@ -302,6 +313,14 @@ class MemoryDataStore(BaseDataStore):
         # Record the job result
         if result.expires_at > result.finished_at:
             self._job_results[result.job_id] = result
+            owner = job.owner
+            if owner is None:
+                task = self._tasks.get(job.task_id)
+                owner = task.owner if task else None
+
+            self._job_result_owners[result.job_id] = owner
+            self._claimed_job_results.pop(result.job_id, None)
+            self._expired_job_results.pop(result.job_id, None)
 
         # Decrement the number of running jobs for this task
         if job.acquired_by:
@@ -336,7 +355,94 @@ class MemoryDataStore(BaseDataStore):
         )
 
     async def get_job_result(self, job_id: UUID) -> JobResult | None:
-        return self._job_results.pop(job_id, None)
+        # The legacy single-shot accessor consumes the result regardless of owner.
+        # Record it as claimed so portal observers see an explicit terminal state.
+        result = self._job_results.pop(job_id, None)
+        self._job_result_owners.pop(job_id, None)
+        if result is not None:
+            self._claimed_job_results[job_id] = datetime.now(UTC)
+
+        return result
+
+    def _job_result_status(
+        self, job_id: UUID, *, now: datetime | None = None
+    ) -> JobResultStatus:
+        now = now or datetime.now(UTC)
+        if claimed_at := self._claimed_job_results.get(job_id):
+            return JobResultStatus(
+                job_id=job_id,
+                state=JobResultState.claimed,
+                finished_at=claimed_at,
+            )
+
+        if result := self._job_results.get(job_id):
+            if result.expires_at <= now:
+                status = JobResultStatus(
+                    job_id=job_id,
+                    state=JobResultState.expired,
+                    finished_at=result.finished_at,
+                    expires_at=result.expires_at,
+                )
+                self._expired_job_results[job_id] = status
+                return status
+
+            return JobResultStatus(
+                job_id=job_id,
+                state=JobResultState.ready,
+                finished_at=result.finished_at,
+                expires_at=result.expires_at,
+            )
+
+        if status := self._expired_job_results.get(job_id):
+            return status
+
+        return JobResultStatus(job_id=job_id, state=JobResultState.pending)
+
+    async def observe_job_result(self, job_id: UUID) -> JobResultStatus:
+        status = self._job_result_status(job_id)
+        if status.state is JobResultState.expired:
+            self._job_results.pop(job_id, None)
+            self._job_result_owners.pop(job_id, None)
+
+        return status
+
+    async def claim_job_result(
+        self, job_id: UUID, *, owner: str
+    ) -> JobResultClaim:
+        now = datetime.now(UTC)
+        status = self._job_result_status(job_id, now=now)
+        if status.state is JobResultState.expired:
+            self._job_results.pop(job_id, None)
+            self._job_result_owners.pop(job_id, None)
+
+        if status.state is not JobResultState.ready:
+            return JobResultClaim(status=status)
+
+        if self._job_result_owners.get(job_id) != owner:
+            return JobResultClaim(status=status)
+
+        result = self._job_results.pop(job_id, None)
+        if result is None:
+            return JobResultClaim(status=self._job_result_status(job_id, now=now))
+
+        self._job_result_owners.pop(job_id, None)
+        self._claimed_job_results[job_id] = now
+        return JobResultClaim(
+            status=attrs.evolve(status, state=JobResultState.claimed),
+            result=result,
+        )
+
+    async def expire_job_result(self, job_id: UUID) -> None:
+        result = self._job_results.get(job_id)
+        if result is not None and result.expires_at <= datetime.now(UTC):
+            self._job_results.pop(job_id, None)
+            self._job_result_owners.pop(job_id, None)
+            self._expired_job_results[job_id] = JobResultStatus(
+                job_id=job_id,
+                state=JobResultState.expired,
+                finished_at=result.finished_at,
+                expires_at=result.expires_at,
+            )
 
     async def extend_acquired_schedule_leases(
         self, scheduler_id: str, schedule_ids: set[str], duration: timedelta
@@ -372,7 +478,14 @@ class MemoryDataStore(BaseDataStore):
             if result.expires_at <= now
         ]
         for job_id in expired_job_ids:
-            del self._job_results[job_id]
+            result = self._job_results.pop(job_id)
+            self._expired_job_results[job_id] = JobResultStatus(
+                job_id=job_id,
+                state=JobResultState.expired,
+                finished_at=result.finished_at,
+                expires_at=result.expires_at,
+            )
+            self._job_result_owners.pop(job_id, None)
 
         # Finish any jobs whose leases have expired
         expired_jobs = [

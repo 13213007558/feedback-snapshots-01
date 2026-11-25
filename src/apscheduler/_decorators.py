@@ -31,6 +31,9 @@ class TaskParameters(TaskDefaults):
         validator=if_not_unset(optional(instance_of(timedelta))),
         default=unset,
     )
+    owner: str | None | UnsetValue = attrs.field(
+        validator=if_not_unset(optional(instance_of(str))), default=unset
+    )
     metadata: MetadataType | UnsetValue = attrs.field(
         validator=if_not_unset(valid_metadata), default=unset
     )
@@ -42,6 +45,7 @@ def task(
     job_executor: str | UnsetValue = unset,
     max_running_jobs: int | None | UnsetValue = unset,
     misfire_grace_time: int | timedelta | None | UnsetValue = unset,
+    owner: str | None | UnsetValue = unset,
     metadata: MetadataType | UnsetValue = unset,
 ) -> Callable[[T], T]:
     """
@@ -54,6 +58,8 @@ def task(
     :param ~datetime.timedelta | None misfire_grace_time: maximum number of seconds the
         run time of jobs created for the task are allowed to be late, compared to the
         scheduled run time
+    :param str | None owner: identifier of the business party that owns this task's
+        results
     :param metadata: key-value pairs for storing JSON compatible custom information
     """
 
@@ -74,6 +80,7 @@ def task(
                 job_executor=job_executor,
                 max_running_jobs=max_running_jobs,
                 misfire_grace_time=misfire_grace_time,
+                owner=owner,
                 metadata=metadata,
             ),
         )

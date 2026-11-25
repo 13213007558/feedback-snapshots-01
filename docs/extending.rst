@@ -135,6 +135,9 @@ several abstract methods:
 * :meth:`~abc.DataStore.acquire_jobs`
 * :meth:`~abc.DataStore.release_job`
 * :meth:`~abc.DataStore.get_job_result`
+* :meth:`~abc.DataStore.observe_job_result`
+* :meth:`~abc.DataStore.claim_job_result`
+* :meth:`~abc.DataStore.expire_job_result`
 * :meth:`~abc.DataStore.extend_acquired_schedule_leases`
 * :meth:`~abc.DataStore.extend_acquired_job_leases`
 * :meth:`~abc.DataStore.cleanup`

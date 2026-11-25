@@ -6,6 +6,12 @@ APScheduler, see the :doc:`migration section <migration>`.
 
 **UNRELEASED**
 
+- Added :class:`~apscheduler.JobResultPortal`, which separates read-only result
+  observation (e.g. for an audit team) from a single claim by the owning business party,
+  and reports result expiry explicitly to both parties. Added the ``owner`` field to
+  tasks and jobs, and the ``observe_job_result()``, ``claim_job_result()`` and
+  ``expire_job_result()`` methods to the data store interface, with implementations for
+  the memory and SQLAlchemy data stores
 - **BREAKING** Switched the MongoDB data store to use the asynchronous API in
   ``pymongo`` and bumped the minimum ``pymongo`` version to v4.13.0
 - Bumped up the CBOR serializer's ``cbor2`` dependency to v6.0+

@@ -8,10 +8,20 @@ from logging import Logger
 from typing import TYPE_CHECKING, Any, Self
 from uuid import UUID
 
+from ._enums import JobResultState
+
 if TYPE_CHECKING:
     from ._enums import ConflictPolicy
     from ._events import Event, T_Event
-    from ._structures import Job, JobResult, Schedule, ScheduleResult, Task
+    from ._structures import (
+        Job,
+        JobResult,
+        JobResultClaim,
+        JobResultStatus,
+        Schedule,
+        ScheduleResult,
+        Task,
+    )
 
 
 class Trigger(Iterator[datetime], metaclass=ABCMeta):
@@ -345,6 +355,76 @@ class DataStore(metaclass=ABCMeta):
 
         :param job_id: the identifier of the job
         :return: the result, or ``None`` if the result was not found
+        """
+
+    async def observe_job_result(self, job_id: UUID) -> JobResultStatus:
+        """
+        Return the lifecycle state of a job result without consuming it.
+
+        This is used by observers (such as an audit team) that must be able to tell
+        whether a job has finished, without denying the owning business party its
+        single chance to claim the result.
+
+        The default implementation is only sufficient for stores that keep results
+        until they are read; built-in stores override it to track expiry and claims.
+
+        :param job_id: the identifier of the job
+        :return: a snapshot of the result's state
+        """
+        result = await self.get_job_result(job_id)
+        if result is not None:
+            return JobResultStatus(
+                job_id=job_id,
+                state=JobResultState.ready,
+                finished_at=result.finished_at,
+                expires_at=result.expires_at,
+            )
+
+        return JobResultStatus(job_id=job_id, state=JobResultState.pending)
+
+    async def claim_job_result(
+        self, job_id: UUID, *, owner: str
+    ) -> JobResultClaim:
+        """
+        Claim a job result for its owning business party.
+
+        A result can be claimed exactly once. If it is claimed by another party, has
+        already been claimed, or has expired, no payload is returned and the returned
+        status explains why.
+
+        The default implementation is only sufficient for stores that keep results
+        until they are read; built-in stores override it to enforce ownership,
+        single-claim semantics and expiry.
+
+        :param job_id: the identifier of the job
+        :param owner: identifier of the business party claiming the result
+        :return: the claim outcome, including the claimed result if successful
+        """
+        result = await self.get_job_result(job_id)
+        if result is None:
+            return JobResultClaim(
+                status=JobResultStatus(job_id=job_id, state=JobResultState.pending)
+            )
+
+        return JobResultClaim(
+            status=JobResultStatus(
+                job_id=job_id,
+                state=JobResultState.ready,
+                finished_at=result.finished_at,
+                expires_at=result.expires_at,
+            ),
+            result=result,
+        )
+
+    async def expire_job_result(self, job_id: UUID) -> None:
+        """
+        Mark a job result as expired, if it has not been claimed yet.
+
+        Stores that purge expired results should keep a tombstone so observers and the
+        owning business party can both see that the result expired instead of getting
+        an ambiguous "not found".
+
+        :param job_id: the identifier of the job
         """
 
     @abstractmethod

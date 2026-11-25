@@ -49,6 +49,7 @@ from .._exceptions import (
     ScheduleLookupError,
 )
 from .._marshalling import callable_from_ref, callable_to_ref
+from .._result_portal import JobResultPortal
 from .._structures import (
     Job,
     JobResult,
@@ -162,6 +163,9 @@ class AsyncScheduler:
 
         if self.task_defaults.misfire_grace_time is unset:
             self.task_defaults.misfire_grace_time = None
+
+        if self.task_defaults.owner is unset:
+            self.task_defaults.owner = None
 
     async def __aenter__(self) -> Self:
         async with AsyncExitStack() as exit_stack:
@@ -311,6 +315,7 @@ class AsyncScheduler:
         job_executor: str | UnsetValue = unset,
         misfire_grace_time: float | timedelta | None | UnsetValue = unset,
         max_running_jobs: int | None | UnsetValue = unset,
+        owner: str | None | UnsetValue = unset,
         metadata: MetadataType | UnsetValue = unset,
     ) -> Task:
         """
@@ -336,6 +341,7 @@ class AsyncScheduler:
             run time is allowed to be late, compared to the scheduled run time
         :param max_running_jobs: maximum number of instances of the task that are
             allowed to run concurrently
+        :param owner: identifier of the business party that owns this task's results
         :param metadata: key-value pairs for storing JSON compatible custom information
         :raises TypeError: if ``func_or_task_id`` is neither a task, task ID or a
             callable
@@ -358,6 +364,7 @@ class AsyncScheduler:
                 job_executor=func_or_task_id.job_executor,
                 max_running_jobs=func_or_task_id.max_running_jobs,
                 misfire_grace_time=func_or_task_id.misfire_grace_time,
+                owner=func_or_task_id.owner,
                 metadata=func_or_task_id.metadata,
             )
         elif isinstance(func_or_task_id, str) and func_or_task_id:
@@ -368,6 +375,7 @@ class AsyncScheduler:
                     job_executor=task.job_executor,
                     max_running_jobs=task.max_running_jobs,
                     misfire_grace_time=task.misfire_grace_time,
+                    owner=task.owner,
                     metadata=task.metadata,
                 )
             except TaskLookupError:
@@ -389,6 +397,8 @@ class AsyncScheduler:
             task_params.max_running_jobs = max_running_jobs
         if misfire_grace_time is not unset:
             task_params.misfire_grace_time = misfire_grace_time
+        if owner is not unset:
+            task_params.owner = owner
 
         # Fill in unset values with the defaults
         if task_params.job_executor is unset:
@@ -397,6 +407,8 @@ class AsyncScheduler:
             task_params.max_running_jobs = self.task_defaults.max_running_jobs
         if task_params.misfire_grace_time is unset:
             task_params.misfire_grace_time = self.task_defaults.misfire_grace_time
+        if task_params.owner is unset:
+            task_params.owner = self.task_defaults.owner
 
         # Merge the metadata from the defaults, task definition and explicitly passed
         # metadata
@@ -421,6 +433,7 @@ class AsyncScheduler:
                 job_executor=task_params.job_executor,
                 max_running_jobs=task_params.max_running_jobs,
                 misfire_grace_time=task_params.misfire_grace_time,
+                owner=task_params.owner,
                 metadata=task_params.metadata,
             )
             modified = True
@@ -437,6 +450,9 @@ class AsyncScheduler:
 
             if task_params.misfire_grace_time != task.misfire_grace_time:
                 changes["misfire_grace_time"] = task_params.misfire_grace_time
+
+            if task_params.owner != task.owner:
+                changes["owner"] = task_params.owner
 
             if task_params.metadata != task.metadata:
                 changes["metadata"] = task_params.metadata
@@ -475,6 +491,7 @@ class AsyncScheduler:
         metadata: MetadataType | UnsetValue = unset,
         max_jitter: float | timedelta | None = None,
         job_result_expiration_time: float | timedelta = 0,
+        owner: str | None | UnsetValue = unset,
         conflict_policy: ConflictPolicy = ConflictPolicy.do_nothing,
     ) -> str:
         """
@@ -499,6 +516,8 @@ class AsyncScheduler:
             to the scheduled time for each job created from this schedule
         :param job_result_expiration_time: minimum time (in seconds, or as a timedelta)
             to keep the job results in storage from the jobs created by this schedule
+        :param owner: identifier of the business party that owns the results of jobs
+            created by this schedule
         :param conflict_policy: determines what to do if a schedule with the same ID
             already exists in the data store
         :return: the ID of the newly added schedule
@@ -529,7 +548,7 @@ class AsyncScheduler:
             method_class = type(func_or_task_id.__self__)
             func_or_task_id = getattr(method_class, func_or_task_id.__name__)
 
-        task = await self.configure_task(func_or_task_id)
+        task = await self.configure_task(func_or_task_id, owner=owner)
         schedule = Schedule(
             id=schedule_id,
             task_id=task.id,
@@ -654,6 +673,7 @@ class AsyncScheduler:
         job_executor: str | UnsetValue = unset,
         metadata: MetadataType | UnsetValue = unset,
         result_expiration_time: timedelta | float = 0,
+        owner: str | None | UnsetValue = unset,
     ) -> UUID:
         """
         Add a job to the data store.
@@ -670,6 +690,7 @@ class AsyncScheduler:
         :param result_expiration_time: the minimum time (as seconds, or timedelta) to
             keep the result of the job available for fetching (the result won't be
             saved at all if that time is 0)
+        :param owner: identifier of the business party allowed to claim the result
         :return: the ID of the newly created job
 
         """
@@ -697,13 +718,14 @@ class AsyncScheduler:
             method_class = type(func_or_task_id.__self__)
             func_or_task_id = getattr(method_class, func_or_task_id.__name__)
 
-        task = await self.configure_task(func_or_task_id)
+        task = await self.configure_task(func_or_task_id, owner=owner)
         job = Job(
             task_id=task.id,
             args=args or (),
             kwargs=kwargs or {},
             executor=task.job_executor if job_executor is unset else job_executor,
             result_expiration_time=result_expiration_time,
+            owner=task.owner,
             metadata=merge_metadata(task.metadata, metadata),
         )
         await self.data_store.add_job(job)
@@ -713,6 +735,17 @@ class AsyncScheduler:
         """Retrieve all jobs from the data store."""
         self._check_initialized()
         return await self.data_store.get_jobs()
+
+    @property
+    def result_portal(self) -> JobResultPortal:
+        """
+        A portal for observing and claiming job results without consuming them.
+
+        Unlike :meth:`get_job_result`, the portal separates read-only observation
+        (safe for auditors) from a single claim by the owning business party.
+        """
+        self._check_initialized()
+        return JobResultPortal(self.data_store, self.event_broker)
 
     async def get_job_result(
         self, job_id: UUID, *, wait: bool = True
@@ -967,6 +1000,15 @@ class AsyncScheduler:
                     now = datetime.now(UTC)
                     results: list[ScheduleResult] = []
                     for schedule in schedules:
+                        # Determine which business party owns jobs from this schedule
+                        try:
+                            schedule_task = await self.data_store.get_task(
+                                schedule.task_id
+                            )
+                            schedule_owner = schedule_task.owner
+                        except TaskLookupError:
+                            schedule_owner = None
+
                         # Calculate a next fire time for the schedule, if possible
                         fire_times = [schedule.next_fire_time]
                         next_fire_time: datetime | None = None
@@ -1043,6 +1085,7 @@ class AsyncScheduler:
                                 start_deadline=start_deadline,
                                 executor=schedule.job_executor,
                                 result_expiration_time=schedule.job_result_expiration_time,
+                                owner=schedule_owner,
                                 metadata=schedule.metadata.copy(),
                             )
                             await self.data_store.add_job(job)
