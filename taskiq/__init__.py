@@ -14,6 +14,12 @@ from taskiq.brokers.inmemory_broker import InMemoryBroker
 from taskiq.brokers.multi_broker import MultiBroker
 from taskiq.brokers.shared_broker import async_shared_broker
 from taskiq.brokers.zmq_broker import ZeroMQBroker
+from taskiq.channel_formats import (
+    ChannelFormat,
+    ChannelFormatPolicy,
+    FormatDecision,
+    FormatRejection,
+)
 from taskiq.context import Context
 from taskiq.events import TaskiqEvents
 from taskiq.exceptions import (
@@ -48,7 +54,11 @@ __all__ = [
     "AsyncTaskiqDecoratedTask",
     "AsyncTaskiqTask",
     "BrokerMessage",
+    "ChannelFormat",
+    "ChannelFormatPolicy",
     "Context",
+    "FormatDecision",
+    "FormatRejection",
     "InMemoryBroker",
     "MultiBroker",
     "NoResultError",

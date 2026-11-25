@@ -21,6 +21,7 @@ from uuid import uuid4
 from taskiq.abc.middleware import TaskiqMiddleware
 from taskiq.abc.serializer import TaskiqSerializer
 from taskiq.acks import AckableMessage
+from taskiq.channel_formats import ChannelFormatPolicy
 from taskiq.decor import AsyncTaskiqDecoratedTask
 from taskiq.events import TaskiqEvents
 from taskiq.exceptions import TaskBrokerMismatchError
@@ -102,6 +103,14 @@ class AsyncBroker(ABC):
         self.decorator_class = AsyncTaskiqDecoratedTask
         self.serializer: TaskiqSerializer = JSONSerializer()
         self.formatter: TaskiqFormatter = ProxyFormatter(self)
+        # Channel-bound formats for the receiver paired with a generation.
+        # The pair is swapped as one tuple, so a reader never observes a new
+        # policy with a stale generation. None keeps the legacy behaviour:
+        # every delivery is parsed with ``self.formatter``.
+        self._channel_formats_snapshot: tuple[ChannelFormatPolicy | None, int] = (
+            None,
+            0,
+        )
         self.id_generator = task_id_generator
         self.local_task_registry: dict[str, AsyncTaskiqDecoratedTask[Any, Any]] = {}
         # Every event has a list of handlers.
@@ -511,6 +520,52 @@ class AsyncBroker(ABC):
         :return: self
         """
         self.formatter = formatter
+        return self
+
+    @property
+    def channel_formats(self) -> ChannelFormatPolicy | None:
+        """Return the policy currently approved for receiver channels."""
+        return self._channel_formats_snapshot[0]
+
+    @channel_formats.setter
+    def channel_formats(self, policy: ChannelFormatPolicy | None) -> None:
+        """Install a new policy and advance the generation atomically."""
+        self._channel_formats_snapshot = (policy, self._channel_formats_snapshot[1] + 1)
+
+    @property
+    def channel_formats_generation(self) -> int:
+        """Return the generation of the current channel format policy."""
+        return self._channel_formats_snapshot[1]
+
+    def get_channel_formats(self) -> tuple[ChannelFormatPolicy | None, int]:
+        """
+        Return a consistent policy snapshot for one delivery.
+
+        The policy and its generation are read from the same tuple, so a
+        concurrent reload cannot pair a new policy with an old generation.
+
+        :return: policy and its generation.
+        """
+        return self._channel_formats_snapshot
+
+    def with_channel_formats(
+        self,
+        policy: ChannelFormatPolicy | None,
+    ) -> "Self":
+        """
+        Set channel-bound message formats and return an updated broker.
+
+        When a policy is set, the receiver selects a formatter from the
+        formats approved for the channel a delivery came from. While the
+        policy is ``None`` every delivery is parsed with ``self.formatter``.
+
+        The policy object is replaced atomically, so reloading it never
+        changes the format of a message that is already being processed.
+
+        :param policy: new channel format policy or None.
+        :return: self
+        """
+        self.channel_formats = policy
         return self
 
     def _register_task(

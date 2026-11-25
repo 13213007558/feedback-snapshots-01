@@ -176,14 +176,36 @@ class MultiBroker(AsyncBroker):
         :return: nothing.
         """
         merged = merge_async_iterables(
-            *(self._listen_one(inner_broker) for inner_broker in self.brokers),
+            *(
+                self._listen_one(inner_broker, self._channel_of(inner_broker))
+                for inner_broker in self.brokers
+            ),
         )
         async for message in merged:
             yield message
 
+    def _channel_of(self, inner_broker: AsyncBroker) -> str:
+        """
+        Return the routing label a deduplicated broker is listened as.
+
+        A broker mapped under several labels is still listened to once.
+        Its deliveries are attributed to the first label declared for it,
+        because a plain broker message cannot say which alias it came from.
+
+        :param inner_broker: broker from ``self.brokers``.
+        :return: first routing label mapped to the broker.
+        """
+        for channel, broker in self.routing.items():
+            if broker is inner_broker:
+                return channel
+        raise ValueError(  # pragma: no cover
+            "Broker is not part of this MultiBroker routing.",
+        )
+
     async def _listen_one(
         self,
         inner_broker: AsyncBroker,
+        channel: str,
     ) -> AsyncGenerator["bytes | AckableMessage", None]:
         """
         Listen to a single inner broker, degrading on its failure.
@@ -192,14 +214,18 @@ class MultiBroker(AsyncBroker):
         and this generator ends, so the failed broker is excluded
         from the merged listening, but doesn't stop the whole worker.
 
+        Deliveries are tagged with the routing label they were read from,
+        so the receiver can pick the format approved for that channel.
+
         :param inner_broker: broker to listen to.
+        :param channel: routing label mapped to this broker.
         :yield: incoming messages from the inner broker.
         :return: nothing.
         """
         iterator = inner_broker.listen()
         try:
             async for message in iterator:
-                yield message
+                yield self._tag_channel(message, channel)
         except Exception as exc:
             logger.exception(
                 "Inner broker %s failed: %r. "
@@ -213,6 +239,28 @@ class MultiBroker(AsyncBroker):
             # a suspended generator must run its cleanup logic.
             with contextlib.suppress(RuntimeError):
                 await iterator.aclose()
+
+    @staticmethod
+    def _tag_channel(
+        message: "bytes | AckableMessage",
+        channel: str,
+    ) -> "bytes | AckableMessage":
+        """
+        Attach the source channel to an inner-broker delivery.
+
+        Raw bytes cannot carry a channel, so they are wrapped into an
+        ``AckableMessage``. With no ack callback the wrapper stays
+        non-ackable, exactly like the raw bytes it replaces.
+
+        :param message: delivery from an inner broker.
+        :param channel: routing label of that broker.
+        :return: delivery tagged with the channel.
+        """
+        if isinstance(message, AckableMessage):
+            if message.channel == channel:
+                return message
+            return message.model_copy(update={"channel": channel})
+        return AckableMessage(data=message, channel=channel)
 
     async def startup(self) -> None:
         """

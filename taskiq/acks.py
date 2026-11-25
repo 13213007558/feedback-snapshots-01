@@ -54,7 +54,10 @@ class AckableMessage(BaseModel):
     """
 
     data: bytes
-    ack: Callable[[], Awaitable[None] | None]
+    # None means the delivery is not ackable through the broker.
+    ack: Callable[[], Awaitable[None] | None] | None = None
+    # Managed channel this delivery was read from, if the broker knows it.
+    channel: str | None = None
 
 
 class AckController:

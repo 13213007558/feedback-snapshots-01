@@ -17,8 +17,15 @@ import anyio
 from taskiq_dependencies import DependencyGraph
 
 from taskiq.abc.broker import AckableMessage, AsyncBroker
+from taskiq.abc.formatter import TaskiqFormatter
 from taskiq.abc.middleware import TaskiqMiddleware
 from taskiq.acks import AckController, AcknowledgeType, parse_acknowledge_type
+from taskiq.channel_formats import (
+    ChannelFormat,
+    ChannelFormatPolicy,
+    FormatDecision,
+    FormatRejection,
+)
 from taskiq.context import Context
 from taskiq.exceptions import NoResultError
 from taskiq.message import TaskiqMessage
@@ -97,6 +104,8 @@ class Receiver:
         on_exit: Callable[["Receiver"], None] | None = None,
         max_tasks_to_execute: int | None = None,
         wait_tasks_timeout: float | None = None,
+        on_format_rejected: Callable[[FormatRejection], None] | None = None,
+        on_format_selected: Callable[[FormatDecision], None] | None = None,
     ) -> None:
         self.broker = broker
         self.executor = executor
@@ -111,6 +120,11 @@ class Receiver:
         self.known_tasks: set[str] = set()
         self.max_tasks_to_execute = max_tasks_to_execute
         self.wait_tasks_timeout = wait_tasks_timeout
+        # Called for every delivery terminated before business execution.
+        # The receiver logs the rejection regardless of this hook.
+        self.on_format_rejected = on_format_rejected
+        # Called once per delivery with the formatter chosen before parsing.
+        self.on_format_selected = on_format_selected
         self._listen_error: BaseException | None = None
         if max_prefetch < 0:
             raise ValueError("max_prefetch cannot be negative.")
@@ -159,18 +173,43 @@ class Receiver:
             message.ack if isinstance(message, AckableMessage) else None,
         )
         message_data = message.data if isinstance(message, AckableMessage) else message
+        channel = message.channel if isinstance(message, AckableMessage) else None
+
+        # Capture the decision for this delivery exactly once. A reload that
+        # happens while this message is parsed must not change its formatter,
+        # its business target, or the acknowledgement it receives.
+        policy, generation = self.broker.get_channel_formats()
+        decision, rejection = self._decide_format(
+            policy,
+            generation,
+            channel,
+            message_data,
+        )
+        if rejection is not None:
+            await self._reject_message(rejection, ack_controller)
+            return
+
+        if self.on_format_selected is not None:
+            self.on_format_selected(decision)
+
         try:
-            taskiq_msg = self.broker.formatter.loads(message=message_data)
+            taskiq_msg = decision.formatter.loads(message=message_data)
             taskiq_msg.parse_labels()
         except Exception as exc:
-            logger.warning(
-                "Cannot parse message: %s. Skipping execution.\n %s",
-                message_data,
-                exc,
-                exc_info=True,
+            await self._reject_message(
+                FormatRejection(
+                    channel=decision.channel,
+                    allowed_versions=decision.allowed_versions,
+                    generation=decision.generation,
+                    reason="parse-error",
+                    version=decision.version,
+                    formatter=decision.formatter,
+                    error=exc,
+                    data_size=len(message_data),
+                ),
+                ack_controller,
+                cause=exc,
             )
-            if ack_controller.is_ackable:
-                await ack_controller.ack()
             return
         logger.debug("Received message: %s", taskiq_msg)
         task = self.broker.find_task(taskiq_msg.task_name)
@@ -231,6 +270,131 @@ class Receiver:
                 raise exc
 
         if ack_time == AcknowledgeType.WHEN_SAVED and ack_controller.is_ackable:
+            await ack_controller.ack()
+
+    def _decide_format(
+        self,
+        policy: ChannelFormatPolicy | None,
+        generation: int,
+        channel: str | None,
+        message_data: bytes,
+    ) -> tuple[FormatDecision, None] | tuple[None, FormatRejection]:
+        """
+        Select one formatter for a delivery before it is parsed.
+
+        The decision is made only from the formats the receiving channel
+        approves. Parsing success is never used to try another formatter,
+        so a payload cannot be accepted through a format the channel did
+        not approve, and a single delivery is parsed at most once.
+
+        :param policy: policy snapshot read for this delivery.
+        :param generation: generation of that snapshot.
+        :param channel: managed channel the delivery came from.
+        :param message_data: raw payload.
+        :return: the decision, or a rejection that terminates the delivery.
+        """
+        if policy is None:
+            formatter = self.broker.formatter
+            version = getattr(formatter, "version", "default") or "default"
+            return (
+                FormatDecision(
+                    channel=channel,
+                    version=version,
+                    formatter=formatter,
+                    generation=generation,
+                    reason="unmanaged",
+                ),
+                None,
+            )
+
+        resolved = policy.resolve_channel(channel)
+        if resolved is None:
+            return None, FormatRejection(
+                channel=channel,
+                allowed_versions=policy.versions_for(channel),
+                generation=generation,
+                reason="unknown-channel",
+                data_size=len(message_data),
+            )
+
+        approved = policy.formats_for(resolved) or ()
+        # A truthful match is authoritative; an opinion-less formatter is
+        # only a fallback when nothing else claims the payload. This keeps
+        # selection deterministic and avoids parse-and-fallback behaviour.
+        candidates: list[ChannelFormat] = []
+        for entry in approved:
+            matches = entry.formatter.matches(message_data)
+            if matches is True:
+                return (
+                    FormatDecision(
+                        channel=resolved,
+                        version=entry.version,
+                        formatter=entry.formatter,
+                        generation=generation,
+                        reason="matched",
+                        allowed_versions=tuple(item.version for item in approved),
+                        legacy=entry.legacy,
+                    ),
+                    None,
+                )
+            if matches is None:
+                candidates.append(entry)
+
+        if candidates:
+            entry = candidates[0]
+            return (
+                FormatDecision(
+                    channel=resolved,
+                    version=entry.version,
+                    formatter=entry.formatter,
+                    generation=generation,
+                    reason="unverified",
+                    allowed_versions=tuple(item.version for item in approved),
+                    legacy=entry.legacy,
+                ),
+                None,
+            )
+
+        return None, FormatRejection(
+            channel=resolved,
+            allowed_versions=tuple(item.version for item in approved),
+            generation=generation,
+            reason="format-mismatch",
+            data_size=len(message_data),
+        )
+
+    async def _reject_message(
+        self,
+        rejection: FormatRejection,
+        ack_controller: AckController,
+        cause: BaseException | None = None,
+    ) -> None:
+        """
+        Terminate a delivery before any task or dependency is resolved.
+
+        The rejection is logged with the channel, allowed versions and
+        policy generation so operators can diagnose it. The message is not
+        handed to another formatter, and an ackable delivery is acknowledged
+        so the broker stops redelivering a payload nobody is allowed to parse.
+
+        :param rejection: diagnostic description of the termination.
+        :param ack_controller: acknowledgement state of the delivery.
+        :param cause: parse error for ``parse-error`` rejections.
+        """
+        logger.warning(
+            "Rejected message from channel %r: reason=%s, allowed_versions=%s, "
+            "version=%s, generation=%s, size=%d bytes.",
+            rejection.channel,
+            rejection.reason,
+            list(rejection.allowed_versions),
+            rejection.version,
+            rejection.generation,
+            rejection.data_size,
+            exc_info=cause,
+        )
+        if self.on_format_rejected is not None:
+            self.on_format_rejected(rejection)
+        if ack_controller.is_ackable:
             await ack_controller.ack()
 
     def _get_ack_time(self, message: TaskiqMessage) -> AcknowledgeType:
