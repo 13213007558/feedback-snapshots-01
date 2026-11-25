@@ -28,6 +28,7 @@ from pynetdicom.association import Association
 from pynetdicom.events import EventHandlerType
 from pynetdicom.pdu_primitives import _UI
 from pynetdicom.presentation import PresentationContext
+from pynetdicom.query_budget import QueryBudget
 from pynetdicom.transport import (
     AddressInformation,
     AssociationServer,
@@ -51,7 +52,15 @@ class ApplicationEntity:
     or both.
     """
 
-    def __init__(self, ae_title: str = "PYNETDICOM") -> None:
+    def __init__(
+        self,
+        ae_title: str = "PYNETDICOM",
+        query_budget: QueryBudget | None = None,
+        *,
+        max_concurrent_queries: int | None = None,
+        max_queries_per_association: int | None = None,
+        query_budget_timeout: float | None = None,
+    ) -> None:
         """Create a new Application Entity.
 
         .. versionchanged:: 2.0
@@ -63,6 +72,19 @@ class ApplicationEntity:
         ae_title : str, optional
             The AE title of the Application Entity as an ASCII string
             (default: ``'PYNETDICOM'``).
+        query_budget : pynetdicom.QueryBudget, optional
+            An optional shared query concurrency budget.  When set, C-FIND
+            operations acquire both association and server-wide capacity for
+            their full streaming lifetime.
+        max_concurrent_queries : int, optional
+            Create a :class:`~pynetdicom.QueryBudget` with this server-wide
+            limit.  Ignored when `query_budget` is supplied.
+        max_queries_per_association : int, optional
+            The per-association limit used when creating a budget from
+            `max_concurrent_queries`.
+        query_budget_timeout : float, optional
+            How long a C-FIND request waits for budget capacity.  ``None``
+            waits until capacity is available or the request is cancelled.
         """
         self._ae_title: str
         self.ae_title = ae_title
@@ -83,6 +105,28 @@ class ApplicationEntity:
 
         # Default maximum simultaneous associations
         self._maximum_associations = 10
+
+        if query_budget is not None and (
+            max_concurrent_queries is not None
+            or max_queries_per_association is not None
+        ):
+            raise ValueError(
+                "Specify either query_budget or the maximum query arguments"
+            )
+
+        if query_budget is None and (
+            max_concurrent_queries is not None
+            or max_queries_per_association is not None
+        ):
+            query_budget = QueryBudget(
+                association_limit=max_queries_per_association,
+                server_limit=max_concurrent_queries,
+            )
+
+        # Optional hierarchical C-FIND concurrency budget
+        self.query_budget: QueryBudget | None = query_budget
+        self.query_budget_timeout: float | None = query_budget_timeout
+        self.query_budget_poll_interval: float = 0.01
 
         # Default maximum PDU receive size (in bytes)
         self._maximum_pdu_size = DEFAULT_MAX_LENGTH

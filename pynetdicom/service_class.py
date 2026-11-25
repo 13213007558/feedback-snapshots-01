@@ -42,6 +42,11 @@ from pynetdicom.dimse_primitives import (
     DimseServiceType,
 )
 from pynetdicom.dsutils import decode, encode, pretty_dataset
+from pynetdicom.query_budget import (
+    QueryBudgetCancelled,
+    QueryBudgetError,
+    QueryLease,
+)
 from pynetdicom.status import (
     GENERAL_STATUS,
     NON_PATIENT_SERVICE_CLASS_STATUS,
@@ -76,6 +81,18 @@ DestinationType = tuple[str, int] | tuple[str, int, dict[str, Any]]
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _close_query_iterator(iterator: Any) -> None:
+    """Close a user query iterator without masking the active response path."""
+    close = getattr(iterator, "close", None)
+    if not callable(close):
+        return
+
+    try:
+        close()
+    except Exception:
+        LOGGER.exception("Exception while closing the query handler iterator")
 
 
 class attempt:
@@ -167,6 +184,51 @@ class ServiceClass:
         return self.assoc.ae
 
     def _c_find_scp(self, req: C_FIND, context: "PresentationContext") -> None:
+        """Acquire query concurrency budget and serve one C-FIND request."""
+        ae = getattr(self.assoc, "ae", None)
+        budget = getattr(ae, "query_budget", None)
+        if budget is None:
+            self._c_find_scp_impl(req, context)
+            return
+
+        cx_id = cast(int, context.context_id)
+        message_id = cast(int, req.MessageID)
+
+        def _send_budget_response(status: int) -> None:
+            rsp = C_FIND()
+            rsp.MessageID = req.MessageID
+            rsp.MessageIDBeingRespondedTo = req.MessageID
+            rsp.AffectedSOPClassUID = req.AffectedSOPClassUID
+            rsp.Status = status
+            self.dimse.send_msg(rsp, cx_id)
+
+        try:
+            lease: QueryLease = budget.acquire(
+                self.assoc,
+                (id(self.assoc), message_id),
+                timeout=getattr(ae, "query_budget_timeout", None),
+                cancel_check=lambda: self.is_cancelled(message_id),
+                poll_interval=getattr(
+                    ae, "query_budget_poll_interval", 0.01
+                ),
+            )
+        except QueryBudgetCancelled:
+            LOGGER.info("C-FIND cancelled while waiting for query budget")
+            _send_budget_response(0xFE00)
+            return
+        except QueryBudgetError:
+            LOGGER.warning("C-FIND rejected because the query budget is full")
+            _send_budget_response(0xA700)
+            return
+
+        try:
+            self._c_find_scp_impl(req, context)
+        finally:
+            lease.release()
+
+    def _c_find_scp_impl(
+        self, req: C_FIND, context: "PresentationContext"
+    ) -> None:
         """Implementation of the DIMSE C-FIND service.
 
         Parameters
@@ -294,101 +356,126 @@ class ServiceClass:
 
         ii = -1  # So if there are no results, log below doesn't break
         # Iterate through the results
-        for ii, (result, exc) in enumerate(self._wrap_handler(generator)):
-            # Reset the response Identifier
-            rsp.Identifier = None
-            dataset: Dataset | None
-            rsp_status: StatusType
+        wrapped_generator = self._wrap_handler(generator)
+        try:
+            for ii, (result, exc) in enumerate(wrapped_generator):
+                # Reset the response Identifier
+                rsp.Identifier = None
+                dataset: Dataset | None
+                rsp_status: StatusType
 
-            # Exception raised by user's generator
-            if exc:
-                LOGGER.error("Exception in handler bound to 'evt.EVT_C_FIND'")
-                LOGGER.error(
-                    "\nTraceback (most recent call last):\n"
-                    + "".join(traceback.format_tb(exc[2]))
-                    + f"{exc[0].__name__}: {exc[1]}"  # type: ignore
-                )
-                rsp_status = 0xC311
-                dataset = None
-            else:
-                rsp_status, dataset = cast(UserReturnType, result)
+                # Exception raised by user's generator
+                if exc:
+                    LOGGER.error("Exception in handler bound to 'evt.EVT_C_FIND'")
+                    LOGGER.error(
+                        "\nTraceback (most recent call last):\n"
+                        + "".join(traceback.format_tb(exc[2]))
+                        + f"{exc[0].__name__}: {exc[1]}"  # type: ignore
+                    )
+                    rsp_status = 0xC311
+                    dataset = None
+                else:
+                    rsp_status, dataset = cast(UserReturnType, result)
 
-            # Event handler has aborted or released
-            if not self.assoc.is_established:
-                return
+                # Event handler has aborted or released
+                if not self.assoc.is_established:
+                    return
 
-            # Validate rsp_status and set rsp.Status accordingly
-            rsp = self.validate_status(rsp_status, rsp)
-
-            if rsp.Status in self.statuses:
-                status = self.statuses[rsp.Status]
-            else:
-                # Unknown status
-                self.dimse.send_msg(rsp, cx_id)
-                return
-
-            if status[0] == STATUS_CANCEL:
-                # If cancel, then dataset is None
-                LOGGER.info("Received C-CANCEL-FIND RQ from peer")
-                LOGGER.info(f"Find SCP Response {ii + 1}: 0x{rsp.Status:04X} (Cancel)")
-                self.dimse.send_msg(rsp, cx_id)
-                return
-
-            if status[0] == STATUS_FAILURE:
-                # If failed, then dataset is None
-                LOGGER.info(
-                    f"Find SCP Response {ii + 1}: 0x{rsp.Status:04X} "
-                    f"(Failure - {status[1]})"
-                )
-                self.dimse.send_msg(rsp, cx_id)
-                return
-
-            if status[0] == STATUS_SUCCESS:
-                # User isn't supposed to send these, but handle anyway
-                # If success, then dataset is None
-                LOGGER.info(f"Find SCP Response {ii + 1}: 0x0000 (Success)")
-                self.dimse.send_msg(rsp, cx_id)
-                return
-
-            if status[0] == STATUS_WARNING:
-                LOGGER.info(
-                    f"Find SCP Response {ii + 1}: 0x{rsp.Status:04X} "
-                    f"(Warning - {status[1]})"
-                )
-                self.dimse.send_msg(rsp, cx_id)
-                continue
-
-            if status[0] == STATUS_PENDING:
-                # If pending, `dataset` is the Identifier
-                dataset = cast(Dataset, dataset)
-                enc = encode(
-                    dataset,
-                    transfer_syntax.is_implicit_VR,
-                    transfer_syntax.is_little_endian,
-                    transfer_syntax.is_deflated,
-                )
-                bytestream = BytesIO(cast(bytes, enc))
-
-                if bytestream.getvalue() == b"":
-                    LOGGER.error("Failed encoding the response 'Identifier' dataset")
-                    # Failure: Unable to Process - Can't decode dataset
-                    #   returned by handler
-                    rsp.Status = 0xC312
+                # If the handler has not consumed a matching C-CANCEL yet,
+                # stop before emitting another composed response.
+                if self.is_cancelled(cast(int, req.MessageID)):
+                    LOGGER.info("Received C-CANCEL-FIND RQ from peer")
+                    rsp.Identifier = None
+                    rsp.Status = 0xFE00
+                    LOGGER.info(
+                        f"Find SCP Response {ii + 1}: 0xFE00 (Cancel)"
+                    )
                     self.dimse.send_msg(rsp, cx_id)
                     return
 
-                rsp.Identifier = bytestream
+                # Validate rsp_status and set rsp.Status accordingly
+                rsp = self.validate_status(rsp_status, rsp)
 
-                LOGGER.info(f"Find SCP Response {ii + 1}: 0x{rsp.Status:04X} (Pending)")
-                if _config.LOG_RESPONSE_IDENTIFIERS:
-                    LOGGER.debug("Find SCP Response Identifier:")
-                    LOGGER.debug("")
-                    LOGGER.debug("# DICOM Dataset")
-                    for line in pretty_dataset(dataset):
-                        LOGGER.debug(line)
-                    LOGGER.debug("")
+                if rsp.Status in self.statuses:
+                    status = self.statuses[rsp.Status]
+                else:
+                    # Unknown status
+                    self.dimse.send_msg(rsp, cx_id)
+                    return
 
-                self.dimse.send_msg(rsp, cx_id)
+                if status[0] == STATUS_CANCEL:
+                    # If cancel, then dataset is None
+                    LOGGER.info("Received C-CANCEL-FIND RQ from peer")
+                    LOGGER.info(
+                        f"Find SCP Response {ii + 1}: "
+                        f"0x{rsp.Status:04X} (Cancel)"
+                    )
+                    self.dimse.send_msg(rsp, cx_id)
+                    return
+
+                if status[0] == STATUS_FAILURE:
+                    # If failed, then dataset is None
+                    LOGGER.info(
+                        f"Find SCP Response {ii + 1}: 0x{rsp.Status:04X} "
+                        f"(Failure - {status[1]})"
+                    )
+                    self.dimse.send_msg(rsp, cx_id)
+                    return
+
+                if status[0] == STATUS_SUCCESS:
+                    # User isn't supposed to send these, but handle anyway
+                    # If success, then dataset is None
+                    LOGGER.info(f"Find SCP Response {ii + 1}: 0x0000 (Success)")
+                    self.dimse.send_msg(rsp, cx_id)
+                    return
+
+                if status[0] == STATUS_WARNING:
+                    LOGGER.info(
+                        f"Find SCP Response {ii + 1}: 0x{rsp.Status:04X} "
+                        f"(Warning - {status[1]})"
+                    )
+                    self.dimse.send_msg(rsp, cx_id)
+                    continue
+
+                if status[0] == STATUS_PENDING:
+                    # If pending, `dataset` is the Identifier
+                    dataset = cast(Dataset, dataset)
+                    enc = encode(
+                        dataset,
+                        transfer_syntax.is_implicit_VR,
+                        transfer_syntax.is_little_endian,
+                        transfer_syntax.is_deflated,
+                    )
+                    bytestream = BytesIO(cast(bytes, enc))
+
+                    if bytestream.getvalue() == b"":
+                        LOGGER.error(
+                            "Failed encoding the response 'Identifier' dataset"
+                        )
+                        # Failure: Unable to Process - Can't decode dataset
+                        #   returned by handler
+                        rsp.Status = 0xC312
+                        self.dimse.send_msg(rsp, cx_id)
+                        return
+
+                    rsp.Identifier = bytestream
+
+                    LOGGER.info(
+                        f"Find SCP Response {ii + 1}: "
+                        f"0x{rsp.Status:04X} (Pending)"
+                    )
+                    if _config.LOG_RESPONSE_IDENTIFIERS:
+                        LOGGER.debug("Find SCP Response Identifier:")
+                        LOGGER.debug("")
+                        LOGGER.debug("# DICOM Dataset")
+                        for line in pretty_dataset(dataset):
+                            LOGGER.debug(line)
+                        LOGGER.debug("")
+
+                    self.dimse.send_msg(rsp, cx_id)
+        finally:
+            _close_query_iterator(wrapped_generator)
+            _close_query_iterator(generator)
 
         # Event handler has aborted or released
         if not self.assoc.is_established:
