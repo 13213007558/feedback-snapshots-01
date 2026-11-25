@@ -85,6 +85,7 @@ local_scheme = "dirty-tag"
 [tool.pytest.ini_options]
 addopts = "-rsx --tb=short"
 testpaths = "tests"
+pythonpath = [".", "src"]
 filterwarnings = "always"
 markers = [
     "external_service: marks tests as requiring some external service",
@@ -123,6 +124,7 @@ required-imports = ["from __future__ import annotations"]
 
 [tool.ruff.lint.per-file-ignores]
 "examples/**/*.py" = ["T201"]
+"audit_proof/simulation.py" = ["T201"]
 
 [tool.mypy]
 python_version = "3.14"

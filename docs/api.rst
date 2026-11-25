@@ -91,6 +91,7 @@ Events
 .. autoclass:: apscheduler.SchedulerStopped
 .. autoclass:: apscheduler.JobAcquired
 .. autoclass:: apscheduler.JobReleased
+.. autoclass:: apscheduler.JobCompletionProof
 
 Enumerated types
 ----------------

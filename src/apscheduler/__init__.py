@@ -15,6 +15,7 @@ from ._events import DataStoreEvent as DataStoreEvent
 from ._events import Event as Event
 from ._events import JobAcquired as JobAcquired
 from ._events import JobAdded as JobAdded
+from ._events import JobCompletionProof as JobCompletionProof
 from ._events import JobDeserializationFailed as JobDeserializationFailed
 from ._events import JobReleased as JobReleased
 from ._events import JobRemoved as JobRemoved

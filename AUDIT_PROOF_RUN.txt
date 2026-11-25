@@ -1,0 +1,156 @@
+========================================================================================================
+APScheduler 作业生命周期事件 · 证明边界模拟（保存成功/发布失败 · 保存回滚 · 重发 · 缺失/重复）
+========================================================================================================
+
+[1] 订阅者实际收到的公开事件（含重复投递；事件体不含业务结果）
+========================================================================================================
+subscriber='forensic-subscriber' raw_deliveries=7 accepted_unique=6 duplicate_copies=1
+verifying_consumer: applied_effects=5 quarantined_unbound=1
+--------------------------------------------------------------------------------------------------------
+ 1. JobCompletionProof     job=job-A-committed-publish-failed producer=scheduler-A     seq=1 event_id=f50baeec outbox=outbox-scheduler-A-0001
+ 2. JobCompletionProof     job=job-A-committed-publish-failed producer=scheduler-A     seq=1 event_id=f50baeec outbox=outbox-scheduler-A-0001
+ 3. JobCompletionProof     job=job-L-published-then-lost  producer=scheduler-L     seq=1 event_id=1c9c5f27 outbox=outbox-scheduler-L-0001
+ 4. JobReleased            job=job-R2-rollback-with-early-event producer=scheduler-B2    seq=1 event_id=5569e13c outbox=-
+ 5. JobCompletionProof     job=job-G1-gap-seq1            producer=scheduler-gap   seq=1 event_id=6ed4705e outbox=outbox-scheduler-gap-0001
+ 6. JobCompletionProof     job=job-G3-gap-seq3            producer=scheduler-gap   seq=3 event_id=da722f19 outbox=outbox-scheduler-gap-0003
+ 7. JobCompletionProof     job=job-G2-gap-seq2-missing    producer=scheduler-gap   seq=2 event_id=ec65f31e outbox=outbox-scheduler-gap-0002
+
+[2] 真实已提交状态（账本 fact + 事务发件箱 outbox；回滚不留痕）
+========================================================================================================
+commits=5 rollbacks=2 facts=5 outbox_rows=5
+--------------------------------------------------------------------------------------------------------
+FACT  job=job-A-committed-publish-failed outcome=success outbox=outbox-scheduler-A-0001 event_id=f50baeec digest=sha256:eea0ef43f310b51c4
+FACT  job=job-L-published-then-lost  outcome=success outbox=outbox-scheduler-L-0001 event_id=1c9c5f27 digest=sha256:a3769f692f9efeb80
+FACT  job=job-G1-gap-seq1            outcome=success outbox=outbox-scheduler-gap-0001 event_id=6ed4705e digest=-
+FACT  job=job-G2-gap-seq2-missing    outcome=success outbox=outbox-scheduler-gap-0002 event_id=ec65f31e digest=-
+FACT  job=job-G3-gap-seq3            outcome=success outbox=outbox-scheduler-gap-0003 event_id=da722f19 digest=-
+ROLLBACK rollback:job-R1-rollback-silent
+ROLLBACK rollback:job-R2-rollback-with-early-event
+
+[3] 关键检查点：A 发布失败后的核对（缺失）
+========================================================================================================
+job_id                             committed recv dup outbox     verdict
+--------------------------------------------------------------------------------------------------------
+job-A-committed-publish-failed     True      0    0   pending    ended_event_missing_publish_failed
+
+[4] 关键检查点：B2 提前发布后回滚（空头/提前事件）
+========================================================================================================
+job_id                             committed recv dup outbox     verdict
+--------------------------------------------------------------------------------------------------------
+job-R2-rollback-with-early-event   False     1    0   None       phantom_early_event
+
+[5] 关键检查点：C 序列缺口（缺失可定位）
+========================================================================================================
+job_id                             committed recv dup outbox     verdict
+--------------------------------------------------------------------------------------------------------
+job-G1-gap-seq1                    True      1    0   published  verified_ended
+job-G2-gap-seq2-missing            True      0    0   pending    ended_event_missing
+job-G3-gap-seq3                    True      1    0   published  verified_ended
+* job-A-committed-publish-failed -> verified_ended
+    已证实结束，公开事件与已提交事实一致
+    - DUPLICATE_EVENT: 重复投递 1 份 (f50baeec×2)
+    - BOUND_TO_COMMIT: event_id/outbox_id 与已提交事实匹配，业务副作用仅一次
+* job-L-published-then-lost -> verified_ended
+    已证实结束，公开事件与已提交事实一致
+    - BOUND_TO_COMMIT: event_id/outbox_id 与已提交事实匹配，业务副作用仅一次
+* job-G1-gap-seq1 -> verified_ended
+    已证实结束，公开事件与已提交事实一致
+    - BOUND_TO_COMMIT: event_id/outbox_id 与已提交事实匹配，业务副作用仅一次
+* job-G2-gap-seq2-missing -> ended_event_missing
+    作业确已结束，但订阅者未收到任何事件（缺失）
+    - NO_PUBLIC_EVENT: 已提交但无任何公开事件
+* job-G3-gap-seq3 -> verified_ended
+    已证实结束，公开事件与已提交事实一致
+    - BOUND_TO_COMMIT: event_id/outbox_id 与已提交事实匹配，业务副作用仅一次
+* job-R2-rollback-with-early-event -> phantom_early_event
+    收到完成事件，但没有任何已提交事实与之绑定（提前到达或回滚后的空头事件）
+    - ROLLBACK_CONFIRMED: 状态库存在该作业的回滚记录，此事件为提交前提前发出的无效完成通知
+    - UNBOUND_EARLY_EVENT: 事件缺少 outbox_id/committed_at，且无已提交事实（典型的提交前通知）
+* GAP scheduler-gap#2: scheduler-gap 序列缺口 seq=2；outbox 可定位到 job=job-G2-gap-seq2-missing，committed=True，subscriber_received=False
+
+[6] 最终全量核对表（重发/补齐之后）
+========================================================================================================
+job_id                             committed recv dup outbox     verdict
+--------------------------------------------------------------------------------------------------------
+job-A-committed-publish-failed     True      2    1   published  verified_ended
+job-L-published-then-lost          True      1    0   published  verified_ended
+job-G1-gap-seq1                    True      1    0   published  verified_ended
+job-G2-gap-seq2-missing            True      1    0   published  verified_ended
+job-G3-gap-seq3                    True      1    0   published  verified_ended
+job-R2-rollback-with-early-event   False     1    0   None       phantom_early_event
+job-R1-rollback-silent             False     0    0   None       rolled_back_silent
+
+[7] 核对发现与判定依据
+========================================================================================================
+* job-A-committed-publish-failed -> verified_ended
+    已证实结束，公开事件与已提交事实一致
+    - DUPLICATE_EVENT: 重复投递 1 份 (f50baeec×2)
+    - BOUND_TO_COMMIT: event_id/outbox_id 与已提交事实匹配，业务副作用仅一次
+* job-L-published-then-lost -> verified_ended
+    已证实结束，公开事件与已提交事实一致
+    - BOUND_TO_COMMIT: event_id/outbox_id 与已提交事实匹配，业务副作用仅一次
+* job-G1-gap-seq1 -> verified_ended
+    已证实结束，公开事件与已提交事实一致
+    - BOUND_TO_COMMIT: event_id/outbox_id 与已提交事实匹配，业务副作用仅一次
+* job-G2-gap-seq2-missing -> verified_ended
+    已证实结束，公开事件与已提交事实一致
+    - BOUND_TO_COMMIT: event_id/outbox_id 与已提交事实匹配，业务副作用仅一次
+* job-G3-gap-seq3 -> verified_ended
+    已证实结束，公开事件与已提交事实一致
+    - BOUND_TO_COMMIT: event_id/outbox_id 与已提交事实匹配，业务副作用仅一次
+* job-R2-rollback-with-early-event -> phantom_early_event
+    收到完成事件，但没有任何已提交事实与之绑定（提前到达或回滚后的空头事件）
+    - ROLLBACK_CONFIRMED: 状态库存在该作业的回滚记录，此事件为提交前提前发出的无效完成通知
+    - UNBOUND_EARLY_EVENT: 事件缺少 outbox_id/committed_at，且无已提交事实（典型的提交前通知）
+* job-R1-rollback-silent -> rolled_back_silent
+    保存已回滚、无提交事实，也没有公开完成事件（正确表现）
+    - NO_COMMITTED_FACT: 账本无记录；保存已回滚，且未产生公开完成事件
+
+[8] 验收断言
+========================================================================================================
+[PASS] A 保存已原子提交（fact + outbox 可见）
+         fact/outbox committed, event_id=f50baeec
+[PASS] A 公开事件不含结果体/密钥
+         only result_ref + sha256 digest are public
+[PASS] A 发布失败后：真实状态=已结束，订阅者=0 事件
+         verdict=ended_event_missing_publish_failed, attempts=1
+[PASS] A 核对结论=ENDED_EVENT_MISSING_PUBLISH_FAILED（可辨别为缺失而非未结束）
+         作业确已结束，但事件缺失：保存已提交、发布失败（可重发）
+[PASS] A 重发使用同一 event_id，订阅者收到 2 份但业务副作用仅 1 次
+         copies=2, duplicates=1, applied_once=True
+[PASS] A 重发后核对结论=VERIFIED_ENDED
+         已证实结束，公开事件与已提交事实一致
+[PASS] L broker 已接受(outbox=published)，但订阅者缺失 => LOST_AFTER_PUBLISH
+         作业确已结束，但事件在发布后/投递途中丢失（可凭 outbox 重放）
+[PASS] L 凭 outbox 用同一 event_id 重放 => applied，结论=VERIFIED_ENDED
+         manual outbox replay closes the loss
+[PASS] B1 回滚后无 fact/outbox，订阅者无事件 => ROLLED_BACK_SILENT
+         保存已回滚、无提交事实，也没有公开完成事件（正确表现）
+[PASS] B2 提前事件被消费者隔离(quarantined)，未产生业务副作用
+         dedup is not enough; commit binding blocks the phantom effect
+[PASS] B2 订阅者先收到事件，但保存回滚、无提交事实 => PHANTOM_EARLY_EVENT
+         收到完成事件，但没有任何已提交事实与之绑定（提前到达或回滚后的空头事件）
+[PASS] C 序列检测到缺口 seq=2，并由 outbox 定位到具体缺失作业
+         scheduler-gap 序列缺口 seq=2；outbox 可定位到 job=job-G2-gap-seq2-missing，committed=True，subscriber_received=False
+[PASS] C 补齐 seq=2 后缺口消失，三个作业均 VERIFIED_ENDED
+         gap closed by same-event-id redelivery
+========================================================================================================
+simulation assertions: 13/13 passed
+
+[9] 真实 APScheduler 代码路径佐证（AsyncScheduler + SQLAlchemyDataStore）
+========================================================================================================
+  - real AsyncScheduler: job=422ad1cc outcome=success subscriber_events=1
+  - authorized caller retrieved result body with token=LIVE-RESULT-...
+  - JobReleased leaks result body in repr? False; proof frame leaks secret? False; reconstituted=JobCompletionProof event_id_match=True
+  - real release_job A: publish_raised=True committed result rows for job A=1 remaining job A rows=0 broker_calls=['JobAdded', 'JobReleased'] delivered=['JobAdded']
+  - real release_job B: save_raised=True result rows for job B=0 remaining job B rows=1 new_delivered_events=[]
+[PASS] 真实调度器：订阅者收到 JobReleased，且结果体不出现在事件/证明帧中
+         JobReleased + native JobCompletionProof reconstituted via stock broker
+[PASS] 真实 SQLAlchemyDataStore：保存已提交后发布失败 => 结果行仍在、订阅者无 JobReleased
+         release_job commits before event_broker.publish()
+[PASS] 真实 SQLAlchemyDataStore：保存失败回滚 => 无结果行、job 仍在、无 JobReleased
+         transaction rolls back; stock code publishes only after commit
+--------------------------------------------------------------------------------------------------------
+live assertions: 3/3 passed
+========================================================================================================
+RESULT: ALL CHECKS PASSED — 重复可去重、缺失/提前可辨别、结论可绑定已提交事实。

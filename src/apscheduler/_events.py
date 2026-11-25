@@ -325,3 +325,116 @@ class JobReleased(SchedulerEvent):
     def marshal(self) -> dict[str, Any]:
         marshalled = super().marshal()
         return marshalled
+
+
+@attrs.define(kw_only=True, frozen=True)
+class JobCompletionProof(SchedulerEvent):
+    """
+    Public, low sensitivity proof that a job completion was durably committed.
+
+    Unlike :class:`JobReleased`, this event is designed for audit and
+    reconciliation pipelines:
+
+    * it never carries the job's return value, and never carries exception
+      messages or tracebacks, so the result body can stay separately
+      authorized;
+    * ``event_id`` is stable across redeliveries of the same logical event,
+      letting subscribers deduplicate replays;
+    * ``sequence`` (scoped by ``producer_id``) lets subscribers detect gaps in
+      the event stream;
+    * ``ledger_ref`` binds the event to a committed outbox/ledger entry, so an
+      investigator can tell a real completion apart from an event that arrived
+      before (or without) a commit;
+    * ``result_ref`` and ``result_digest`` point authorized consumers at the
+      result body and let them verify its integrity, without exposing it on
+      the event bus.
+
+    The intended production wiring is the transactional outbox pattern: the
+    completion fact and the outbox row are committed together, and this event
+    is relayed from that row only after commit. Publishing failures then leave
+    a replayable outbox row instead of a lost notification.
+
+    :ivar event_id: stable identifier of the logical event (same on redelivery)
+    :ivar job_id: ID of the job this proof belongs to
+    :ivar task_id: ID of the task the job ran
+    :ivar outcome: the committed outcome of the job
+    :ivar producer_id: identity of the producer that assigned ``sequence``
+    :ivar sequence: monotonic sequence number within ``producer_id``
+    :ivar ledger_ref: reference to the committed ledger/outbox entry
+    :ivar result_ref: opaque reference for fetching the separately authorized
+        result body (``None`` when no result was retained)
+    :ivar result_digest: digest of the canonical result body for integrity
+        verification (e.g. ``sha256:...``), or ``None``
+    :ivar scheduler_id: ID of the scheduler that processed the job, if any
+    :ivar schedule_id: ID of the schedule that created the job, if any
+    :ivar finished_at: time the job finished executing
+    :ivar committed_at: time the completion fact was durably committed
+    """
+
+    event_id: UUID = attrs.field(converter=as_uuid)
+    job_id: UUID = attrs.field(converter=as_uuid)
+    task_id: str
+    outcome: JobOutcome = attrs.field(converter=as_enum(JobOutcome))
+    producer_id: str
+    sequence: int
+    ledger_ref: str
+    result_ref: str | None = None
+    result_digest: str | None = None
+    scheduler_id: str | None = None
+    schedule_id: str | None = None
+    finished_at: datetime = attrs.field(converter=as_aware_datetime)
+    committed_at: datetime | None = attrs.field(
+        default=None, converter=optional(as_aware_datetime)
+    )
+
+    @classmethod
+    def from_result(
+        cls,
+        result: JobResult,
+        *,
+        event_id: UUID,
+        producer_id: str,
+        sequence: int,
+        ledger_ref: str,
+        committed_at: datetime,
+        task_id: str,
+        scheduler_id: str | None = None,
+        schedule_id: str | None = None,
+        result_ref: str | None = None,
+        result_digest: str | None = None,
+    ) -> JobCompletionProof:
+        """
+        Build a result free proof event from a committed :class:`JobResult`.
+
+        The ``return_value`` and ``exception`` fields of ``result`` are
+        intentionally not copied onto the proof.
+
+        :param result: the committed job result to prove
+        :param event_id: stable identifier of the logical event
+        :param producer_id: identity of the sequence producer
+        :param sequence: monotonic sequence number within ``producer_id``
+        :param ledger_ref: reference to the committed ledger/outbox entry
+        :param committed_at: when the completion fact was committed
+        :param task_id: ID of the task the job ran
+        :param scheduler_id: scheduler that processed the job
+        :param schedule_id: schedule that created the job, if any
+        :param result_ref: opaque reference to the authorized result body
+        :param result_digest: digest of the canonical result body
+        :return: a new result free proof event
+        """
+        return cls(
+            timestamp=committed_at,
+            event_id=event_id,
+            job_id=result.job_id,
+            task_id=task_id,
+            outcome=result.outcome,
+            producer_id=producer_id,
+            sequence=sequence,
+            ledger_ref=ledger_ref,
+            result_ref=result_ref,
+            result_digest=result_digest,
+            scheduler_id=scheduler_id,
+            schedule_id=schedule_id,
+            finished_at=result.finished_at,
+            committed_at=committed_at,
+        )
