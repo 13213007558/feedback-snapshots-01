@@ -58,5 +58,6 @@ Sub-modules:
    server_description
    topology_description
    uri_parser
+   write_proxy
    write_concern
    event_loggers
