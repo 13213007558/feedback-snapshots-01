@@ -1,0 +1,456 @@
+{
+  "artifact_schema": "elastic-apm-config-evidence/v1",
+  "synthetic_marker": "SYNTHETIC-AUDIT-FB7558",
+  "sharing": {
+    "mode": "synthetic-only",
+    "approved_field_list": "approval.approved_fields",
+    "metadata_handling": "agent metadata record is parsed only in memory and omitted"
+  },
+  "approval": {
+    "share_gate": "synthetic_marker_and_approved_field_allowlist_only",
+    "approved_fields": [
+      "artifact_schema",
+      "synthetic_marker",
+      "sharing.mode",
+      "sharing.approved_field_list",
+      "approval.share_gate",
+      "approval.human_release_signature",
+      "rule_catalog.rule_version",
+      "rule_catalog.fingerprint_sha256",
+      "rule_catalog.approved_values.exit_span_min_duration_ms",
+      "implementation_anchors",
+      "events.seq",
+      "events.phase",
+      "events.kind",
+      "events.alias",
+      "events.transaction_id",
+      "events.span_id",
+      "events.trace_id_digest",
+      "events.rule_version_at_start",
+      "events.rule_version_at_span_creation",
+      "events.rule_version_used_by_snapshot",
+      "events.current_rule_version_at_decision",
+      "events.rule_version_at_enqueue",
+      "events.rule_version_at_dequeue",
+      "events.rule_version_at_take",
+      "events.rule_version_at_send",
+      "events.snapshot_exit_span_min_duration_ms",
+      "events.current_exit_span_min_duration_ms",
+      "events.span_duration_ms",
+      "events.discardable",
+      "events.decision",
+      "events.event_type",
+      "events.processor_retained",
+      "events.event_refs",
+      "events.batch_seq",
+      "events.forced_flush",
+      "events.payload_sha256",
+      "events.observed",
+      "events.evidence_status",
+      "events.historical_representation",
+      "events.prev_hash",
+      "events.record_hash",
+      "outbound_only_counterfactual",
+      "legacy_representation",
+      "assertions",
+      "verification"
+    ],
+    "human_release_signature": "attach-out-of-band-before-external-sharing"
+  },
+  "rule_catalog": [
+    {
+      "rule_version": "R1",
+      "approved_values": {
+        "exit_span_min_duration_ms": 10
+      },
+      "fingerprint_sha256": "4ad7e3c23aada80a9d5d968c43bd386531b86305ea90858647b266be3aeef4c4"
+    },
+    {
+      "rule_version": "R2",
+      "approved_values": {
+        "exit_span_min_duration_ms": 0
+      },
+      "fingerprint_sha256": "35e71d094e5dcb8c6fb2265b47165df6c1bced845200d00895d2ef9eff0eec9a"
+    }
+  ],
+  "implementation_anchors": [
+    {
+      "point": "transaction_config_snapshot",
+      "path": "elasticapm/traces.py",
+      "line": 229
+    },
+    {
+      "point": "transaction_sampling_rule",
+      "path": "elasticapm/traces.py",
+      "line": 974
+    },
+    {
+      "point": "exit_span_report_decision",
+      "path": "elasticapm/traces.py",
+      "line": 717
+    },
+    {
+      "point": "transport_event_dequeue",
+      "path": "elasticapm/transport/base.py",
+      "line": 129
+    },
+    {
+      "point": "transport_ndjson_serialize",
+      "path": "elasticapm/transport/base.py",
+      "line": 152
+    },
+    {
+      "point": "transport_batch_flush",
+      "path": "elasticapm/transport/base.py",
+      "line": 176
+    }
+  ],
+  "events": [
+    {
+      "seq": 1,
+      "phase": "transaction_start",
+      "kind": "transaction_started",
+      "alias": "tx-1",
+      "transaction_id": "3c5111e8b626c1b5",
+      "trace_id_digest": "sha256:819b1e81923058bd93e89fdffdefd397b8467cc02f26bfe7aec9457a51540dc9",
+      "rule_version_at_start": "R1",
+      "rule_version_used_by_snapshot": "R1",
+      "snapshot_exit_span_min_duration_ms": 10.0,
+      "observed": true,
+      "evidence_status": "observed_at_runtime",
+      "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "record_hash": "2f35185919364695c156a63e98d7015b20d6a7152e4f3bde16e646bdd8e6eabc"
+    },
+    {
+      "seq": 2,
+      "phase": "transaction_start",
+      "kind": "transaction_started",
+      "alias": "tx-2",
+      "transaction_id": "c156f8cec29c6d5e",
+      "trace_id_digest": "sha256:b7fac79ecb0011c3d3b5f8f7c6398c176697f6fb4a0c1719376da35e390cdce6",
+      "rule_version_at_start": "R2",
+      "rule_version_used_by_snapshot": "R2",
+      "snapshot_exit_span_min_duration_ms": 0.0,
+      "observed": true,
+      "evidence_status": "observed_at_runtime",
+      "prev_hash": "2f35185919364695c156a63e98d7015b20d6a7152e4f3bde16e646bdd8e6eabc",
+      "record_hash": "2f2f9d2dc9a0ad25165cc07cc171126b3344bdaabeeb102961089ebc1b1be6e8"
+    },
+    {
+      "seq": 3,
+      "phase": "span_decision",
+      "kind": "span_created",
+      "alias": "span-for-tx-2",
+      "transaction_id": "c156f8cec29c6d5e",
+      "span_id": "17acc1a349cbcfd1",
+      "rule_version_at_span_creation": "R2",
+      "rule_version_used_by_snapshot": "R2",
+      "snapshot_exit_span_min_duration_ms": 0.0,
+      "current_exit_span_min_duration_ms": 0.0,
+      "observed": true,
+      "evidence_status": "observed_at_runtime",
+      "prev_hash": "2f2f9d2dc9a0ad25165cc07cc171126b3344bdaabeeb102961089ebc1b1be6e8",
+      "record_hash": "cf6370fbfc7510099e583f70d97bd1cd0dcbf4be09e8e5be51993d3792db329b"
+    },
+    {
+      "seq": 4,
+      "phase": "span_decision",
+      "kind": "span_report_rule_evaluated",
+      "alias": "span-for-tx-2",
+      "transaction_id": "c156f8cec29c6d5e",
+      "span_id": "17acc1a349cbcfd1",
+      "rule_version_at_span_creation": "R2",
+      "rule_version_used_by_snapshot": "R2",
+      "current_rule_version_at_decision": "R2",
+      "snapshot_exit_span_min_duration_ms": 0.0,
+      "current_exit_span_min_duration_ms": 0.0,
+      "span_duration_ms": 5.0,
+      "discardable": true,
+      "decision": "eligible_for_agent_queue",
+      "observed": true,
+      "evidence_status": "observed_at_runtime",
+      "prev_hash": "cf6370fbfc7510099e583f70d97bd1cd0dcbf4be09e8e5be51993d3792db329b",
+      "record_hash": "b69efaaf51730f4d892be9687a335421f0009d199cc780704557b4dc862f6ef9"
+    },
+    {
+      "seq": 5,
+      "phase": "agent_queue",
+      "kind": "event_enqueued",
+      "event_type": "span",
+      "alias": "span-for-tx-2",
+      "transaction_id": "c156f8cec29c6d5e",
+      "span_id": "17acc1a349cbcfd1",
+      "rule_version_at_enqueue": "R2",
+      "observed": true,
+      "evidence_status": "observed_at_runtime",
+      "prev_hash": "b69efaaf51730f4d892be9687a335421f0009d199cc780704557b4dc862f6ef9",
+      "record_hash": "cd629b7522fb6b61a7be216499f92bdd52a36dae81c65ef00ca254ec8ea012fe"
+    },
+    {
+      "seq": 6,
+      "phase": "agent_queue",
+      "kind": "event_enqueued",
+      "event_type": "transaction",
+      "alias": "tx-2",
+      "transaction_id": "c156f8cec29c6d5e",
+      "rule_version_at_enqueue": "R2",
+      "observed": true,
+      "evidence_status": "observed_at_runtime",
+      "prev_hash": "cd629b7522fb6b61a7be216499f92bdd52a36dae81c65ef00ca254ec8ea012fe",
+      "record_hash": "de9195ec98364037263c3e587300e709334d77025f675dad134a4f6794d6d0e2"
+    },
+    {
+      "seq": 7,
+      "phase": "transport_dequeue",
+      "kind": "event_dequeued",
+      "event_type": "span",
+      "alias": "span-for-tx-2",
+      "transaction_id": "c156f8cec29c6d5e",
+      "span_id": "17acc1a349cbcfd1",
+      "rule_version_at_dequeue": "R2",
+      "processor_retained": true,
+      "observed": true,
+      "evidence_status": "observed_at_runtime",
+      "prev_hash": "de9195ec98364037263c3e587300e709334d77025f675dad134a4f6794d6d0e2",
+      "record_hash": "cb5375cad34356c5ec232baeeb4a02676f855c6420bf702161415de661807353"
+    },
+    {
+      "seq": 8,
+      "phase": "transport_dequeue",
+      "kind": "event_dequeued",
+      "event_type": "transaction",
+      "alias": "tx-2",
+      "transaction_id": "c156f8cec29c6d5e",
+      "rule_version_at_dequeue": "R2",
+      "processor_retained": true,
+      "observed": true,
+      "evidence_status": "observed_at_runtime",
+      "prev_hash": "cb5375cad34356c5ec232baeeb4a02676f855c6420bf702161415de661807353",
+      "record_hash": "7483849c25f534216aaa21fc4305246beb2c6b02b7b60414f32b1545b533218d"
+    },
+    {
+      "seq": 9,
+      "phase": "transport_batch",
+      "kind": "batch_taken_and_sent",
+      "observed": true,
+      "batch_seq": 1,
+      "forced_flush": true,
+      "rule_version_at_take": "R2",
+      "event_refs": [
+        {
+          "event_type": "span",
+          "alias": "span-for-tx-2",
+          "transaction_id": "c156f8cec29c6d5e",
+          "span_id": "17acc1a349cbcfd1",
+          "observed_fields": {
+            "name": "synthetic-fast-exit",
+            "sampled": null,
+            "span_count": null,
+            "duration_ms": 5.0,
+            "outcome": "success",
+            "composite": null,
+            "dropped_spans_stats_count": 0
+          }
+        },
+        {
+          "event_type": "transaction",
+          "alias": "tx-2",
+          "transaction_id": "c156f8cec29c6d5e",
+          "span_id": null,
+          "observed_fields": {
+            "name": "tx-new-sent-first",
+            "sampled": true,
+            "span_count": {
+              "started": 1,
+              "dropped": 0
+            },
+            "duration_ms": 42.0,
+            "outcome": null,
+            "composite": null,
+            "dropped_spans_stats_count": 0
+          }
+        }
+      ],
+      "rule_version_at_send": "R2",
+      "payload_sha256": "sha256:3839e5645d0e9f7d9b45b0fbdbfec0c9854c2b1444de93e9464489da37e8ffae",
+      "prev_hash": "7483849c25f534216aaa21fc4305246beb2c6b02b7b60414f32b1545b533218d",
+      "record_hash": "ec6850d66c8bbfa7314df291ec1166e15e620f2540a3c483c2d52d2a40ad089f"
+    },
+    {
+      "seq": 10,
+      "phase": "span_decision",
+      "kind": "span_created",
+      "alias": "span-for-tx-1",
+      "transaction_id": "3c5111e8b626c1b5",
+      "span_id": "c3936a18b8175531",
+      "rule_version_at_span_creation": "R1",
+      "rule_version_used_by_snapshot": "R1",
+      "snapshot_exit_span_min_duration_ms": 10.0,
+      "current_exit_span_min_duration_ms": 0.0,
+      "observed": true,
+      "evidence_status": "observed_at_runtime",
+      "prev_hash": "ec6850d66c8bbfa7314df291ec1166e15e620f2540a3c483c2d52d2a40ad089f",
+      "record_hash": "0465a82fd448835406810d9297ce803c7f147222de4bdc5906b3216060966aa4"
+    },
+    {
+      "seq": 11,
+      "phase": "span_decision",
+      "kind": "span_report_rule_evaluated",
+      "alias": "span-for-tx-1",
+      "transaction_id": "3c5111e8b626c1b5",
+      "span_id": "c3936a18b8175531",
+      "rule_version_at_span_creation": "R1",
+      "rule_version_used_by_snapshot": "R1",
+      "current_rule_version_at_decision": "R2",
+      "snapshot_exit_span_min_duration_ms": 10.0,
+      "current_exit_span_min_duration_ms": 0.0,
+      "span_duration_ms": 5.0,
+      "discardable": true,
+      "decision": "dropped_by_exit_span_min_duration",
+      "observed": true,
+      "evidence_status": "observed_at_runtime",
+      "prev_hash": "0465a82fd448835406810d9297ce803c7f147222de4bdc5906b3216060966aa4",
+      "record_hash": "5f595a5299f8aa081973be7b26209837ee0cec89d4d2fe591e6c52c476efc11e"
+    },
+    {
+      "seq": 12,
+      "phase": "agent_queue",
+      "kind": "event_enqueued",
+      "event_type": "transaction",
+      "alias": "tx-1",
+      "transaction_id": "3c5111e8b626c1b5",
+      "rule_version_at_enqueue": "R2",
+      "observed": true,
+      "evidence_status": "observed_at_runtime",
+      "prev_hash": "5f595a5299f8aa081973be7b26209837ee0cec89d4d2fe591e6c52c476efc11e",
+      "record_hash": "97b4093832d0df51c34f6df1bfe0adcb59310d0e074211b787d697f8bcd30fd3"
+    },
+    {
+      "seq": 13,
+      "phase": "transport_dequeue",
+      "kind": "event_dequeued",
+      "event_type": "transaction",
+      "alias": "tx-1",
+      "transaction_id": "3c5111e8b626c1b5",
+      "rule_version_at_dequeue": "R2",
+      "processor_retained": true,
+      "observed": true,
+      "evidence_status": "observed_at_runtime",
+      "prev_hash": "97b4093832d0df51c34f6df1bfe0adcb59310d0e074211b787d697f8bcd30fd3",
+      "record_hash": "1617384fa67b96022e7d02defa68c0310e4754676cc5298ad4fd63f22df033d0"
+    },
+    {
+      "seq": 14,
+      "phase": "transport_batch",
+      "kind": "batch_taken_and_sent",
+      "observed": true,
+      "batch_seq": 2,
+      "forced_flush": true,
+      "rule_version_at_take": "R2",
+      "event_refs": [
+        {
+          "event_type": "transaction",
+          "alias": "tx-1",
+          "transaction_id": "3c5111e8b626c1b5",
+          "span_id": null,
+          "observed_fields": {
+            "name": "tx-old-started-first-sent-last",
+            "sampled": true,
+            "span_count": {
+              "started": 1,
+              "dropped": 1
+            },
+            "duration_ms": 84.0,
+            "outcome": null,
+            "composite": null,
+            "dropped_spans_stats_count": 1
+          }
+        }
+      ],
+      "rule_version_at_send": "R2",
+      "payload_sha256": "sha256:adb3ffd792b69bc36de472618bfe36d27ebe2ed4b09ec8675e1e42d3870aea25",
+      "prev_hash": "1617384fa67b96022e7d02defa68c0310e4754676cc5298ad4fd63f22df033d0",
+      "record_hash": "e9d5801f2d53d59b2827326e3696f28ed831ab5e2d7570c6effd8b56d440a0d9"
+    }
+  ],
+  "outbound_only_counterfactual": {
+    "recorded_field": "current_rule_version_at_outbound",
+    "batch_1": {
+      "outbound_rule_version": "R2",
+      "would_claim_for": [
+        "tx-2",
+        "span-for-tx-2"
+      ],
+      "correct_for_collection": true
+    },
+    "batch_2": {
+      "outbound_rule_version": "R2",
+      "would_claim_for": [
+        "tx-1"
+      ],
+      "correct_for_collection": false,
+      "actual_collection_rule_version": "R1"
+    },
+    "proof_limit": "An outbound label proves only the version current when the batch was taken/sent, not the immutable rule used at transaction/span collection."
+  },
+  "legacy_representation": {
+    "known_version_token": "R1/R2/... only when an immutable collection record exists",
+    "collection_rule_version": "UNVERIFIABLE_NOT_RECORDED",
+    "collection_rule_fingerprint_sha256": null,
+    "send_rule_version": "UNVERIFIABLE_NOT_RECORDED",
+    "outbound_only_version_if_separately_logged": "R2_OUTBOUND_OBSERVED_BUT_COLLECTION_STILL_UNKNOWN",
+    "missing_span_with_drop_count": "ABSENT_SPAN_DROP_COUNTED_BUT_RULE_UNVERSIONED",
+    "missing_span_without_drop_count": "ABSENT_BUT_NOT_PROVEN_NEVER_CREATED",
+    "allowed_inference": "Only payload fields, IDs, counts, and collector/batch records independently retained may be treated as evidence.",
+    "forbidden_inference": "Do not backfill the outbound/current rule version as the historical collection rule version."
+  },
+  "assertions": [
+    {
+      "name": "two_transactions_started",
+      "passed": true
+    },
+    {
+      "name": "old_transaction_uses_R1",
+      "passed": true
+    },
+    {
+      "name": "new_transaction_uses_R2",
+      "passed": true
+    },
+    {
+      "name": "new_span_is_queued_under_R2",
+      "passed": true
+    },
+    {
+      "name": "old_span_is_dropped_under_R1_snapshot",
+      "passed": true
+    },
+    {
+      "name": "new_batch_is_first",
+      "passed": true
+    },
+    {
+      "name": "first_batch_contains_new_span",
+      "passed": true
+    },
+    {
+      "name": "old_batch_is_second_and_has_no_span",
+      "passed": true
+    },
+    {
+      "name": "dequeue_order_is_new_span_new_tx_old_tx",
+      "passed": true
+    },
+    {
+      "name": "both_batches_send_under_R2",
+      "passed": true
+    }
+  ],
+  "verification": {
+    "status": "verified",
+    "event_count": 14,
+    "final_hash": "e9d5801f2d53d59b2827326e3696f28ed831ab5e2d7570c6effd8b56d440a0d9",
+    "errors": [],
+    "offline_command": ".venv/bin/python scripts/audit_config_evidence.py --verify audit-evidence.synthetic.json"
+  }
+}
