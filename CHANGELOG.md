@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Add `social_core.disconnect.DisconnectReport` for classifying parallel
+  disconnect outcomes as completed, partially completed, protected, failed, or
+  retryable after an uncertain remote revocation.
+- Add an optional atomic `UserMixin.disconnect_entries()` storage contract for
+  rechecking the last-login retention policy while deleting associations.
+
+### Fixed
+
+- Recheck disconnect retention during the final default-pipeline deletion under
+  the storage layer's atomic disconnect implementation, preventing parallel
+  requests from removing the final social login method.
+- Remove the provider/UID index when the in-memory test storage disconnects an
+  association so post-disconnect login lookups match real storage behavior.
+
 ## [7.2.0](https://github.com/python-social-auth/social-core/releases/tag/7.2.0) - 2026-11-12
 
 ### Added

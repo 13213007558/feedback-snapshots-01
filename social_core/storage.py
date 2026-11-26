@@ -6,14 +6,20 @@ import base64
 import re
 import uuid
 from abc import abstractmethod
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
+from threading import RLock
 from time import time as _time
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from openid.association import Association as OpenIdAssociation
 
-from .exceptions import AuthConfigurationError, AuthCredentialError, AuthResponseError
+from .exceptions import (
+    AuthConfigurationError,
+    AuthCredentialError,
+    AuthPolicyError,
+    AuthResponseError,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -45,6 +51,7 @@ class PipelineUserProtocol(UserProtocol, Protocol):
 class UserMixin:
     # Consider tokens that expire in 5 seconds as already expired
     ACCESS_TOKEN_EXPIRED_THRESHOLD = 5
+    _disconnect_guard = RLock()
     provider = ""
     id_key = ""
     uid: str
@@ -296,6 +303,48 @@ class UserMixin:
     def disconnect(cls, entry):
         """Disconnect the social account for the given user"""
         raise NotImplementedError("Implement in subclass")
+
+    @classmethod
+    def disconnect_entries(
+        cls,
+        entries: Sequence[UserMixin],
+        *,
+        user: UserProtocol | None = None,
+        backend_name: str | None = None,
+        check_policy: bool = False,
+    ) -> Sequence[UserMixin]:
+        """Delete entries, optionally rechecking retention atomically.
+
+        ``check_policy`` is enabled by the default disconnect pipeline after
+        its policy step has run. The default implementation uses a
+        process-local lock for that recheck; it cannot make check-and-delete
+        atomic across processes. Concrete storages should override this method
+        with a row lock, transaction, or conditional delete so two parallel
+        requests cannot remove the final usable authentication method.
+        """
+        with cls._disconnect_guard:
+            disconnected: list[UserMixin] = []
+            for entry in entries:
+                owner = user if user is not None else getattr(entry, "user", None)
+                provider: str = backend_name or getattr(entry, "provider", "") or ""
+                association_id = getattr(entry, "id", None)
+                if (
+                    check_policy
+                    and owner is not None
+                    and not cls.allowed_to_disconnect(owner, provider, association_id)
+                ):
+                    raise AuthPolicyError(
+                        None,
+                        code="disconnect_disallowed",
+                        stage="disconnect",
+                        context={
+                            "provider": provider,
+                            "association_id": association_id,
+                        },
+                    )
+                cls.disconnect(entry)
+                disconnected.append(entry)
+            return disconnected
 
     @classmethod
     def user_exists(cls, *args, **kwargs) -> bool:

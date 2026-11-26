@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from social_core.exceptions import AuthPolicyError
+from social_core.exceptions import AuthPolicyError, SocialAuthBaseException
 
 if TYPE_CHECKING:
     from social_core.storage import UserProtocol
@@ -17,9 +17,10 @@ def allowed_to_disconnect(
     association_id=None,
     *args,
     **kwargs,
-) -> None:
+) -> dict[str, bool]:
     if not user_storage.allowed_to_disconnect(user, name, association_id):
         raise AuthPolicyError(code="disconnect_disallowed", stage="disconnect")
+    return {"disconnect_policy_checked": True}
 
 
 def get_entries(
@@ -42,11 +43,33 @@ def revoke_tokens(strategy, entries, *args, **kwargs) -> None:
         for entry in entries:
             if "access_token" in entry.extra_data:
                 backend = entry.get_backend_instance(strategy)
-                backend.revoke_token(entry.extra_data["access_token"], entry.uid)
+                try:
+                    backend.revoke_token(entry.extra_data["access_token"], entry.uid)
+                except SocialAuthBaseException as exc:
+                    exc.context.setdefault("provider", entry.provider)
+                    exc.context.setdefault("uid", entry.uid)
+                    exc.context.setdefault("association_id", entry.id)
+                    raise
 
 
 def disconnect(
-    strategy: BaseStrategy[object], entries, user_storage, *args, **kwargs
+    strategy: BaseStrategy[object],
+    entries,
+    user_storage,
+    user: UserProtocol | None = None,
+    name: str | None = None,
+    *args,
+    **kwargs,
 ) -> None:
+    disconnect_entries = getattr(user_storage, "disconnect_entries", None)
+    if callable(disconnect_entries):
+        disconnect_entries(
+            entries,
+            user=user,
+            backend_name=name,
+            check_policy=bool(kwargs.get("disconnect_policy_checked", False)),
+        )
+        return
+
     for entry in entries:
         user_storage.disconnect(entry)

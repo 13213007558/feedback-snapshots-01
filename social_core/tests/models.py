@@ -152,6 +152,7 @@ class TestUserSocialAuth(UserMixin, BaseModel):
     @classmethod
     def disconnect(cls, entry) -> None:
         cls.cache.pop(entry.id, None)
+        cls.cache_by_uid.pop((entry.provider, entry.uid), None)
         entry.user.social = [s for s in entry.user.social if entry != s]
 
     @classmethod
