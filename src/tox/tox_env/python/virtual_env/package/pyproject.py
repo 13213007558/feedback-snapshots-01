@@ -355,6 +355,7 @@ class Pep517VenvPackager(PythonPackageToxEnv, ABC):
         else:  # pragma: no cover # for when we introduce new packaging types and don't implement
             msg = f"cannot handle package type {of_type}"
             raise TypeError(msg)  # pragma: no cover  # untested error path
+        self.record_package_build(for_env, package)
         return [package]
 
     def _load_deps(self, for_env: EnvConfigSet) -> list[Requirement]:
@@ -584,11 +585,27 @@ class Pep517VirtualEnvFrontend(Frontend):
         ):  # wrap build methods in a cache wrapper
 
             def key(  # interface signature
-                *args: object,  # ruff:ignore[unused-function-argument]  # interface signature
+                *args: object,
                 bound_return: str = hook,
-                **kwargs: object,  # ruff:ignore[unused-function-argument]  # interface signature
-            ) -> str:
-                return bound_return
+                **kwargs: object,
+            ) -> tuple[object, ...]:
+                config_settings = kwargs.get("config_settings")
+                if config_settings is None:
+                    if bound_return.startswith("get_requires_for_build_") and args:
+                        config_settings = args[0]
+                    elif len(args) >= 2:
+                        config_settings = args[1]
+
+                def freeze(value: object) -> object:
+                    if isinstance(value, dict):
+                        return tuple(sorted((str(key), freeze(item)) for key, item in value.items()))
+                    if isinstance(value, (list, tuple, set, frozenset)):
+                        return tuple(freeze(item) for item in value)
+                    if isinstance(value, Path):
+                        return str(value)
+                    return value
+
+                return bound_return, freeze(config_settings)
 
             setattr(self, hook, cached(into, key=key)(getattr(self, hook)))
 

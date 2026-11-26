@@ -105,9 +105,24 @@ class VenvCmdBuilder(PythonPackageToxEnv, ABC):
 
     @override
     def perform_packaging(self, for_env: EnvConfigSet) -> list[Package]:
-        if (path := self._built_package_path) is None:
+        scope = self.build_scope(for_env)
+        run = self.reuse_contract.begin_run(for_env.name, self.name, scope)
+        path: Path | None = None
+        if run.decision.reused and run.decision.artifact is not None:
+            candidate = run.decision.artifact.path
+            if candidate.exists():
+                path = candidate
+        if path is None:
             path = self._build_package()
             self._built_package_path = path
+            if run.decision.status != "reused" or run.preparation.latest is None:
+                self.reuse_contract.record_build(
+                    run.preparation,
+                    path,
+                    builder=self.id(),
+                    compute_digest=False,
+                )
+        self.reuse_contract.record_consumption(run, path, compute_digest=True)
         return self.extract_install_info(for_env, path)
 
     def _build_package(self) -> Path:

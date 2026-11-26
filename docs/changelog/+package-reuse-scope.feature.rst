@@ -1,0 +1,1 @@
+Add a package build reuse scope contract. Package environments can now record named preparations, approved capabilities, build evidence, consumed artifact views, and run decisions, so same-named builds with different approval scope are not reused by name alone.

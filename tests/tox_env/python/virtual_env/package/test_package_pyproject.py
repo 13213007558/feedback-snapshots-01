@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import tarfile
+from pathlib import Path
 from textwrap import dedent
 from typing import TYPE_CHECKING, Any, Final, Protocol, cast
 
@@ -17,8 +18,6 @@ from tox.tox_env.python.virtual_env.package import pyproject as pyproject_pkg
 from tox.tox_env.python.virtual_env.package.pyproject import Pep517VirtualEnvFrontend, ToxBackendFailed
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from pytest_mock import MockerFixture
 
     from tox.pytest import ToxProject, ToxProjectCreator, ToxRunOutcome
@@ -509,6 +508,44 @@ def test_pyproject_build_editable_and_wheel(tox_project: ToxProjectCreator, demo
         ("d", "install_package"),
         (".pkg", "_exit"),
     ]
+
+
+def test_shared_wheel_scope_records_build_reuse_and_consumed_views(
+    tox_project: ToxProjectCreator,
+    demo_pkg_inline: Path,
+) -> None:
+    ini = """
+    [tox]
+    env_list = a,b
+
+    [testenv]
+    package = wheel
+    commands = python -V
+    """
+    proj = tox_project({"tox.ini": dedent(ini)}, base=demo_pkg_inline)
+    execute_calls = proj.patch_execute(lambda request: 0 if "install" in request.run_id else None)
+
+    result = proj.run("r", "--notest", "--workdir", str(proj.path / ".tox"))
+    result.assert_success()
+
+    pkg_env = result.state.envs[".pkg"]
+    runs = pkg_env.reuse_contract.runs
+    assert [run.env_name for run in runs] == ["a", "b"]
+    assert [run.decision.status for run in runs] == ["build_required", "reused"]
+
+    install_paths = {
+        call[0][0].conf.name: Path(call[0][3].cmd[-1])
+        for call in execute_calls.call_args_list
+        if call[0][3].run_id == "install_package"
+    }
+    assert set(install_paths) == {"a", "b"}
+    assert [run.consumed_path for run in runs] == [install_paths["a"], install_paths["b"]]
+    digests = {run.env_name: run.consumed.digest for run in runs if run.consumed is not None}
+    assert digests["a"] is not None
+    assert digests["a"] == digests["b"]
+
+    build_calls = [call for call in execute_calls.call_args_list if call[0][3].run_id == "build_wheel"]
+    assert len(build_calls) == 1
 
 
 def test_pyproject_config_settings_sdist(

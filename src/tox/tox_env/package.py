@@ -6,6 +6,7 @@ __lazy_modules__ = [
     "contextlib",
     "filelock",
     "functools",
+    "logging",
     "pathlib",
     "threading",
     "tox.util.path",
@@ -13,6 +14,7 @@ __lazy_modules__ = [
 ]
 
 import functools
+import logging
 from abc import ABC, abstractmethod
 from contextlib import nullcontext
 from pathlib import Path
@@ -26,9 +28,22 @@ from tox.util.path import ensure_private_dir
 from tox.util.typing_compat import override
 
 from .api import ToxEnv, ToxEnvCreateArgs
+from .package_scope import (
+    BuildCapabilityDenied,
+    PackageBuildScope,
+    PackageConsumption,
+    PackagePreparation,
+    PackageReuseContract,
+    PackageReuseDenied,
+    PackageRunRecord,
+    PackageScopeError,
+    ReuseDecision,
+    ScopedArtifact,
+)
 
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
+_LOGGER = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Iterator
@@ -71,6 +86,62 @@ class PackageToxEnv(ToxEnv, ABC):
         self._file_lock: BaseFileLock | None = None
         super().__init__(create_args)
         self._envs: set[str] = set()
+        self.reuse_contract = PackageReuseContract()
+
+    def build_scope(self, for_env: EnvConfigSet | None = None) -> PackageBuildScope:
+        """Return the reuse scope for a package request.
+
+        Package implementations and plugins can override this to include approved build capabilities and the
+        configuration factors that can change an artifact.
+        """
+        factors: dict[str, object] = {
+            "packager": self.id(),
+            "package_env": self.name,
+            "plugins": self._loaded_plugin_names(),
+        }
+        if for_env is not None and "package" in for_env:
+            factors["package_type"] = for_env.get("package", str)
+        return PackageBuildScope.create(factors=factors)
+
+    @staticmethod
+    def _loaded_plugin_names() -> tuple[str, ...]:
+        try:
+            from tox.plugin.manager import MANAGER  # local import avoids an import cycle
+        except ImportError:  # pragma: no cover  # manager is always available in tox runs
+            return ()
+        return tuple(sorted(name for name, _plugin in MANAGER.manager.list_name_plugin() if name))
+
+    def record_package_build(
+        self,
+        for_env: EnvConfigSet,
+        package: Package,
+        *,
+        used: tuple[str, ...] = (),
+        calls: tuple[str, ...] = (),
+    ) -> None:
+        """Record a built package and the run environment consuming it in the scope contract."""
+        if not isinstance(package, PathPackage):
+            return
+        scope = self.build_scope(for_env)
+        plugins = next((value for key, value in scope.factors if key == "plugins"), ())
+        run = self.reuse_contract.begin_run(for_env.name, self.name, scope)
+        if run.decision.status == "denied":
+            _LOGGER.warning(
+                "package environment %r cannot reuse an existing artifact for %s; building under its own scope",
+                self.name,
+                for_env.name,
+            )
+        if run.decision.status != "reused" or run.preparation.latest is None:
+            self.reuse_contract.record_build(
+                run.preparation,
+                package.path,
+                used=used,
+                calls=calls,
+                builder=self.id(),
+                plugins=plugins,
+                compute_digest=False,
+            )
+        self.reuse_contract.record_consumption(run, package.path, compute_digest=True)
 
     @override
     def __getattribute__(self, name: str) -> Any:
@@ -172,7 +243,17 @@ class PackageToxEnv(ToxEnv, ABC):
 
 
 __all__ = [
+    "BuildCapabilityDenied",
     "Package",
+    "PackageBuildScope",
+    "PackageConsumption",
+    "PackagePreparation",
+    "PackageReuseContract",
+    "PackageReuseDenied",
+    "PackageRunRecord",
+    "PackageScopeError",
     "PackageToxEnv",
     "PathPackage",
+    "ReuseDecision",
+    "ScopedArtifact",
 ]
