@@ -1,0 +1,14 @@
+Archive:  /Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-7558/prepared/FB-20261120-SEC7558-185/workspace/auditlab/wheelhouse/auditdemo-1.0.0-py3-none-any.whl
+  Length      Date    Time    Name
+---------  ---------- -----   ----
+       47  11-26-2026 16:18   auditdemo/__init__.py
+      135  11-26-2026 16:18   auditdemo/core.py
+       54  11-26-2026 16:18   auditdemo/data.txt
+      196  11-26-2026 16:18   auditdemo-1.0.0.data/scripts/bundled-tool
+      128  11-26-2026 16:19   auditdemo-1.0.0.dist-info/METADATA
+       92  11-26-2026 16:19   auditdemo-1.0.0.dist-info/WHEEL
+       54  11-26-2026 16:19   auditdemo-1.0.0.dist-info/entry_points.txt
+       10  11-26-2026 16:19   auditdemo-1.0.0.dist-info/top_level.txt
+      721  11-26-2026 16:19   auditdemo-1.0.0.dist-info/RECORD
+---------                     -------
+     1437                     9 files

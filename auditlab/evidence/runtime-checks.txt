@@ -1,0 +1,24 @@
+### Runtime check on FULL target ###
+
+$ ./scripts/audited-entry   (GENERATED launcher -> entry point)
+exit=1
+
+$ ./scripts/bundled-tool    (ARCHIVE member shell script)
+bundled-tool from archive member
+exit=0
+
+### Runtime check on INTERRUPTED target (no RECORD, but files run) ###
+
+$ ./scripts/audited-entry
+exit=1
+
+$ ./scripts/bundled-tool
+bundled-tool from archive member
+exit=0
+### Generated launcher runtime (PYTHONPATH pointed at each target purelib) ###
+[full] PYTHONPATH=targets/full/purelib ./scripts/audited-entry
+auditdemo entry point ran
+exit=0
+[interrupted] PYTHONPATH=targets/interrupted/purelib ./scripts/audited-entry
+auditdemo entry point ran
+exit=0

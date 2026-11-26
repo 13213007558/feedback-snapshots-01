@@ -1,0 +1,9 @@
+auditdemo/__init__.py,sha256=GUyYFalaaXlHv6lw761Fssa4VH2LsN8_vvwsOa2FtxI,47
+auditdemo/core.py,sha256=A69-dQlegSXOV7qDG5lyAAo-Afe1FH_Ua8gVtb1u00A,135
+auditdemo/data.txt,sha256=VCSQfYBsvWKUYjCAdgpzDtlxCWlFGcaxLoyPPTlBA38,54
+auditdemo-1.0.0.data/scripts/bundled-tool,sha256=32lm9Ty245lBCGSd9D5xmqtCye1wBRkET2LmD4zp8wI,196
+auditdemo-1.0.0.dist-info/METADATA,sha256=CuIuQrAIWZvwnSbEk1Z1qhCs6-hdaOhpI31rAnyhvI4,128
+auditdemo-1.0.0.dist-info/WHEEL,sha256=wUyA8OaulRlbfwMtmQsvNngGrxQHAvkKcvRmdizlJi0,92
+auditdemo-1.0.0.dist-info/entry_points.txt,sha256=yDT_hfE891b2gOMWX-0AzRcpp-OxizUfpq_CX7VEeuk,54
+auditdemo-1.0.0.dist-info/top_level.txt,sha256=ccjFRWJnJCTZC-HxjE4JTBfSEVT2sSmr9uWljUbGj24,10
+auditdemo-1.0.0.dist-info/RECORD,,

@@ -1,0 +1,4 @@
+#!/bin/sh
+# Bundled script: a real wheel archive member under .data/scripts.
+# Deliberately NOT a '#!python' shebang, so the installer does not rewrite it.
+echo "bundled-tool from archive member"

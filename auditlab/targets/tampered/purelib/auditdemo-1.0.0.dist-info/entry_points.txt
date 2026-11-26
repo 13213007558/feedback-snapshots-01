@@ -1,0 +1,2 @@
+[console_scripts]
+audited-entry = auditdemo.core:main

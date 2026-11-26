@@ -1,0 +1,20 @@
+{"t_ms": 0.001, "event": "destination-created", "abort_before_record": true, "interpreter": "/Users/apple/miniconda3/bin/python3", "script_kind": "posix"}
+{"t_ms": 0.421, "event": "write_script:begin", "name": "audited-entry", "module": "auditdemo.core", "attr": "main", "section": "console", "origin": "GENERATED_FROM_ENTRY_POINT"}
+{"t_ms": 1.065, "event": "write_script:done", "name": "audited-entry", "record_path": "audited-entry", "hash": "sha256=6QFV1m-6H3hsFSFYVzbeWxQjv6u053vmvBwLPLRmZjE", "size": 180, "origin": "GENERATED_FROM_ENTRY_POINT"}
+{"t_ms": 1.213, "event": "write_file:begin", "scheme": "purelib", "path": "auditdemo/__init__.py", "is_executable": false, "origin": "WHEEL_ARCHIVE_MEMBER"}
+{"t_ms": 1.585, "event": "write_file:done", "scheme": "purelib", "record_path": "auditdemo/__init__.py", "hash": "sha256=GUyYFalaaXlHv6lw761Fssa4VH2LsN8_vvwsOa2FtxI", "size": 47, "origin": "WHEEL_ARCHIVE_MEMBER"}
+{"t_ms": 1.673, "event": "write_file:begin", "scheme": "purelib", "path": "auditdemo/core.py", "is_executable": false, "origin": "WHEEL_ARCHIVE_MEMBER"}
+{"t_ms": 1.921, "event": "write_file:done", "scheme": "purelib", "record_path": "auditdemo/core.py", "hash": "sha256=A69-dQlegSXOV7qDG5lyAAo-Afe1FH_Ua8gVtb1u00A", "size": 135, "origin": "WHEEL_ARCHIVE_MEMBER"}
+{"t_ms": 2.007, "event": "write_file:begin", "scheme": "purelib", "path": "auditdemo/data.txt", "is_executable": false, "origin": "WHEEL_ARCHIVE_MEMBER"}
+{"t_ms": 2.246, "event": "write_file:done", "scheme": "purelib", "record_path": "auditdemo/data.txt", "hash": "sha256=VCSQfYBsvWKUYjCAdgpzDtlxCWlFGcaxLoyPPTlBA38", "size": 54, "origin": "WHEEL_ARCHIVE_MEMBER"}
+{"t_ms": 2.331, "event": "write_file:begin", "scheme": "scripts", "path": "bundled-tool", "is_executable": true, "origin": "WHEEL_ARCHIVE_MEMBER"}
+{"t_ms": 2.609, "event": "write_file:done", "scheme": "scripts", "record_path": "bundled-tool", "hash": "sha256=32lm9Ty245lBCGSd9D5xmqtCye1wBRkET2LmD4zp8wI", "size": 196, "origin": "WHEEL_ARCHIVE_MEMBER"}
+{"t_ms": 2.688, "event": "write_file:begin", "scheme": "purelib", "path": "auditdemo-1.0.0.dist-info/METADATA", "is_executable": false, "origin": "WHEEL_ARCHIVE_MEMBER"}
+{"t_ms": 3.034, "event": "write_file:done", "scheme": "purelib", "record_path": "auditdemo-1.0.0.dist-info/METADATA", "hash": "sha256=CuIuQrAIWZvwnSbEk1Z1qhCs6-hdaOhpI31rAnyhvI4", "size": 128, "origin": "WHEEL_ARCHIVE_MEMBER"}
+{"t_ms": 3.109, "event": "write_file:begin", "scheme": "purelib", "path": "auditdemo-1.0.0.dist-info/WHEEL", "is_executable": false, "origin": "WHEEL_ARCHIVE_MEMBER"}
+{"t_ms": 3.355, "event": "write_file:done", "scheme": "purelib", "record_path": "auditdemo-1.0.0.dist-info/WHEEL", "hash": "sha256=wUyA8OaulRlbfwMtmQsvNngGrxQHAvkKcvRmdizlJi0", "size": 92, "origin": "WHEEL_ARCHIVE_MEMBER"}
+{"t_ms": 3.431, "event": "write_file:begin", "scheme": "purelib", "path": "auditdemo-1.0.0.dist-info/entry_points.txt", "is_executable": false, "origin": "WHEEL_ARCHIVE_MEMBER"}
+{"t_ms": 3.668, "event": "write_file:done", "scheme": "purelib", "record_path": "auditdemo-1.0.0.dist-info/entry_points.txt", "hash": "sha256=yDT_hfE891b2gOMWX-0AzRcpp-OxizUfpq_CX7VEeuk", "size": 54, "origin": "WHEEL_ARCHIVE_MEMBER"}
+{"t_ms": 3.741, "event": "write_file:begin", "scheme": "purelib", "path": "auditdemo-1.0.0.dist-info/top_level.txt", "is_executable": false, "origin": "WHEEL_ARCHIVE_MEMBER"}
+{"t_ms": 3.971, "event": "write_file:done", "scheme": "purelib", "record_path": "auditdemo-1.0.0.dist-info/top_level.txt", "hash": "sha256=ccjFRWJnJCTZC-HxjE4JTBfSEVT2sSmr9uWljUbGj24", "size": 10, "origin": "WHEEL_ARCHIVE_MEMBER"}
+{"t_ms": 4.042, "event": "ABORT_BEFORE_RECORD", "record_file_path": "auditdemo-1.0.0.dist-info/RECORD", "pending_record_count": 10, "reason": "simulated interruption: all payload files and the generated launcher are on disk, but the target RECORD is not written"}
