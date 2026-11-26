@@ -239,6 +239,78 @@ with container:
 
 See the tests available in the `tests` directory for more examples.
 
+### Shadow policy checks
+
+Before promoting a candidate policy version, you can run the *same* authorization
+input against both the approved version and the candidate using an in-process
+shadow check. The business decision always comes from the approved engine; the
+candidate is probed for comparison only and is allowed to be slow or to fail
+without affecting the response.
+
+The optional `cerbos.sdk.shadow` package provides a dependency-free in-memory
+policy decision point and a shadow client (sync `ShadowCerbosClient` and async
+`AsyncShadowCerbosClient`). Each comparison is recorded with one of three
+evidence states:
+
+- `ShadowOutcome.MATCH` - both versions returned the same concrete answer.
+- `ShadowOutcome.DIFFER` - both answered, but the decisions disagree.
+- `ShadowOutcome.INCONCLUSIVE` - the candidate timed out, failed or returned an
+  undefined plan (for example because a resource attribute was missing).
+
+```python
+from cerbos.sdk.model import Effect, Principal, Resource, ResourceDesc, ResourceList
+from cerbos.sdk.shadow import (
+    InMemoryCerbosEngine,
+    PolicyRule,
+    ResourcePolicy,
+    ShadowCerbosClient,
+    ShadowOutcome,
+    and_,
+    eq,
+    has,
+    lit,
+    var,
+)
+
+action = "edit"
+allow = and_(eq(var("R.attr.department"), lit("marketing")), has("R.attr.owner"))
+
+approved = InMemoryCerbosEngine("approved", [
+    ResourcePolicy(
+        resource_kind="document",
+        policy_version="default",
+        rules=[PolicyRule(frozenset({action}), Effect.ALLOW, allow)],
+        plan_filters={action: allow},
+    )
+])
+candidate = InMemoryCerbosEngine("candidate", [/* a rewritten version of the policy */])
+
+# Candidate calls that exceed the timeout are recorded as inconclusive, never raised.
+client = ShadowCerbosClient(approved, candidate, shadow_timeout_secs=1.0)
+
+principal = Principal(id="user-1", roles={"employee"}, attr={})
+resource = Resource(id="doc-1", kind="document",
+                    attr={"department": "marketing", "owner": "user-1"})
+
+# Single-action judgement - returns the approved boolean.
+if client.is_allowed(action, principal, resource):
+    ...
+
+# Batch check - the response carries an audit entry comparing both versions.
+response = client.check_resources(principal, ResourceList().add(resource, {action}))
+for report in response.shadow_report.check_reports:
+    print(report.resource_id, report.outcome, report.source)
+
+# Resource query plan, evaluated against concrete resources to expose differences
+# that only appear when an attribute is missing.
+plan = client.plan_resources(
+    action, principal, ResourceDesc(kind="document"),
+    evaluation_resources=[resource],
+)
+for report in plan.shadow_report.plan_report.resource_reports:
+    print(report.resource_id, report.outcome, report.source)
+```
+
 ### Cerbos Hub
 
 To interact with a [Cerbos Hub](https://www.cerbos.dev/product-cerbos-hub) managed store, obtain a set of credentials for the store from the Cerbos Hub UI. Save the credentials as environment variables named `CERBOS_HUB_CLIENT_ID` and `CERBOS_HUB_CLIENT_SECRET`.

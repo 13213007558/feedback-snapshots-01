@@ -4,6 +4,15 @@
 
 A forked version of [Unasync](https://unasync.readthedocs.io/en/latest/index.html) is used to generate non-async code based on the async implementation. Only make changes to files in `src/cerbos/sdk/_async`. Then run `./pw generate` to re-generate the code in `src/cerbos/sdk/_sync`.
 
+The optional shadow-check package in `src/cerbos/sdk/shadow` lives outside the `_async`/`_sync` tree the generator globs, so its `_async.py` and `_sync.py` clients are maintained in parallel by hand. Keep the two clients' public behaviour in sync when changing either.
+
+The shadow tests under `tests/_shadow` use an in-memory engine and need neither Docker nor `testcontainers`. Run them in isolation with:
+
+```shell
+python -m pytest tests/_shadow
+```
+
+
 ### Package management
 
 This project uses [PDM](https://pdm.fming.dev) with [Pyprojectx](https://pyprojectx.github.io) for package management. The `pw` script should be used when working with this project.
