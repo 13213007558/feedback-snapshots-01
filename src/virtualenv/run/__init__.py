@@ -4,6 +4,7 @@ __lazy_modules__ = [
     "argparse",
     "functools",
     "logging",
+    "pathlib",
     "virtualenv.app_data",
     "virtualenv.config.cli.parser",
     "virtualenv.report",
@@ -13,6 +14,7 @@ __lazy_modules__ = [
     f"{__spec__.parent}.plugin.creators",  # ty: ignore[missing-union-attribute]  # imported modules have a spec
     f"{__spec__.parent}.plugin.discovery",  # ty: ignore[missing-union-attribute]  # imported modules have a spec
     f"{__spec__.parent}.plugin.seeders",  # ty: ignore[missing-union-attribute]  # imported modules have a spec
+    f"{__spec__.parent}.receipt",  # ty: ignore[missing-union-attribute]  # imported modules have a spec
     f"{__spec__.parent}.session",  # ty: ignore[missing-union-attribute]  # imported modules have a spec
 ]
 
@@ -20,6 +22,7 @@ import logging
 import os
 from argparse import SUPPRESS, ArgumentParser
 from functools import partial
+from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 from virtualenv.app_data import make_app_data as make_app_data
@@ -34,6 +37,7 @@ from .plugin.activators import ActivationSelector as ActivationSelector
 from .plugin.creators import CreatorSelector as CreatorSelector
 from .plugin.discovery import get_discover as get_discover
 from .plugin.seeders import SeederSelector as SeederSelector
+from .receipt import CreationScope as CreationScope
 from .session import Session as Session
 
 if TYPE_CHECKING:
@@ -99,6 +103,7 @@ def session_via_cli(
         e.create(options)  # ty: ignore[invalid-argument-type]
         for e in elements
     )  # create types
+    scope = _creation_scope(options, creator)
     return Session(
         # options is set by parse_args above, ty still sees the optional type
         options.verbosity,  # ty: ignore[missing-union-attribute, invalid-argument-type]
@@ -112,6 +117,24 @@ def session_via_cli(
         seeder,  # ty: ignore[invalid-argument-type]
         # the builders are untyped, so their create results are object to ty
         activators,  # ty: ignore[invalid-argument-type]
+        # cleanup only runs for a scope, which also carries the optional documents
+        scope,  # ty: ignore[invalid-argument-type]
+    )
+
+
+def _creation_scope(options: VirtualEnvOptions, creator: object) -> CreationScope:
+    receipt_dir, diagnostic_dir = options.receipt_dir, options.diagnostic_dir
+    # values from an environment variable or config file arrive as strings, while the CLI converts to Path
+    receipt_dir = None if receipt_dir is None else Path(receipt_dir)
+    diagnostic_dir = None if diagnostic_dir is None else Path(diagnostic_dir)
+    # the private diagnostic defaults beside the public receipt, so an operator finds it next to what the tenant holds
+    # while only the receipt travels; an explicit folder overrides the default
+    defaults_diagnostic = diagnostic_dir is None and receipt_dir is not None
+    if defaults_diagnostic:
+        diagnostic_dir = receipt_dir
+    dest = Path(creator.dest)  # ty: ignore[missing-attribute]  # the builder returns a Creator
+    return CreationScope(
+        dest, receipt_dir, diagnostic_dir, defaults_diagnostic=defaults_diagnostic, clears=bool(options.clear)
     )
 
 
@@ -144,6 +167,7 @@ def build_parser(
         default=False,
         help="on failure also display the stacktrace internals of virtualenv",
     )
+    _add_receipt_options(parser)
     _do_report_setup(parser, args, setup_logging)
     options = load_app_data(args, parser, options)
     handle_extra_commands(options)
@@ -166,6 +190,31 @@ def build_parser(
     return parser, elements
 
 
+def _add_receipt_options(parser: VirtualEnvConfigParser) -> None:
+    parser.add_argument(
+        "--receipt-dir",
+        dest="receipt_dir",
+        metavar="path",
+        type=Path,
+        default=None,
+        help=(
+            "write a shareable receipt here (a public record that names no directory); a failed creation reclaims only "
+            "the materials it owns, and also writes the private diagnostic here"
+        ),
+    )
+    parser.add_argument(
+        "--diagnostic-dir",
+        dest="diagnostic_dir",
+        metavar="path",
+        type=Path,
+        default=None,
+        help=(
+            "write the private diagnostic that names the actual files for controlled operations (defaults beside "
+            "--receipt-dir)"
+        ),
+    )
+
+
 def _validate_option_values(args: list[str] | None) -> None:
     # Staged parsing can act on later options before noticing that an earlier option lacks its value.
     # This parser covers only early options, so its usage text would misdescribe the command.
@@ -174,6 +223,8 @@ def _validate_option_values(args: list[str] | None) -> None:
     for option in (
         "--app-data",
         "--discovery",
+        "--receipt-dir",
+        "--diagnostic-dir",
         "-p",
         "--python",
         "--try-first-with",

@@ -474,6 +474,29 @@ subprocess and fails when the base Python has been removed:
 ``pyvenv.cfg`` has no section header, hence the prefix. The key holds the feature release only; reach for ``version``
 when you need the patch level too.
 
+******************************
+ Report a creation to support
+******************************
+
+Pass ``--receipt-dir`` to write a receipt a support ticket can carry. It records the interpreter, whether the creation
+succeeded, which step (``create``, ``seed``, ``activate`` or ``finalize``) failed, what the failure cleanup reclaimed,
+and whether a controlled operator must still take over. The receipt names no directory, file from the working tree or
+cache location, so it can leave the machine; an ``evidence_retained`` flag says a diagnostic sits beside it.
+
+The diagnostic holds the actual destination, the seeded packages and every removed or retained path. Both documents
+share a ``job`` identifier, so an operator finds the diagnostic from the receipt without the receipt naming where it
+lives. ``--diagnostic-dir`` puts that private document somewhere else, for example an access-controlled share:
+
+.. code-block:: console
+
+    $ virtualenv --receipt-dir support/tickets --diagnostic-dir /var/log/virtualenv env
+
+When creation fails it reclaims only the materials it created: a destination that did not exist before is removed
+whole, while a destination that already held content keeps that content and loses only the entries this job added. A
+finished environment another job placed under the same parent directory is never touched, so a failed job can be
+retried against the same destination. An incomplete reclaim sets ``handoff`` to ``required`` in the receipt and names
+what remains in the diagnostic.
+
 **********************
  Use from Python code
 **********************
