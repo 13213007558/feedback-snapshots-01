@@ -1,5 +1,11 @@
 # Change Log
 
+## Unreleased
+
+### ✨ New
+
+* Add approved-scope token views and `MarkdownIt.render_scoped`, allowing public/internal renders from one token stream without modifying the source tokens. Image alt and plugin auxiliary text derive only from projected children, attributes and metadata.
+
 ## 4.3.0 - 2026-11-10
 
 This release fixes two quadratic-time parsing paths that let crafted input stall rendering for minutes (security),

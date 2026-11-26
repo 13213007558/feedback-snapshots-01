@@ -5,6 +5,12 @@ from contextlib import contextmanager
 from typing import Any, Literal, overload
 
 from . import helpers, presets
+from .access import (
+    AccessPolicy,
+    ApprovalScope,
+    CanReadCallback,
+    approved_view,
+)
 from .common import normalize_url, utils
 from .parser_block import ParserBlock
 from .parser_core import ParserCore
@@ -275,11 +281,22 @@ class MarkdownIt:
         self.core.process(state)
         return state.tokens
 
-    def render(self, src: str, env: EnvType | None = None) -> Any:
-        """Render markdown string into html. It does all magic for you :).
+    def render(
+        self,
+        src: str | list[Token],
+        env: EnvType | None = None,
+        *,
+        scope: ApprovalScope | str | int | Mapping[str, Any] | None = None,
+        policy: AccessPolicy | CanReadCallback | None = None,
+    ) -> Any:
+        """Render markdown string or a pre-parsed token stream into html.
 
-        :param src: source string
+        :param src: source string or reusable token stream
         :param env: environment sandbox
+        :param scope: optional approved-reader scope.  When supplied and
+            ``src`` is a token stream, the renderer receives a non-mutating
+            projected view instead of the original tokens.
+        :param policy: optional access policy used with ``scope``
         :returns: The output of the loaded renderer
 
         `env` can be used to inject additional metadata (`{}` by default).
@@ -287,7 +304,28 @@ class MarkdownIt:
         in [[MarkdownIt.parse]].
         """
         env = {} if env is None else env
-        return self.renderer.render(self.parse(src, env), self.options, env)
+        tokens = self.parse(src, env) if isinstance(src, str) else src
+        if scope is not None:
+            tokens = approved_view(tokens, scope, policy=policy, env=env)
+        return self.renderer.render(tokens, self.options, env)
+
+    def render_scoped(
+        self,
+        source: str | list[Token],
+        scope: ApprovalScope | str | int | Mapping[str, Any] | None = None,
+        env: EnvType | None = None,
+        *,
+        policy: AccessPolicy | CanReadCallback | None = None,
+    ) -> Any:
+        """Render markdown or a reusable token stream through a scope view."""
+
+        env = {} if env is None else env
+        tokens = self.parse(source, env) if isinstance(source, str) else source
+        view = approved_view(tokens, scope, policy=policy, env=env)
+        return self.renderer.render(view, self.options, env)
+
+    render_for_scope = render_scoped
+    render_with_scope = render_scoped
 
     def parseInline(self, src: str, env: EnvType | None = None) -> list[Token]:
         """The same as [[MarkdownIt.parse]] but skip all block rules.

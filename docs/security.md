@@ -42,3 +42,5 @@ If those depend on user input - always add prefixes to avoid DOM clobbering.
 See [discussion](https://github.com/markdown-it/markdown-it/issues/28) for details.
 
 So, if you decide to use plugins that add extended class syntax or autogenerate header anchors - be careful.
+
+For reader-specific publication levels, use [approved-scope token views](using.md#approved-scope-views) rather than filtering the final HTML. They project body tokens, attributes, metadata and nested derived-text sources before custom render rules run.

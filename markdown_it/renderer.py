@@ -12,6 +12,7 @@ from collections.abc import Sequence
 import inspect
 from typing import Any, ClassVar, Protocol
 
+from .access import view_for_env
 from .common.utils import MD_TRIM_RE, escapeHtml, mdTrim, unescapeAll
 from .token import Token
 from .utils import EnvType, OptionsDict
@@ -85,6 +86,7 @@ class RendererHTML(RendererProtocol):
         :param env: additional data from parsed input
 
         """
+        tokens = view_for_env(tokens, env)
         # Collect the fragments and join them once: repeated ``str +=`` is only
         # linear on interpreters that can extend a string in place (the default
         # CPython build), and quadratic in the output size elsewhere (e.g. PyPy,
@@ -111,6 +113,7 @@ class RendererHTML(RendererProtocol):
         :param options: params of parser instance
         :param env: additional data from parsed input (references, for example)
         """
+        tokens = view_for_env(tokens, env)
         out: list[str] = []
 
         for i, token in enumerate(tokens):
@@ -209,6 +212,7 @@ class RendererHTML(RendererProtocol):
         :param options: params of parser instance
         :param env: additional data from parsed input
         """
+        tokens = view_for_env(tokens, env)
         out: list[str] = []
 
         for token in tokens or []:

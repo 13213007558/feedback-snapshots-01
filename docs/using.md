@@ -248,6 +248,54 @@ This dictionary can also be deserialized:
 Token.from_dict(tokens[1].as_dict())
 ```
 
+### Approved-scope views
+
+One parsed token stream can serve both public and internal pages.  Attach reader
+levels to the components that need protection, then pass an approved projection
+to the renderer:
+
+```python
+from markdown_it import ApprovalScope, MarkdownIt, label_access
+
+md = MarkdownIt("commonmark")
+tokens = md.parse(
+    "# Release **Internal codename**\n\n"
+    "![Architecture **public label** _private label_](arch.png \"Private title\")\n"
+)
+
+# Remove the complete emphasis pair, not only its text node.
+label_access(tokens[1].children[1], "internal")
+
+image = tokens[4].children[0]
+label_access(image, attrs={"title": "internal"})
+label_access(image.children[5], "internal")  # em_open around private alt text
+
+public_html = md.render_scoped(tokens, ApprovalScope.public())
+internal_html = md.render_scoped(tokens, "internal")
+public_again = md.render_scoped(tokens, "public")
+assert public_html == public_again
+```
+
+`approved_view(tokens, scope)` returns a list of ordinary copied `Token`
+objects.  It never writes redaction results back to the source stream.  Denied
+opening/closing pairs are removed together, while approved structure and
+typography remain.  Component labels can be supplied with `label_access(...)`
+or through a custom `AccessPolicy` callback.
+
+Image `alt` is derived from the projected `image.children` by the normal
+renderer, so derived text sees only approved nested tokens.  Any stale `alt`
+left by an earlier higher-clearance render is discarded from the projection
+before derivation.
+
+Existing render rules and renderer subclasses keep the usual
+`(tokens, idx, options, env)` signature.  They receive the projected sequence;
+`token.content`, `token.attrs`, `token.meta` and `token.children` contain only
+approved ingredients.  `env["approval_scope"]` contains the active scope, and
+`approved_components(token)` returns a read-only mapping of the ingredients a
+plugin may expose as auxiliary text.  Plugins should derive badges, ARIA text
+and diagnostics only from those arguments rather than closing over the original
+tokens.
+
 ### Creating a syntax tree
 
 ```{versionchanged} 0.7.0
