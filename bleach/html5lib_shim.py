@@ -59,6 +59,7 @@ from bleach._vendor.html5lib._tokenizer import (
 from bleach._vendor.html5lib._trie import (
     Trie,
 )  # noqa: E402 module level import not at top of file
+from bleach.budget import STAGE_PARSE  # noqa: E402
 
 
 #: Map of entity name to expanded entity
@@ -319,6 +320,21 @@ class BleachHTMLTokenizer(HTMLTokenizer):
         self.emitted_last_token = None
 
     def __iter__(self):
+        # When no run budget is attached (the historical default), return
+        # the original token stream iterator directly to avoid an extra
+        # generator hop.  With a budget, wrap the stream and charge every
+        # token that actually leaves the tokenizer.
+        budget = getattr(self.parser, "budget", None)
+        if budget is None:
+            return self._bleach_iter_tokens()
+        return self._iter_budgeted_tokens(budget)
+
+    def _iter_budgeted_tokens(self, budget):
+        for token in self._bleach_iter_tokens():
+            budget.charge_token(token, STAGE_PARSE)
+            yield token
+
+    def _bleach_iter_tokens(self):
         last_error_token = None
 
         for token in super().__iter__():
@@ -523,7 +539,7 @@ class BleachHTMLTokenizer(HTMLTokenizer):
 class BleachHTMLParser(HTMLParser):
     """Parser that uses BleachHTMLTokenizer"""
 
-    def __init__(self, tags, strip, consume_entities, **kwargs):
+    def __init__(self, tags, strip, consume_entities, budget=None, **kwargs):
         """
         :arg tags: set of allowed tags--everything else is either stripped or
             escaped; if None, then this doesn't look at tags at all
@@ -531,13 +547,15 @@ class BleachHTMLParser(HTMLParser):
             if tags=None, then this doesn't have any effect
         :arg consume_entities: whether to consume entities (default behavior) or
             leave them as is when tokenizing (BleachHTMLTokenizer-added behavior)
-
+        :arg budget: optional :class:`bleach.budget.Budget` for the current run;
+            Cleaner/Linker set a fresh, reset instance before each parse
         """
         self.tags = (
             frozenset((tag.lower() for tag in tags)) if tags is not None else None
         )
         self.strip = strip
         self.consume_entities = consume_entities
+        self.budget = budget
         super().__init__(**kwargs)
 
     def _parse(

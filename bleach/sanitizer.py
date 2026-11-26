@@ -1,4 +1,5 @@
 from itertools import chain
+import inspect
 import re
 import warnings
 
@@ -6,6 +7,7 @@ from xml.sax.saxutils import unescape
 
 from bleach import html5lib_shim
 from bleach import parse_shim
+from bleach.budget import STAGE_CLEAN, coerce_budget
 
 
 #: Set of allowed tags
@@ -92,6 +94,8 @@ class Cleaner:
         strip_comments=True,
         filters=None,
         css_sanitizer=None,
+        budget=None,
+        work_budget=None,
     ):
         """Initializes a Cleaner
 
@@ -120,6 +124,15 @@ class Cleaner:
         :arg CSSSanitizer css_sanitizer: instance with a "sanitize_css" method for
             sanitizing style attribute values and style text; defaults to None
 
+        :arg budget: optional single-run work budget shared by parsing,
+            sanitizing and budget-aware filters (for example
+            :class:`bleach.linkifier.LinkifyFilter`).  May be an integer
+            unit limit or a :class:`bleach.budget.Budget`.  The budget is
+            reset at the start of every :meth:`clean` call, so the same
+            Cleaner can be reused after a
+            :class:`bleach.budget.BudgetExceeded` failure.  ``None``
+            (the default) keeps historical unlimited behaviour.
+
         """
         self.tags = tags
         self.attributes = attributes
@@ -128,6 +141,8 @@ class Cleaner:
         self.strip_comments = strip_comments
         self.filters = filters or []
         self.css_sanitizer = css_sanitizer
+        # ``work_budget`` is a descriptive alias for ``budget``.
+        self.budget = coerce_budget(budget if budget is not None else work_budget)
 
         self.parser = html5lib_shim.BleachHTMLParser(
             tags=self.tags,
@@ -185,25 +200,69 @@ class Cleaner:
             )
             raise TypeError(message)
 
+        # The budget is a single-run meter: reset it on every call (even
+        # for empty input) so a failure on a previous document cannot
+        # poison subsequent calls through the same Cleaner entry point.
+        run_budget = self.budget
+        if run_budget is not None:
+            run_budget.reset()
+
         if not text:
             return ""
 
-        dom = self.parser.parseFragment(text)
-        filtered = BleachSanitizerFilter(
-            source=self.walker(dom),
-            allowed_tags=self.tags,
-            attributes=self.attributes,
-            strip_disallowed_tags=self.strip,
-            strip_html_comments=self.strip_comments,
-            css_sanitizer=self.css_sanitizer,
-            allowed_protocols=self.protocols,
-        )
+        self.parser.budget = run_budget
 
-        # Apply any filters after the BleachSanitizerFilter
-        for filter_class in self.filters:
-            filtered = filter_class(source=filtered)
+        try:
+            dom = self.parser.parseFragment(text)
+            filtered = BleachSanitizerFilter(
+                source=self.walker(dom),
+                allowed_tags=self.tags,
+                attributes=self.attributes,
+                strip_disallowed_tags=self.strip,
+                strip_html_comments=self.strip_comments,
+                css_sanitizer=self.css_sanitizer,
+                allowed_protocols=self.protocols,
+                budget=run_budget,
+            )
 
-        return self.serializer.render(filtered)
+            # Apply any filters after the BleachSanitizerFilter.  Hand the
+            # shared run budget to filters that know about it (notably
+            # LinkifyFilter) so optional transformations draw from the
+            # same pool.
+            for filter_class in self.filters:
+                filtered = self._build_filter(filter_class, filtered, run_budget)
+
+            # render() eagerly joins the whole token stream.  If the budget
+            # is exceeded while pulling tokens, BudgetExceeded propagates
+            # out of clean() and no partial string is returned as a result.
+            return self.serializer.render(filtered)
+        finally:
+            self.parser.budget = None
+
+    @staticmethod
+    def _build_filter(filter_class, source, run_budget):
+        """Instantiate an html5lib filter, attaching the run budget if supported."""
+        if run_budget is not None:
+            try:
+                parameters = inspect.signature(filter_class).parameters
+            except (TypeError, ValueError):
+                parameters = {}
+            if "budget" in parameters:
+                return filter_class(source=source, budget=run_budget)
+
+        filtered = filter_class(source=source)
+
+        if run_budget is not None:
+            # Filters written against older Bleach do not take a budget
+            # argument; attach it when their instances allow new
+            # attributes (our own LinkifyFilter always does).  A filter
+            # using __slots__ without "budget" simply stays uninstrumented.
+            try:
+                filtered.budget = run_budget
+            except AttributeError:
+                pass
+
+        return filtered
 
 
 def attribute_filter_factory(attributes):
@@ -268,6 +327,7 @@ class BleachSanitizerFilter(html5lib_shim.SanitizerFilter):
         strip_disallowed_tags=False,
         strip_html_comments=True,
         css_sanitizer=None,
+        budget=None,
     ):
         """Creates a BleachSanitizerFilter instance
 
@@ -298,6 +358,10 @@ class BleachSanitizerFilter(html5lib_shim.SanitizerFilter):
         :arg CSSSanitizer css_sanitizer: instance with a "sanitize_css" method for
             sanitizing style attribute values and style text; defaults to None
 
+        :arg budget: optional shared :class:`bleach.budget.Budget`; when set,
+            every token pulled through the sanitizer is charged to the
+            :data:`bleach.budget.STAGE_CLEAN` stage
+
         """
         # NOTE(willkg): This is the superclass of
         # html5lib.filters.sanitizer.Filter. We call this directly skipping the
@@ -317,9 +381,16 @@ class BleachSanitizerFilter(html5lib_shim.SanitizerFilter):
         self.svg_attr_val_allows_ref = svg_attr_val_allows_ref
         self.css_sanitizer = css_sanitizer
         self.svg_allow_local_href = svg_allow_local_href
+        self.budget = budget
 
     def sanitize_stream(self, token_iterator):
         for token in token_iterator:
+            if self.budget is not None:
+                # Charge before processing so a token that crosses the
+                # shared limit stops the run with stage="clean" and no
+                # partially sanitized result is ever published.
+                self.budget.charge_token(token, STAGE_CLEAN)
+
             ret = self.sanitize_token(token)
 
             if not ret:
@@ -583,6 +654,10 @@ class BleachSanitizerFilter(html5lib_shim.SanitizerFilter):
                 # If it's a style attribute, sanitize it
                 if namespaced_name == (None, "style"):
                     if self.css_sanitizer:
+                        # CSS sanitization is an extra transformation and
+                        # draws from the shared budget.
+                        if self.budget is not None:
+                            self.budget.charge_transform(STAGE_CLEAN, 1, kind="css")
                         val = self.css_sanitizer.sanitize_css(val)
                     else:
                         # FIXME(willkg): if style is allowed, but no

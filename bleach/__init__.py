@@ -1,3 +1,12 @@
+from bleach.budget import (
+    STAGE_CLEAN,
+    STAGE_LINKIFY,
+    STAGE_PARSE,
+    Budget,
+    BudgetExceeded,
+    BudgetExceededError,
+    WorkBudget,
+)
 from bleach.linkifier import (
     DEFAULT_CALLBACKS,
     Linker,
@@ -16,7 +25,17 @@ __releasedate__ = "20260605"
 __version__ = "6.4.0"
 
 
-__all__ = ["clean", "linkify"]
+__all__ = [
+    "clean",
+    "linkify",
+    "Budget",
+    "WorkBudget",
+    "BudgetExceeded",
+    "BudgetExceededError",
+    "STAGE_PARSE",
+    "STAGE_CLEAN",
+    "STAGE_LINKIFY",
+]
 
 
 def clean(
@@ -27,6 +46,8 @@ def clean(
     strip=False,
     strip_comments=True,
     css_sanitizer=None,
+    budget=None,
+    work_budget=None,
 ):
     """Clean an HTML fragment of malicious content and return it
 
@@ -68,6 +89,11 @@ def clean(
     :arg CSSSanitizer css_sanitizer: instance with a "sanitize_css" method for
         sanitizing style attribute values and style text; defaults to None
 
+    :arg budget: optional shared single-run work budget; an integer unit
+        limit or a :class:`bleach.budget.Budget`.  When exceeded,
+        :class:`bleach.budget.BudgetExceeded` is raised with the failing
+        stage (``"parse"``, ``"clean"`` or ``"linkify"``).
+
     :returns: cleaned text as unicode
 
     """
@@ -78,11 +104,19 @@ def clean(
         strip=strip,
         strip_comments=strip_comments,
         css_sanitizer=css_sanitizer,
+        budget=budget if budget is not None else work_budget,
     )
     return cleaner.clean(text)
 
 
-def linkify(text, callbacks=DEFAULT_CALLBACKS, skip_tags=None, parse_email=False):
+def linkify(
+    text,
+    callbacks=DEFAULT_CALLBACKS,
+    skip_tags=None,
+    parse_email=False,
+    budget=None,
+    work_budget=None,
+):
     """Convert URL-like strings in an HTML fragment to links
 
     This function converts strings that look like URLs, domain names and email
@@ -118,8 +152,16 @@ def linkify(text, callbacks=DEFAULT_CALLBACKS, skip_tags=None, parse_email=False
 
     :arg bool parse_email: whether or not to linkify email addresses
 
+    :arg budget: optional shared single-run work budget; an integer unit
+        limit or a :class:`bleach.budget.Budget`
+
     :returns: linkified text as unicode
 
     """
-    linker = Linker(callbacks=callbacks, skip_tags=skip_tags, parse_email=parse_email)
+    linker = Linker(
+        callbacks=callbacks,
+        skip_tags=skip_tags,
+        parse_email=parse_email,
+        budget=budget if budget is not None else work_budget,
+    )
     return linker.linkify(text)

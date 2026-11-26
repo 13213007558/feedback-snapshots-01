@@ -9,6 +9,7 @@ Contents
 
    clean
    linkify
+   budget
    goals
    dev
    changes

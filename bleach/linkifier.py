@@ -4,6 +4,7 @@ from urllib.parse import quote
 
 from bleach import callbacks as linkify_callbacks
 from bleach import html5lib_shim
+from bleach.budget import STAGE_LINKIFY, coerce_budget
 
 
 #: List of default callbacks
@@ -110,6 +111,8 @@ class Linker:
         url_re=URL_RE,
         email_re=EMAIL_RE,
         recognized_tags=html5lib_shim.HTML_TAGS,
+        budget=None,
+        work_budget=None,
     ):
         """Creates a Linker instance
 
@@ -130,6 +133,12 @@ class Linker:
         :arg set recognized_tags: the set of tags that linkify knows about;
             everything else gets escaped
 
+        :arg budget: optional single-run work budget shared by parsing and
+            link transformation; an integer unit limit or a
+            :class:`bleach.budget.Budget`.  Reset before every
+            :meth:`linkify` call so the same Linker stays usable after a
+            :class:`bleach.budget.BudgetExceeded` failure.
+
         :returns: linkified text as unicode
 
         """
@@ -138,6 +147,8 @@ class Linker:
         self.parse_email = parse_email
         self.url_re = url_re
         self.email_re = email_re
+        # ``work_budget`` is a descriptive alias for ``budget``.
+        self.budget = coerce_budget(budget if budget is not None else work_budget)
 
         # Create a parser/tokenizer that allows all HTML tags and escapes
         # anything not in that list.
@@ -173,19 +184,32 @@ class Linker:
         if not isinstance(text, str):
             raise TypeError("argument must be of text type")
 
+        run_budget = self.budget
+        if run_budget is not None:
+            run_budget.reset()
+
         if not text:
             return ""
 
-        dom = self.parser.parseFragment(text)
-        filtered = LinkifyFilter(
-            source=self.walker(dom),
-            callbacks=self.callbacks,
-            skip_tags=self.skip_tags,
-            parse_email=self.parse_email,
-            url_re=self.url_re,
-            email_re=self.email_re,
-        )
-        return self.serializer.render(filtered)
+        self.parser.budget = run_budget
+
+        try:
+            dom = self.parser.parseFragment(text)
+            filtered = LinkifyFilter(
+                source=self.walker(dom),
+                callbacks=self.callbacks,
+                skip_tags=self.skip_tags,
+                parse_email=self.parse_email,
+                url_re=self.url_re,
+                email_re=self.email_re,
+                budget=run_budget,
+            )
+            # render() joins eagerly; a BudgetExceeded raised while the
+            # link filter stream is pulled propagates out instead of
+            # returning a partially linkified string.
+            return self.serializer.render(filtered)
+        finally:
+            self.parser.budget = None
 
 
 class LinkifyFilter(html5lib_shim.Filter):
@@ -210,6 +234,7 @@ class LinkifyFilter(html5lib_shim.Filter):
         parse_email=False,
         url_re=URL_RE,
         email_re=EMAIL_RE,
+        budget=None,
     ):
         """Creates a LinkifyFilter instance
 
@@ -228,6 +253,10 @@ class LinkifyFilter(html5lib_shim.Filter):
 
         :arg email_re: email matching regex
 
+        :arg budget: optional shared :class:`bleach.budget.Budget`; every
+            URL/email/anchor transformation is charged to the
+            :data:`bleach.budget.STAGE_LINKIFY` stage
+
         """
         super().__init__(source)
 
@@ -237,6 +266,12 @@ class LinkifyFilter(html5lib_shim.Filter):
 
         self.url_re = url_re
         self.email_re = email_re
+        self.budget = budget
+
+    def _charge_transform(self, kind):
+        """Charge one link transformation against the shared budget, if set."""
+        if self.budget is not None:
+            self.budget.charge_transform(STAGE_LINKIFY, 1, kind=kind)
 
     def apply_callbacks(self, attrs, is_new):
         """Given an attrs dict and an is_new bool, runs through callbacks
@@ -295,6 +330,7 @@ class LinkifyFilter(html5lib_shim.Filter):
 
                 # For each email address we find in the text
                 for match in self.email_re.finditer(text):
+                    self._charge_transform("email")
                     if match.start() > end:
                         new_tokens.append(
                             {"type": "Characters", "data": text[end : match.start()]}
@@ -410,6 +446,7 @@ class LinkifyFilter(html5lib_shim.Filter):
                 end = 0
 
                 for match in self.url_re.finditer(text):
+                    self._charge_transform("url")
                     if match.start() > end:
                         new_tokens.append(
                             {"type": "Characters", "data": text[end : match.start()]}
@@ -477,6 +514,10 @@ class LinkifyFilter(html5lib_shim.Filter):
         This yields the new set of tokens.
 
         """
+        # Running the attribute callbacks over an existing <a> is the
+        # other link transformation the budget accounts for.
+        self._charge_transform("anchor")
+
         a_token = token_buffer[0]
         if a_token["data"]:
             attrs = a_token["data"]

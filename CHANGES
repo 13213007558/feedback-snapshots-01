@@ -1,6 +1,18 @@
 Bleach changes
 ==============
 
+Unreleased changes
+------------------
+
+* Added an opt-in shared single-run work budget
+  (``bleach.budget.Budget`` / ``budget=...`` on ``bleach.clean``,
+  ``Cleaner``, ``bleach.linkify`` and ``Linker``). Parsing, sanitizing and
+  optional linkification draw from one unit pool metering nodes, text and
+  extra transformations; exceeding it raises
+  ``bleach.budget.BudgetExceeded`` with the failing ``stage``
+  (``parse`` / ``clean`` / ``linkify``). The budget resets per call so a
+  failed document does not affect later ones through the same entry point.
+
 Version 6.4.0 (June 5th, 2026)
 ------------------------------
 
