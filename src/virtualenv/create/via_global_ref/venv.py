@@ -88,6 +88,14 @@ class Venv(ViaGlobalRefApi):
             return meta
         return None
 
+    def interpreter_repointed(self) -> None:
+        """Create through the approved interpreter in a subprocess.
+
+        The stdlib ``venv`` module of this process is not the one of the approved interpreter.
+
+        """
+        self.can_be_inline = False
+
     def create(self) -> None:
         """Create the environment, first checking the destination paths stay within it."""
         # stdlib venv writes interpreter files, configuration and activation scripts in place, so a planted symlink or

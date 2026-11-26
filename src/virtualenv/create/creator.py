@@ -6,6 +6,9 @@ __lazy_modules__ = [
     "collections",
     "json",
     "textwrap",
+    "virtualenv.create.describe",
+    "virtualenv.discovery.selection",
+    "virtualenv.util.error",
     "virtualenv.util.path",
     "virtualenv.util.subprocess",
     "virtualenv.util.text",
@@ -23,6 +26,7 @@ from abc import ABC, abstractmethod
 from argparse import Action, ArgumentTypeError
 from ast import literal_eval
 from collections import OrderedDict
+from copy import copy
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
 
@@ -39,6 +43,9 @@ if TYPE_CHECKING:
 from os.path import commonpath
 from typing import Any
 
+from virtualenv.create.describe import Describe
+from virtualenv.discovery.selection import PinState
+from virtualenv.util.error import InterpreterReplacedError
 from virtualenv.util.path import safe_delete, write_file
 from virtualenv.util.subprocess import LogCmd, run_cmd
 from virtualenv.util.text import collapse_line_boundaries
@@ -79,6 +86,7 @@ class Creator(ABC):
     :var app_data: the application data folder
     :var env: the environment variables the creation runs with
     :var prompt: the prompt prefix, ``None`` when none was given
+    :var pin: the identity discovery approved for the interpreter, ``None`` when discovery did not record one
 
     """
 
@@ -101,6 +109,7 @@ class Creator(ABC):
         self.app_data = options.app_data
         self.env = options.env
         self.prompt = getattr(options, "prompt", None)
+        self.pin = getattr(options, "interpreter_pin", None)
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}({', '.join(f'{k}={v}' for k, v in self._args())})"
@@ -343,6 +352,7 @@ class Creator(ABC):
         Delete the destination first when it exists and clearing was requested.
 
         """
+        self.revalidate_interpreter()
         if self.dest.exists() and self.clear:
             LOGGER.debug("delete %s", self.dest)
             safe_delete(self.dest)
@@ -353,6 +363,65 @@ class Creator(ABC):
             self.setup_ignore_vcs()
         if self.venv_redirect is not False:
             self.point_venv_redirect()
+
+    def revalidate_interpreter(self) -> None:
+        """Continue from the interpreter discovery approved when its path was repointed in between.
+
+        Creation references the interpreter by path, so a path repointed after discovery would otherwise build the
+        environment from whichever interpreter now sits there. When the approved executable moved with the path, the
+        environment is built from it at the location it now has. When it disappeared, no environment is built, so the
+        caller has to select an interpreter again.
+
+        :raises InterpreterReplacedError: when neither the selected path nor the resolved location names the approved
+            interpreter any more
+
+        """
+        pin = self.pin
+        if pin is None:
+            return
+        state = pin.state()
+        if state is PinState.CURRENT:
+            return
+        if state is PinState.MOVED:
+            LOGGER.warning(
+                "interpreter %s was replaced after discovery, continuing with the approved interpreter at %s",
+                pin.requested,
+                pin.real,
+            )
+            # creation references the approved object by its resolved path from now on
+            self._repoint_interpreter(pin.real)
+            return
+        raise InterpreterReplacedError(pin.requested, pin.real)
+
+    def _repoint_interpreter(self, approved_path: str) -> None:
+        # the approved executable is still there, so describing it again reports where it now lives. The cache hands
+        # out shared interpreter objects, so the replacement is copied rather than changed in place.
+        # the probe only runs on the rare replacement, so its import stays out of the startup path
+        from python_discovery import PythonInfo  # ruff:ignore[import-outside-top-level]
+
+        approved = PythonInfo.from_exe(approved_path, self.app_data, raise_on_error=False)
+        if approved is None:
+            raise InterpreterReplacedError(self.pin.requested, self.pin.real)
+        interpreter = copy(approved)
+        # creation references the environment it is created from by the path discovery reported
+        interpreter.executable = approved_path
+        self._apply_interpreter(interpreter)
+        self.interpreter_repointed()
+
+    def _apply_interpreter(self, interpreter: PythonInfo) -> None:
+        # the venv creator describes its environment through a separate describer, builtin creators are describers
+        describer = self if isinstance(self, Describe) else getattr(self, "describe", None)
+        if isinstance(describer, Describe):
+            describer.set_interpreter(interpreter)
+        else:
+            self.interpreter = interpreter
+
+    def interpreter_repointed(self) -> None:  # ruff:ignore[empty-method-without-abstract-decorator]  # optional hook
+        """Refresh whatever the creator derived from the interpreter path, after :meth:`revalidate_interpreter`.
+
+        Creators that captured files from the interpreter at construction time override this.
+
+        """
 
     @abstractmethod
     def create(self) -> None:

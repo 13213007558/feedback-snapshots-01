@@ -63,6 +63,19 @@ class Describe:
             self._conf_vars = self._calc_config_vars(self.dest)
         return self._conf_vars
 
+    def set_interpreter(self, interpreter: PythonInfo) -> None:
+        """Describe an interpreter other than the one the environment was first described from.
+
+        Values derived from the previous interpreter are dropped, so they are read from the new one.
+
+        :param interpreter: the interpreter to describe from now on
+
+        """
+        self.interpreter = interpreter
+        self._stdlib = None
+        self._stdlib_platform = None
+        self._conf_vars = None
+
     def _calc_config_vars(self, to: Path) -> dict[str, str | int | None]:
         sys_vars = self.interpreter.sysconfig_vars
         if (prefix := self.interpreter.prefix) is None:  # no prefix means no value can live under it

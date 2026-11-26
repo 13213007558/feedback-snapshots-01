@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 __lazy_modules__ = [
+    "virtualenv.util.error",
     "virtualenv.util.path",
     f"{__spec__.parent}.ref",  # ty: ignore[missing-union-attribute]  # imported modules have a spec
 ]
@@ -9,6 +10,7 @@ from abc import ABC
 from typing import TYPE_CHECKING
 
 from virtualenv.create.via_global_ref.api import ViaGlobalRefApi, ViaGlobalRefMeta
+from virtualenv.util.error import InterpreterReplacedError
 from virtualenv.util.path import ensure_within
 
 from .builtin_way import VirtualenvBuiltin
@@ -41,9 +43,12 @@ class ViaGlobalRefVirtualenvBuiltin(ViaGlobalRefApi, VirtualenvBuiltin, ABC):
 
     def __init__(self, options: VirtualEnvOptions, interpreter: PythonInfo) -> None:
         super().__init__(options, interpreter)
-        self._sources: list[PathRef] = (
-            getattr(options.meta, "sources", None) or []
-        )  # if created as a describer this might be missing
+        # if created as a describer the meta might be missing
+        meta = getattr(options, "meta", None)
+        self._approved_meta: BuiltinViaGlobalRefMeta | None = (
+            meta if isinstance(meta, BuiltinViaGlobalRefMeta) else None
+        )
+        self._sources: list[PathRef] = self._approved_meta.sources if self._approved_meta is not None else []
 
     @classmethod
     def can_create(cls, interpreter: PythonInfo) -> BuiltinViaGlobalRefMeta | None:
@@ -129,6 +134,30 @@ class ViaGlobalRefVirtualenvBuiltin(ViaGlobalRefApi, VirtualenvBuiltin, ABC):
             meta.copy_error = msg
         elif src.when == RefWhen.SYMLINK:
             meta.symlink_error = msg
+
+    def interpreter_repointed(self) -> None:
+        """Rebuild the file sources from the approved interpreter creation was repointed at.
+
+        The sources were captured during the capability checks, from the path that could be replaced later, so they
+        still name whatever that path pointed at then. The copy and symlink methods are kept, as the options selected
+        them, but the source files now come from the approved interpreter.
+
+        :raises InterpreterReplacedError: when the approved interpreter lost a file the copy or symlink method needs
+
+        """
+        meta = type(self).setup_meta(self.interpreter)
+        if meta is None:
+            self._sources = []
+            return
+        # the copy and symlink methods were decided before the swap and stay valid, only the files are re-read
+        if self._approved_meta is not None:
+            meta.copy_error = self._approved_meta.copy_error
+            meta.symlink_error = self._approved_meta.symlink_error
+        type(self)._sources_can_be_applied(self.interpreter, meta)
+        if meta.error:
+            pin = self.pin
+            raise InterpreterReplacedError(pin.requested, pin.real)  # the pin is set whenever this hook runs
+        self._sources = meta.sources
 
     def create(self) -> None:
         """Create the directories, the configuration and the linked or copied files of the environment.

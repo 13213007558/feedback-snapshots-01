@@ -6,6 +6,7 @@ __lazy_modules__ = [
     "logging",
     "virtualenv.app_data",
     "virtualenv.config.cli.parser",
+    "virtualenv.discovery.selection",
     "virtualenv.report",
     "virtualenv.seed.wheels.periodic_update",
     "virtualenv.version",
@@ -25,6 +26,7 @@ from typing import TYPE_CHECKING, Final
 from virtualenv.app_data import make_app_data as make_app_data
 from virtualenv.config.cli.parser import VirtualEnvConfigParser as VirtualEnvConfigParser
 from virtualenv.config.cli.parser import VirtualEnvOptions as VirtualEnvOptions
+from virtualenv.discovery.selection import InterpreterPin
 from virtualenv.report import LEVELS as LEVELS
 from virtualenv.report import setup_report as setup_report
 from virtualenv.seed.wheels.periodic_update import manual_upgrade as manual_upgrade
@@ -94,6 +96,8 @@ def session_via_cli(
     options = parser.parse_args(args)  # ty: ignore[invalid-assignment]
     # the parser carries the discovered interpreter to the session, which ty cannot see
     options.py_version = parser._interpreter.version_info  # ruff:ignore[private-member-access]  # ty: ignore[invalid-assignment, missing-union-attribute]
+    # pin what discovery approved, so the creators can tell whether creation still gets the same interpreter
+    options.interpreter_pin = InterpreterPin.of(parser._interpreter)  # ruff:ignore[private-member-access]
     creator, seeder, activators = tuple(
         # options is set by parse_args above, ty still sees the optional type
         e.create(options)  # ty: ignore[invalid-argument-type]

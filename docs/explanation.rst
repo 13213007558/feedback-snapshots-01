@@ -344,6 +344,14 @@ the versioned name - and an environment offering only one of them would break th
 version-bearing names from the target interpreter and add the host executable's own file name, so a host called
 ``pypy3.11`` or ``python_d.exe`` stays reachable under the name its callers already use.
 
+Creation is based on the interpreter discovery approved, even when its path changes in between. Virtualenv records
+the selected executable's file identity at the end of discovery, and checks it again before writing anything. A path
+pointed at another interpreter, but whose approved executable is still where it resolved to, continues with that
+approved executable and says so. When the approved executable is gone, creation stops with an error asking for the
+interpreter to be selected again, rather than building an environment from whichever interpreter now occupies the
+path. Both copy and symlink modes keep this promise, so an environment either runs the approved interpreter or does
+not get created.
+
 Windows copies rather than symlinks, because symlinking the interpreter there is unreliable (`bpo-42013
 <https://bugs.python.org/issue42013>`_). From CPython 3.13 the file copied is the ``venvlauncher.exe`` redirector out of
 the host's standard library rather than the interpreter itself. The redirector reads ``pyvenv.cfg`` and hands off to the
