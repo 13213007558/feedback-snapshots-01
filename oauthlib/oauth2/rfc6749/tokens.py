@@ -17,6 +17,7 @@ from oauthlib import common
 from oauthlib.common import add_params_to_qs, add_params_to_uri
 
 from . import utils
+from .consent import enforce_access_token_consent
 
 
 class OAuth2Token(dict):
@@ -236,6 +237,13 @@ def signed_token_generator(private_pem, **kwargs):
     return signed_token_generator
 
 
+def _required_scope_copy(scopes):
+    """Return an independent copy of a resource's required scope list."""
+    if isinstance(scopes, (list, tuple, set, frozenset)):
+        return list(scopes)
+    return scopes
+
+
 def get_token_from_header(request):
     """
     Helper function to extract a token from the request header.
@@ -337,8 +345,14 @@ class BearerToken(TokenBase):
         :type request: oauthlib.common.Request
         """
         token = get_token_from_header(request)
-        return self.request_validator.validate_bearer_token(
-            token, request.scopes, request)
+        required_scopes = _required_scope_copy(request.scopes)
+        # Hand the validator its own copy: the requirement captured for the
+        # live-consent check must not change through an in-place mutation.
+        if not self.request_validator.validate_bearer_token(
+                token, _required_scope_copy(required_scopes), request):
+            return False
+        return enforce_access_token_consent(
+            self.request_validator, token, request, required_scopes)
 
     def estimate_type(self, request):
         """

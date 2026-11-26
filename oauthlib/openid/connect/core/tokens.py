@@ -4,8 +4,10 @@ authlib.openid.connect.core.tokens
 
 This module contains methods for adding JWT tokens to requests.
 """
+from oauthlib.oauth2.rfc6749.consent import enforce_access_token_consent
 from oauthlib.oauth2.rfc6749.tokens import (
-    TokenBase, get_token_from_header, random_token_generator,
+    TokenBase, _required_scope_copy, get_token_from_header,
+    random_token_generator,
 )
 
 
@@ -35,8 +37,14 @@ class JWTToken(TokenBase):
 
     def validate_request(self, request):
         token = get_token_from_header(request)
-        return self.request_validator.validate_jwt_bearer_token(
-            token, request.scopes, request)
+        required_scopes = _required_scope_copy(request.scopes)
+        # Hand the validator its own copy: the requirement captured for the
+        # live-consent check must not change through an in-place mutation.
+        if not self.request_validator.validate_jwt_bearer_token(
+                token, _required_scope_copy(required_scopes), request):
+            return False
+        return enforce_access_token_consent(
+            self.request_validator, token, request, required_scopes)
 
     def estimate_type(self, request):
         token = get_token_from_header(request)

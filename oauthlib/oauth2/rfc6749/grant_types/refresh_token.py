@@ -6,6 +6,10 @@ import json
 import logging
 
 from .. import errors, utils
+from ..consent import (
+    CONSENT_UNKNOWN, intersect_scopes, publish_current_consent,
+    resolve_current_consent_scopes,
+)
 from .base import GrantTypeBase
 from oauthlib.common import log_safe
 
@@ -111,16 +115,66 @@ class RefreshTokenGrant(GrantTypeBase):
             self.request_validator.get_original_scopes(
                 request.refresh_token, request))
 
+        # A refresh token may predate a later withdrawal of part of the
+        # resource owner's consent.  The originally issued scopes only prove
+        # what was approved when the token was minted; live consent decides
+        # what may still be exercised now.  Consent is resolved per token,
+        # i.e. per application, so another client of the same subject is
+        # unaffected by a withdrawal made for this one.
+        consented_scopes = resolve_current_consent_scopes(
+            self.request_validator, request.refresh_token, 'refresh_token',
+            request)
+        original_known = isinstance(original_scopes, (list, tuple, set))
+        # Narrowing requires knowing what the grant was issued for.  A
+        # validator that returns no original scope collection (``None`` or a
+        # non-scope object) is treated like one without live consent, so a
+        # legacy record is never silently reduced to no permission at all.
+        if consented_scopes is not CONSENT_UNKNOWN and original_known:
+            original_list = list(original_scopes)
+            granted_scopes = intersect_scopes(
+                original_list, consented_scopes)
+            request.original_scopes = list(original_list)
+        else:
+            # No live-consent source: preserve the historical behaviour.
+            granted_scopes = original_scopes
+            consented_scopes = CONSENT_UNKNOWN
+
         if request.scope:
             request.scopes = utils.scope_to_list(request.scope)
-            if (not all(s in original_scopes for s in request.scopes)
-                and not self.request_validator.is_within_original_scope(
-                    request.scopes, request.refresh_token, request)):
+            within_original = all(
+                s in (original_scopes or []) for s in request.scopes)
+            if (not within_original
+                    and not self.request_validator.is_within_original_scope(
+                        request.scopes, request.refresh_token, request)):
                 log.debug('Refresh token %s lack requested scopes, %r.',
                           log_safe(request.refresh_token), request.scopes)
                 raise errors.InvalidScopeError(request=request)
+            if (consented_scopes is not CONSENT_UNKNOWN
+                    and any(s not in consented_scopes
+                            for s in request.scopes)):
+                # A scope outside the live consent may not be re-issued,
+                # even on explicit request.  Consent can only narrow the
+                # original grant, never add a permission to it.
+                log.debug('Refresh token %s asks withdrawn scopes, %r.',
+                          log_safe(request.refresh_token), request.scopes)
+                raise errors.InvalidScopeError(request=request)
+            if consented_scopes is not CONSENT_UNKNOWN:
+                retained = intersect_scopes(
+                    request.scopes, consented_scopes)
+                publish_current_consent(
+                    request, consented_scopes, retained)
         else:
-            request.scopes = original_scopes
+            if (consented_scopes is not CONSENT_UNKNOWN
+                    and original_scopes and not granted_scopes):
+                # Every previously approved scope has been withdrawn; there
+                # is no retained permission to mint a token for.
+                log.debug('Refresh token %s has no remaining consent.',
+                          log_safe(request.refresh_token))
+                raise errors.InvalidScopeError(request=request)
+            request.scopes = granted_scopes
+            if consented_scopes is not CONSENT_UNKNOWN:
+                publish_current_consent(
+                    request, consented_scopes, granted_scopes)
 
         for validator in self.custom_validators.post_token:
             validator(request)

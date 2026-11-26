@@ -4,6 +4,23 @@ Changelog
 Unreleased:
 ------------------
 OAuth2.0 Provider:
+* Live scope consent: ``RefreshTokenGrant`` now narrows what a refresh token
+  may re-issue to the intersection of its originally granted scopes and the
+  scopes the resource owner currently consents to, resolved per application
+  through the new optional ``RequestValidator.get_current_scopes`` hook.
+  Withdrawing one scope therefore stops it being re-issued (an explicit
+  request for it fails with ``invalid_scope``, and an ID token is no longer
+  minted once ``openid`` is withdrawn) while the remaining scopes keep
+  working without re-login. A different client of the same subject is
+  unaffected. Bearer/JWT resource validation refuses a resource requiring a
+  withdrawn scope, and introspection reports the retained ``scope``.
+  Default-scope refreshes and explicit ``scope`` requests are both governed
+  by the live consent; consent can only narrow, never widen, the original
+  grant. When the hook returns ``None`` (the default) behaviour is unchanged.
+  ``save_bearer_token``/``save_token`` now also receive
+  ``request.original_scopes``, ``request.consented_scopes`` and
+  ``request.retained_scopes`` so the persistent record can be compared with
+  the credential actually returned.
 * **Breaking**: #988: PKCE parameters are now validated against RFC 7636
   syntax. ``code_verifier`` must be 43-128 unreserved ASCII characters
   (``[A-Za-z0-9-._~]``) at the token endpoint (rejected with ``invalid_grant``)

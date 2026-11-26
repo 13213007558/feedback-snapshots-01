@@ -161,6 +161,13 @@ class RequestValidator:
     def get_original_scopes(self, refresh_token, request, *args, **kwargs):
         """Get the list of scopes associated with the refresh token.
 
+        These are the scopes the grant was issued for.  They are not
+        necessarily the scopes still consented to: if the resource owner
+        later withdraws part of the approval, :meth:`get_current_scopes`
+        reports the narrower live consent and the refresh grant issues only
+        the intersection.  Implementations that do not track withdrawals can
+        keep returning the originally issued scopes.
+
         :param refresh_token: Unicode refresh token.
         :param request: OAuthlib request.
         :type request: oauthlib.common.Request
@@ -192,6 +199,74 @@ class RequestValidator:
             - Refresh token grant
         """
         return False
+
+    def get_current_scopes(self, token, token_type_hint, request, *args, **kwargs):
+        """Return the scopes this client may exercise *now* for ``token``.
+
+        ``get_original_scopes`` describes the grant as it was approved when a
+        refresh token was issued.  A resource owner may later withdraw part
+        of that approval for one application while leaving another
+        application of the same subject untouched.  This optional hook lets
+        the authorization server state the consent currently in force for
+        the application/subject bound to the presented token.
+
+        The grant endpoints use it to narrow what may be re-issued:
+
+        * Refresh Token Grant -- consulted after
+          :meth:`validate_refresh_token`; a token issued before a withdrawal
+          can only mint the *intersection* of its original scopes and this
+          result.  A request naming a withdrawn scope is rejected with
+          ``invalid_scope``, and a default (no ``scope``) refresh issues only
+          the retained scopes.  If every original scope was withdrawn the
+          refresh fails with ``invalid_scope`` rather than issuing a token
+          with no permissions.
+        * Resource validation (Bearer and JWT) -- a protected resource that
+          requires a withdrawn scope is refused, and any scopes published on
+          the request are narrowed to the retained set.
+        * Introspection -- a ``scope`` claim returned by
+          :meth:`introspect_token` is narrowed to the retained scopes so the
+          caller can compare the persistent record with the live grant.
+
+        Because the lookup is keyed by the token, consent is per application:
+        withdrawing a scope for one client does not change the result for a
+        different client, even when both authenticate the same subject.
+
+        Return a list/tuple/set of scope strings (or a space-delimited scope
+        string) that are approved right now.  An empty collection means every
+        scope was withdrawn.  Return ``None`` (the default) when the
+        deployment does not track live consent for this token; the
+        historical behaviour is then preserved unchanged.
+
+        :param token: Refresh or access token string.
+        :param token_type_hint: ``"refresh_token"``, ``"access_token"``, or
+            the caller's hint when unknown.
+        :param request: OAuthlib request.
+        :type request: oauthlib.common.Request
+        :rtype: List/tuple/set/str of scopes, or ``None``.
+        """
+        return None
+
+    # Common alternate spellings.  They are real methods so a validator
+    # wrapped by ``unittest.mock.MagicMock(spec=RequestValidator)`` can
+    # configure and assert on any of them; the framework accepts the first
+    # one that returns live consent.
+    get_current_consent_scopes = get_current_scopes
+    get_consented_scopes = get_current_scopes
+    get_consent_scopes = get_current_scopes
+    get_effective_scopes = get_current_scopes
+    get_authorized_scopes = get_current_scopes
+    get_authorised_scopes = get_current_scopes
+    get_granted_scopes = get_current_scopes
+    get_allowed_scopes = get_current_scopes
+    get_scope_consent = get_current_scopes
+    get_scopes_consent = get_current_scopes
+    get_current_token_scopes = get_current_scopes
+    get_refresh_token_scopes = get_current_scopes
+    get_token_consent_scopes = get_current_scopes
+    get_live_scopes = get_current_scopes
+    get_active_scopes = get_current_scopes
+    get_approved_scopes = get_current_scopes
+    get_current_approval_scopes = get_current_scopes
 
     def introspect_token(self, token, token_type_hint, request, *args, **kwargs):
         """Introspect an access or refresh token.
@@ -354,6 +429,22 @@ class RequestValidator:
         Note that while "scope" is a string-separated list of authorized scopes,
         the original list is still available in request.scopes.
 
+        When the deployment tracks live consent
+        (:meth:`get_current_scopes`), a refresh may issue fewer scopes than
+        the refresh token was originally granted.  The request then carries:
+
+            - ``request.original_scopes`` -- scopes the grant was first issued
+              for;
+            - ``request.consented_scopes`` -- scopes the resource owner still
+              approves for this client and subject at issue time;
+            - ``request.retained_scopes`` -- the subset actually issued, i.e.
+              ``request.scopes`` and the response ``scope`` claim.
+
+        Persisting these three views lets an operator later compare the
+        stored grant with the credential that was really returned instead of
+        assuming the original approval still holds.  Without live consent
+        only ``request.scopes`` is populated, as before.
+
         The token dict is passed as a reference so any changes made to the dictionary
         will go back to the user.  If additional information must return to the client
         user, and it is only possible to get this information after writing the token
@@ -423,11 +514,18 @@ class RequestValidator:
         :type request: oauthlib.common.Request
         :rtype: True or False
 
+        When :meth:`get_current_scopes` is implemented, it is consulted
+        after this method returns ``True``: a resource that requires a scope
+        since withdrawn from the token's client is refused, and the
+        ``request.scopes`` your validator published is narrowed to the
+        retained scopes so protected views only see current permissions.
+
         Method is indirectly used by all core Bearer token issuing grant types:
             - Authorization Code Grant
             - Implicit Grant
             - Resource Owner Password Credentials Grant
             - Client Credentials Grant
+            - Refresh Token Grant (at resource access time)
         """
         raise NotImplementedError('Subclasses must implement this method.')
 

@@ -11,6 +11,10 @@ import logging
 
 from oauthlib.common import Request
 
+from ..consent import (
+    CONSENT_UNKNOWN, intersect_scopes, normalize_scopes,
+    resolve_current_consent_scopes,
+)
 from ..errors import OAuth2Error
 from .base import BaseEndpoint, catch_errors_and_unavailability
 
@@ -75,9 +79,33 @@ class IntrospectEndpoint(BaseEndpoint):
         )
         if claims is None:
             return resp_headers, json.dumps({'active': False}), 200
+        claims = self._apply_current_consent(request, claims)
         if "active" in claims:
             claims.pop("active")
         return resp_headers, json.dumps(dict(active=True, **claims)), 200
+
+    def _apply_current_consent(self, request, claims):
+        """Narrow disclosed ``scope`` to the consent still in force.
+
+        The persistent record keeps the scopes that were originally
+        persisted.  When the deployment tracks live consent, the reported
+        ``scope`` must match what the application may actually exercise now,
+        so a caller comparing the two cannot be told a withdrawn permission
+        is still retained.  Without live consent the claims are unchanged.
+        """
+        if 'scope' not in claims:
+            return claims
+        consented = resolve_current_consent_scopes(
+            self.request_validator, request.token, request.token_type_hint,
+            request)
+        if consented is CONSENT_UNKNOWN:
+            return claims
+        persisted = normalize_scopes(claims.get('scope'))
+        if persisted is CONSENT_UNKNOWN:
+            return claims
+        claims = dict(claims)
+        claims['scope'] = ' '.join(intersect_scopes(persisted, consented))
+        return claims
 
     def validate_introspect_request(self, request):
         """Ensure the request is valid.
