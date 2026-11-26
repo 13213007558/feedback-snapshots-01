@@ -145,6 +145,38 @@ with CerbosClient("localhost:3593", tls_verify=True, channel_options=opts) as c:
   ...
 ```
 
+### Shareable diagnostics
+
+Use `diagnostic_view` to create a support-friendly report from either the HTTP dataclass response or a generated gRPC `CheckResourcesResponse`. Authorization methods and their return values do not change. The report joins the requested actions with engine results so allowed, denied, failed, and omitted actions are all present.
+
+```python
+from cerbos.sdk.diagnostics import PublicScope, diagnostic_view
+
+view = diagnostic_view(
+    response,
+    request=request,
+    correlation_id=support_ticket_id,
+    public_scope=PublicScope(
+        allowed_fields={
+            "correlation_id",
+            "status",
+            "partial",
+            "failed",
+            "items.action",
+            "items.status",
+            "items.policy",
+            "items.version",
+            "items.correlation_id",
+        },
+        secret_values=[principal.attr["private_marker"]],
+    ),
+)
+
+view.log()  # logs shareable JSON; no request attributes are included by default
+```
+
+`status` is `complete`, `partial`, or `failed`. Each item retains `action`, `version`/`policy_version`, `correlation_id`, outcome, and matched policy metadata. Actions omitted by the engine have `status="missing"` and `result_present=false`. Applications can also call `diagnose_check_resources(...)` on the sync/async HTTP and gRPC clients; that path requests policy metadata with `include_meta=True`.
+
 ### HTTP client
 
 We maintain this for backwards compatibility. It is recommended to use the [gRPC client](#grpc-client).

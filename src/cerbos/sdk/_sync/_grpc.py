@@ -28,7 +28,6 @@ TLSVerify = str | bool
 
 
 def handle_errors(method):
-
     @wraps(method)
     def wrapper(*args, **kwargs):
         try:
@@ -195,6 +194,7 @@ class CerbosClient(ClientBase):
         resources: list[request_pb2.CheckResourcesRequest.ResourceEntry],
         request_id: str | None = None,
         aux_data: request_pb2.AuxData | None = None,
+        include_meta: bool = False,
     ) -> response_pb2.CheckResourcesResponse:
         """Check permissions for a list of resources
 
@@ -203,6 +203,7 @@ class CerbosClient(ClientBase):
             resources (List[request_pb2.CheckResourcesRequest.ResourceEntry]): list of resources to check permissions for
             request_id (None|str): request ID for the request (default None)
             aux_data (None|request_pb2.AuxData): auxiliary data for the request
+            include_meta (bool): include matched policy metadata
         """
         req_id = _get_request_id(request_id)
         req = request_pb2.CheckResourcesRequest(
@@ -210,8 +211,55 @@ class CerbosClient(ClientBase):
             principal=principal,
             resources=resources,
             aux_data=aux_data,
+            include_meta=include_meta,
         )
         return self._client.CheckResources(req)
+
+    def diagnose_check_resources(
+        self,
+        principal: engine_pb2.Principal,
+        resources: list[request_pb2.CheckResourcesRequest.ResourceEntry],
+        request_id: str | None = None,
+        aux_data: request_pb2.AuxData | None = None,
+        correlation_id: str | None = None,
+        public_scope: Any = None,
+        **diagnostic_kwargs: Any,
+    ):
+        """Check resources and return HTTP/gRPC-consistent shareable diagnostics."""
+        from cerbos.sdk.diagnostics import diagnostic_view
+
+        req_id = _get_request_id(request_id)
+        req = request_pb2.CheckResourcesRequest(
+            request_id=req_id,
+            principal=principal,
+            resources=resources,
+            aux_data=aux_data,
+            include_meta=True,
+        )
+        try:
+            resp = self._client.CheckResources(req)
+        except grpc.RpcError as exc:
+            return diagnostic_view(
+                None,
+                request=req,
+                error=exc,
+                correlation_id=correlation_id,
+                public_scope=public_scope,
+                **diagnostic_kwargs,
+            )
+        return diagnostic_view(
+            resp,
+            request=req,
+            correlation_id=correlation_id,
+            public_scope=public_scope,
+            **diagnostic_kwargs,
+        )
+
+    def diagnostics(self, *args: Any, **kwargs: Any):
+        return self.diagnose_check_resources(*args, **kwargs)
+
+    check_resources_diagnostics = diagnose_check_resources
+    support_diagnostics = diagnose_check_resources
 
     def is_allowed(
         self,

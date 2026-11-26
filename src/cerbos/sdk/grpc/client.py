@@ -7,6 +7,13 @@ from cerbos.sdk._async._grpc import (
     AsyncPrincipalContext,
 )
 from cerbos.sdk._sync._grpc import CerbosAdminClient, CerbosClient, PrincipalContext
+from cerbos.sdk.diagnostics import (
+    DiagnosticReport,
+    PublicDiagnosticView,
+    PublicScope,
+    build_diagnostic_report,
+    diagnostic_view,
+)
 from cerbos.sdk.grpc.utils import AdminCredentials
 
 __all__ = [
@@ -16,5 +23,10 @@ __all__ = [
     "AsyncPrincipalContext",
     "CerbosAdminClient",
     "CerbosClient",
+    "DiagnosticReport",
     "PrincipalContext",
+    "PublicDiagnosticView",
+    "PublicScope",
+    "build_diagnostic_report",
+    "diagnostic_view",
 ]

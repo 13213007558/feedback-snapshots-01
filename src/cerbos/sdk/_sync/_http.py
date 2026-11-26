@@ -3,6 +3,7 @@
 import logging
 import ssl
 import uuid
+from typing import Any
 from urllib.parse import urlparse
 
 import httpx
@@ -77,6 +78,7 @@ class CerbosClient:
         connection_retries: int = 0,
         debug: bool = False,
         logger: logging.Logger = logging.getLogger(__name__),
+        transport: httpx.BaseTransport | None = None,
     ):
         self._logger = logger
         self._raise_on_error = raise_on_error
@@ -100,16 +102,16 @@ class CerbosClient:
             base_url = "https://cerbos.sock"
         if connection_retries:
             transport_params["retries"] = connection_retries
-        transport = None
-        if transport_params:
-            transport = httpx.HTTPTransport(**transport_params)
+        transport_obj = transport
+        if transport_obj is None and transport_params:
+            transport_obj = httpx.HTTPTransport(**transport_params)
         self._http = RetryClient(
             base_url=base_url,
             headers=headers,
             timeout=timeout_secs,
             verify=tls_verify,
             event_hooks=event_hooks,
-            transport=transport,
+            transport=transport_obj,
             request_retries=request_retries,
         )
 
@@ -155,6 +157,7 @@ class CerbosClient:
         resources: ResourceList,
         request_id: str | None = None,
         aux_data: AuxData | None = None,
+        include_meta: bool | None = None,
     ) -> CheckResourcesResponse:
         """Check permissions for a list of resources
 
@@ -163,6 +166,7 @@ class CerbosClient:
             resources (ResourceList): list of resources to check permissions for
             request_id (None|str): request ID for the request (default None)
             aux_data (None|AuxData): auxiliary data for the request
+            include_meta (None|bool): include matched policy metadata
         """
         req_id = _get_request_id(request_id)
         req = CheckResourcesRequest(
@@ -170,6 +174,7 @@ class CerbosClient:
             principal=principal,
             resources=resources.resources,
             aux_data=aux_data,
+            include_meta=include_meta,
         )
         # omit keys with `None` values
         resp = self._http.post(
@@ -177,14 +182,73 @@ class CerbosClient:
             json={k: v for k, v in req.to_dict().items() if v is not None},
         )
         if resp.is_error:
-            if self._raise_on_error:
-                raise CerbosRequestException(APIError.from_dict(resp.json()))
-            return CheckResourcesResponse(
+            error = CheckResourcesResponse(
                 request_id=req_id,
                 status_code=resp.status_code,
                 status_msg=APIError.from_dict(resp.json()),
+                cerbos_call_id=_call_id_from_headers(resp.headers),
             )
-        return CheckResourcesResponse.from_dict(resp.json())
+            error._sdk_diagnostic_request = req
+            if self._raise_on_error:
+                raise CerbosRequestException(error.status_msg)
+            return error
+        result = CheckResourcesResponse.from_dict(resp.json())
+        if not result.cerbos_call_id:
+            result.cerbos_call_id = _call_id_from_headers(resp.headers)
+        result._sdk_diagnostic_request = req
+        return result
+
+    def diagnose_check_resources(
+        self,
+        principal: Principal,
+        resources: ResourceList,
+        request_id: str | None = None,
+        aux_data: AuxData | None = None,
+        correlation_id: str | None = None,
+        public_scope: Any = None,
+        log: bool = False,
+        logger: logging.Logger | None = None,
+        **diagnostic_kwargs: Any,
+    ):
+        """Check resources and return a consistent shareable diagnostic view."""
+        from cerbos.sdk.diagnostics import diagnostic_view, log_diagnostics
+
+        try:
+            response = self.check_resources(
+                principal=principal,
+                resources=resources,
+                request_id=request_id,
+                aux_data=aux_data,
+                include_meta=True,
+            )
+        except (CerbosRequestException, httpx.HTTPError) as exc:
+            view = diagnostic_view(
+                None,
+                principal=principal,
+                resources=resources,
+                error=exc,
+                correlation_id=correlation_id or _get_request_id(request_id),
+                public_scope=public_scope,
+                **diagnostic_kwargs,
+            )
+        else:
+            view = diagnostic_view(
+                response,
+                principal=principal,
+                resources=resources,
+                correlation_id=correlation_id,
+                public_scope=public_scope,
+                **diagnostic_kwargs,
+            )
+        if log:
+            log_diagnostics(view, logger or self._logger)
+        return view
+
+    def diagnostics(self, *args: Any, **kwargs: Any):
+        return self.diagnose_check_resources(*args, **kwargs)
+
+    check_resources_diagnostics = diagnose_check_resources
+    support_diagnostics = diagnose_check_resources
 
     def is_allowed(
         self,
@@ -356,3 +420,11 @@ def _get_request_id(request_id: str | None) -> str:
     if request_id is None:
         return str(uuid.uuid4())
     return request_id
+
+
+def _call_id_from_headers(headers: httpx.Headers) -> str | None:
+    for name in ("cerbos-call-id", "x-cerbos-call-id"):
+        value = headers.get(name)
+        if value:
+            return value
+    return None

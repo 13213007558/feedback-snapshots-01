@@ -6,6 +6,18 @@ from dataclasses import dataclass
 
 from cerbos.effect.v1.effect_pb2 import EFFECT_ALLOW
 from cerbos.response.v1.response_pb2 import CheckResourcesResponse
+from cerbos.sdk.diagnostics import build_diagnostic_report, diagnostic_view
+
+__all__ = [
+    "AdminCredentials",
+    "build_diagnostic_report",
+    "diagnostic_view",
+    "get_resource",
+    "is_allowed",
+    "shareable_diagnostic_view",
+]
+
+shareable_diagnostic_view = diagnostic_view
 
 
 @dataclass

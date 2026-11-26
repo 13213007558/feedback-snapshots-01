@@ -13,6 +13,7 @@ from dataclasses_json import LetterCase, config, dataclass_json
 class Effect(str, Enum):
     DENY = "EFFECT_DENY"
     ALLOW = "EFFECT_ALLOW"
+    NO_MATCH = "EFFECT_NO_MATCH"
 
 
 class Source(str, Enum):
@@ -86,6 +87,7 @@ class CheckResourcesRequest:
     principal: Principal
     resources: ResourceList
     aux_data: AuxData | None = None
+    include_meta: bool | None = None
 
 
 @dataclass_json(letter_case=LetterCase.CAMEL)
@@ -114,11 +116,26 @@ class APIError:
 
 @dataclass_json(letter_case=LetterCase.CAMEL)
 @dataclass
+class CheckResourcesEffectMeta:
+    matched_policy: str | None = None
+    matched_scope: str | None = None
+
+
+@dataclass_json(letter_case=LetterCase.CAMEL)
+@dataclass
+class CheckResourcesResultMeta:
+    actions: dict[str, CheckResourcesEffectMeta] | None = None
+    effective_derived_roles: list[str] | None = None
+
+
+@dataclass_json(letter_case=LetterCase.CAMEL)
+@dataclass
 class CheckResourcesResult:
     resource: Resource
     actions: dict[str, Effect]
     validation_errors: list[ValidationError] | None = None
     outputs: list[OutputEntry] | None = None
+    meta: CheckResourcesResultMeta | None = None
 
     def is_allowed(self, action: str) -> bool:
         if action in self.actions:
@@ -134,6 +151,7 @@ class CheckResourcesResponse:
     results: list[CheckResourcesResult] | None = None
     status_code: int = httpx.codes.OK
     status_msg: APIError | None = None
+    cerbos_call_id: str | None = None
 
     def failed(self) -> bool:
         return self.status_code != httpx.codes.OK
@@ -143,6 +161,31 @@ class CheckResourcesResponse:
             return self
 
         raise CerbosRequestException(self.status_msg)
+
+    def diagnostic_report(self, request: Any = None, **kwargs: Any):
+        from cerbos.sdk.diagnostics import build_diagnostic_report
+
+        return build_diagnostic_report(self, request=request, **kwargs)
+
+    def diagnostic_view(self, request: Any = None, **kwargs: Any):
+        from cerbos.sdk.diagnostics import diagnostic_view
+
+        return diagnostic_view(self, request=request, **kwargs)
+
+    def public_diagnostic_view(self, request: Any = None, **kwargs: Any):
+        return self.diagnostic_view(request, **kwargs)
+
+    def shareable_diagnostic_view(self, request: Any = None, **kwargs: Any):
+        return self.diagnostic_view(request, **kwargs)
+
+    def to_shareable_dict(self, request: Any = None, **kwargs: Any) -> dict[str, Any]:
+        return self.diagnostic_view(request, **kwargs).to_dict()
+
+    def to_public_dict(self, request: Any = None, **kwargs: Any) -> dict[str, Any]:
+        return self.to_shareable_dict(request, **kwargs)
+
+    def public_report(self, request: Any = None, **kwargs: Any):
+        return self.diagnostic_view(request, **kwargs)
 
     def get_resource(
         self, id: str, predicate: Callable[[Resource], bool] = lambda _: True
