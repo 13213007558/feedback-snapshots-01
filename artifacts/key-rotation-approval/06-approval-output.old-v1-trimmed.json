@@ -1,0 +1,18 @@
+{
+  "$schema": "https://example.invalid/schemas/key-rotation-approval-v1.json",
+  "schema": "key-rotation-approval-output/v1",
+  "document_kind": "approval_decision",
+  "rotation_id": "ROT-20261126-001",
+  "decisions": [
+    {
+      "assetRef": "asset:key:checkout-signing-2024q1",
+      "name": "checkout-signing-key",
+      "materialState": "deactivated"
+    },
+    {
+      "assetRef": "asset:key:checkout-signing-2026q4",
+      "name": "checkout-signing-key",
+      "materialState": "active"
+    }
+  ]
+}

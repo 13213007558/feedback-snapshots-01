@@ -1,0 +1,21 @@
+{
+  "$schema": "https://example.invalid/schemas/key-rotation-request-v1.json",
+  "schema": "key-rotation-request/v1",
+  "rotation_id": "ROT-20261126-001",
+  "status": "approved",
+  "decision": "approved",
+  "submitted_at": "2026-11-26T09:00:00Z",
+  "approved_at": "2026-11-26T10:00:00Z",
+  "approved_by": "Fictional Key Rotation Approval Board <approvals@example.invalid>",
+  "service_ref": "service:checkout-api",
+  "old_asset_ref": "asset:key:checkout-signing-2024q1",
+  "new_asset_ref": "asset:key:checkout-signing-2026q4",
+  "namesake_guard_refs": [
+    "asset:key:catalog-search-index-2024q4"
+  ],
+  "requested_effect": {
+    "asset:key:checkout-signing-2024q1": "withdraw-new-use-and-retain-historical-verification",
+    "asset:key:checkout-signing-2026q4": "allow-new-use"
+  },
+  "ticket": "FB-20261120-SEC7558-190-FICTION"
+}

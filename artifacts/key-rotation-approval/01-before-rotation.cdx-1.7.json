@@ -1,0 +1,236 @@
+{
+  "components": [
+    {
+      "bom-ref": "asset:cert:checkout-signing-2024q1",
+      "cryptoProperties": {
+        "assetType": "certificate",
+        "certificateProperties": {
+          "certificateExtension": "crt",
+          "certificateFormat": "X.509",
+          "issuerName": "CN=Fictional Rotation CA, O=Fictional Example",
+          "notValidAfter": "2027-01-01T00:00:00+00:00",
+          "notValidBefore": "2024-01-01T00:00:00+00:00",
+          "subjectName": "CN=checkout-signing-2024q1, O=Fictional Payments",
+          "subjectPublicKeyRef": "asset:key:checkout-signing-2024q1"
+        }
+      },
+      "description": "Old fictional certificate retained for historical signature verification.",
+      "name": "checkout-signing-certificate",
+      "properties": [
+        {
+          "name": "approval.example/common-name",
+          "value": "checkout-signing-2024q1"
+        },
+        {
+          "name": "approval.example/fictional-certificate",
+          "value": "true"
+        }
+      ],
+      "type": "cryptographic-asset",
+      "version": "fictional"
+    },
+    {
+      "bom-ref": "asset:cert:checkout-signing-2026q4",
+      "cryptoProperties": {
+        "assetType": "certificate",
+        "certificateProperties": {
+          "certificateExtension": "crt",
+          "certificateFormat": "X.509",
+          "issuerName": "CN=Fictional Rotation CA, O=Fictional Example",
+          "notValidAfter": "2028-11-26T00:00:00+00:00",
+          "notValidBefore": "2026-11-26T00:00:00+00:00",
+          "subjectName": "CN=checkout-signing-2026q4, O=Fictional Payments",
+          "subjectPublicKeyRef": "asset:key:checkout-signing-2026q4"
+        }
+      },
+      "description": "New fictional certificate approved for new signatures.",
+      "name": "checkout-signing-certificate",
+      "properties": [
+        {
+          "name": "approval.example/common-name",
+          "value": "checkout-signing-2026q4"
+        },
+        {
+          "name": "approval.example/fictional-certificate",
+          "value": "true"
+        }
+      ],
+      "type": "cryptographic-asset",
+      "version": "fictional"
+    },
+    {
+      "bom-ref": "asset:key:catalog-search-index-2024q4",
+      "cryptoProperties": {
+        "assetType": "related-crypto-material",
+        "relatedCryptoMaterialProperties": {
+          "id": "asset:key:catalog-search-index-2024q4",
+          "state": "active",
+          "type": "public-key"
+        }
+      },
+      "description": "Unrelated namesake asset used to prove updates are bom-ref scoped.",
+      "name": "checkout-signing-key",
+      "properties": [
+        {
+          "name": "approval.example/fictional-fingerprint-sha256",
+          "value": "7dc904338f0c96de0c84c198387675d0086defda581a952a0588756015ef6e25"
+        },
+        {
+          "name": "approval.example/purpose",
+          "value": "search-index-signature"
+        },
+        {
+          "name": "approval.example/service-ref",
+          "value": "service:catalog-search-api"
+        }
+      ],
+      "type": "cryptographic-asset",
+      "version": "fictional"
+    },
+    {
+      "bom-ref": "asset:key:checkout-signing-2024q1",
+      "cryptoProperties": {
+        "assetType": "related-crypto-material",
+        "relatedCryptoMaterialProperties": {
+          "id": "asset:key:checkout-signing-2024q1",
+          "state": "active",
+          "type": "public-key"
+        }
+      },
+      "description": "Old fictional key. Before approval it is still active; after rotation it verifies history only.",
+      "name": "checkout-signing-key",
+      "properties": [
+        {
+          "name": "approval.example/fictional-fingerprint-sha256",
+          "value": "73e8e875c00de2ef14605c47e171431996db90bb6a8e2b44f03d41871e39e145"
+        },
+        {
+          "name": "approval.example/purpose",
+          "value": "payment-receipt-signature"
+        },
+        {
+          "name": "approval.example/service-ref",
+          "value": "service:checkout-api"
+        }
+      ],
+      "type": "cryptographic-asset",
+      "version": "fictional"
+    },
+    {
+      "bom-ref": "asset:key:checkout-signing-2026q4",
+      "cryptoProperties": {
+        "assetType": "related-crypto-material",
+        "relatedCryptoMaterialProperties": {
+          "id": "asset:key:checkout-signing-2026q4",
+          "state": "pre-activation",
+          "type": "public-key"
+        }
+      },
+      "description": "Replacement fictional key waiting for approved activation.",
+      "name": "checkout-signing-key",
+      "properties": [
+        {
+          "name": "approval.example/fictional-fingerprint-sha256",
+          "value": "9107b2f260c4a89eb7b9c747a9a833de58949b62636b8b1542088cc4131da849"
+        },
+        {
+          "name": "approval.example/purpose",
+          "value": "payment-receipt-signature"
+        },
+        {
+          "name": "approval.example/service-ref",
+          "value": "service:checkout-api"
+        }
+      ],
+      "type": "cryptographic-asset",
+      "version": "fictional"
+    }
+  ],
+  "dependencies": [
+    {
+      "dependsOn": [
+        "service:catalog-search-api",
+        "service:checkout-api"
+      ],
+      "ref": "app:checkout-service"
+    },
+    {
+      "ref": "asset:cert:checkout-signing-2024q1"
+    },
+    {
+      "ref": "asset:cert:checkout-signing-2026q4"
+    },
+    {
+      "ref": "asset:key:catalog-search-index-2024q4"
+    },
+    {
+      "ref": "asset:key:checkout-signing-2024q1"
+    },
+    {
+      "ref": "asset:key:checkout-signing-2026q4"
+    },
+    {
+      "dependsOn": [
+        "asset:key:catalog-search-index-2024q4"
+      ],
+      "ref": "service:catalog-search-api"
+    },
+    {
+      "dependsOn": [
+        "asset:cert:checkout-signing-2024q1",
+        "asset:cert:checkout-signing-2026q4",
+        "asset:key:checkout-signing-2024q1",
+        "asset:key:checkout-signing-2026q4"
+      ],
+      "ref": "service:checkout-api"
+    }
+  ],
+  "metadata": {
+    "component": {
+      "bom-ref": "app:checkout-service",
+      "description": "Fictional service that signs receipts and verifies historical signatures.",
+      "name": "fictional-checkout-service",
+      "type": "application",
+      "version": "2026.11"
+    },
+    "properties": [
+      {
+        "name": "approval.example/rotation-id",
+        "value": "ROT-20261126-001"
+      },
+      {
+        "name": "approval.example/scenario",
+        "value": "certificate-key-rotation"
+      }
+    ],
+    "timestamp": "2026-11-26T09:00:00+00:00"
+  },
+  "serialNumber": "urn:uuid:76fa931f-afde-538f-acab-c559a7a33400",
+  "services": [
+    {
+      "bom-ref": "service:catalog-search-api",
+      "description": "Unrelated service with a same-named key material.",
+      "name": "catalog-search-api",
+      "version": "fictional"
+    },
+    {
+      "bom-ref": "service:checkout-api",
+      "description": "Fictional payment receipt signing service.",
+      "endpoints": [
+        "https://checkout.example.invalid/rpc"
+      ],
+      "name": "checkout-api",
+      "properties": [
+        {
+          "name": "approval.example/handles-historical-signatures",
+          "value": "true"
+        }
+      ],
+      "version": "fictional"
+    }
+  ],
+  "version": 1,
+  "$schema": "http://cyclonedx.org/schema/bom-1.7.schema.json",
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.7"
+}

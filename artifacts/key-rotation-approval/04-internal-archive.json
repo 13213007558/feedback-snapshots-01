@@ -1,0 +1,100 @@
+{
+  "$schema": "https://example.invalid/schemas/key-rotation-archive-v1.json",
+  "schema": "key-rotation-internal-archive/v1",
+  "document_kind": "internal_rotation_archive",
+  "distribution": "internal-record-not-an-approval-token",
+  "rotation_id": "ROT-20261126-001",
+  "archived_at": "2026-11-26T16:48:23.521927Z",
+  "request": {
+    "$schema": "https://example.invalid/schemas/key-rotation-request-v1.json",
+    "schema": "key-rotation-request/v1",
+    "rotation_id": "ROT-20261126-001",
+    "status": "approved",
+    "decision": "approved",
+    "submitted_at": "2026-11-26T09:00:00Z",
+    "approved_at": "2026-11-26T10:00:00Z",
+    "approved_by": "Fictional Key Rotation Approval Board <approvals@example.invalid>",
+    "service_ref": "service:checkout-api",
+    "old_asset_ref": "asset:key:checkout-signing-2024q1",
+    "new_asset_ref": "asset:key:checkout-signing-2026q4",
+    "namesake_guard_refs": [
+      "asset:key:catalog-search-index-2024q4"
+    ],
+    "requested_effect": {
+      "asset:key:checkout-signing-2024q1": "withdraw-new-use-and-retain-historical-verification",
+      "asset:key:checkout-signing-2026q4": "allow-new-use"
+    },
+    "ticket": "FB-20261120-SEC7558-190-FICTION"
+  },
+  "audit_events": [
+    {
+      "action": "rotation.approved",
+      "at": "2026-11-26T10:00:00Z",
+      "actor": "Fictional Key Rotation Approval Board <approvals@example.invalid>",
+      "asset_refs": [
+        "asset:key:checkout-signing-2024q1",
+        "asset:key:checkout-signing-2026q4"
+      ]
+    },
+    {
+      "action": "new-use.permission_withdrawn",
+      "at": "2026-11-26T10:00:00Z",
+      "asset_ref": "asset:key:checkout-signing-2024q1",
+      "previous_permission": "allowed",
+      "current_permission": "denied",
+      "reason": "old material stopped issuing new signatures; retained only to check historical signatures"
+    },
+    {
+      "action": "new-use.permission_granted",
+      "at": "2026-11-26T10:00:00Z",
+      "asset_ref": "asset:key:checkout-signing-2026q4",
+      "previous_permission": "pending_confirmation",
+      "current_permission": "allowed"
+    },
+    {
+      "action": "historical-verification.relation_retained",
+      "at": "2026-11-26T10:00:00Z",
+      "asset_ref": "asset:key:checkout-signing-2024q1",
+      "certificate_associations": [
+        {
+          "certificate_ref": "asset:cert:checkout-signing-2024q1",
+          "certificate_name": "checkout-signing-certificate",
+          "key_ref": "asset:key:checkout-signing-2024q1",
+          "basis": "certificateProperties.relatedCryptographicAssets"
+        },
+        {
+          "certificate_ref": "asset:cert:checkout-signing-2024q1",
+          "certificate_name": "checkout-signing-certificate",
+          "key_ref": "asset:key:checkout-signing-2024q1",
+          "basis": "certificateProperties.subjectPublicKeyRef"
+        }
+      ]
+    },
+    {
+      "action": "namesake.update_scope_checked",
+      "at": "2026-11-26T10:00:00Z",
+      "targeting_rule": "bom-ref-exact-match",
+      "protected_refs": [
+        "asset:key:catalog-search-index-2024q4"
+      ]
+    }
+  ],
+  "artifacts": {
+    "before_inventory": {
+      "path": "01-before-rotation.cdx-1.7.json",
+      "digest": "sha256:9972b634d1bda2568d5bcf24dd27d81055fa9634071dd5c338e9b5d2e60ba92f"
+    },
+    "after_inventory": {
+      "path": "05-after-rotation.cdx-1.7.evidence.json",
+      "digest": "sha256:c8f6a6104439db8d728ec31cb7061088ea82a4d5d7b42468a6b768239504d0db"
+    },
+    "approval_output": {
+      "path": "03-approval-output.evidence-v2.json",
+      "digest": "sha256:6624bc9ccc511ba91dc14f5340a84e31c556bbb1de330b02a347f6d185dc1761"
+    }
+  },
+  "integrity": {
+    "approval_output_digest": "sha256:6624bc9ccc511ba91dc14f5340a84e31c556bbb1de330b02a347f6d185dc1761",
+    "after_inventory_digest": "sha256:c8f6a6104439db8d728ec31cb7061088ea82a4d5d7b42468a6b768239504d0db"
+  }
+}

@@ -1,0 +1,91 @@
+{
+  "$schema": "https://example.invalid/schemas/key-rotation-approval-v2.json",
+  "schema": "key-rotation-approval-output/v2",
+  "document_kind": "approval_decision",
+  "distribution": "requester-facing-approval-output",
+  "rotation_id": "ROT-20261126-001",
+  "issued_at": "2026-11-26T10:00:00Z",
+  "decisions": [
+    {
+      "asset_ref": "asset:key:checkout-signing-2024q1",
+      "asset_name": "checkout-signing-key",
+      "decision": "verification_only",
+      "material_state": "deactivated",
+      "current_permissions": {
+        "new_use": "denied",
+        "apply_protection": "denied",
+        "verify_historical_signatures": "allowed"
+      },
+      "historical_certificate_associations": [
+        {
+          "certificate_ref": "asset:cert:checkout-signing-2024q1",
+          "certificate_name": "checkout-signing-certificate",
+          "key_ref": "asset:key:checkout-signing-2024q1",
+          "basis": "certificateProperties.subjectPublicKeyRef"
+        }
+      ],
+      "updated_by_asset_ref": "asset:key:checkout-signing-2024q1",
+      "decided_at": "2026-11-26T10:00:00Z",
+      "evidence_refs": [
+        "ROT-20261126-001:evidence:approval-request",
+        "ROT-20261126-001:evidence:before-inventory",
+        "ROT-20261126-001:evidence:after-inventory",
+        "ROT-20261126-001:evidence:asset-id-association"
+      ]
+    },
+    {
+      "asset_ref": "asset:key:checkout-signing-2026q4",
+      "asset_name": "checkout-signing-key",
+      "decision": "new_use_allowed",
+      "material_state": "active",
+      "current_permissions": {
+        "new_use": "allowed",
+        "apply_protection": "allowed",
+        "verify_historical_signatures": "allowed"
+      },
+      "historical_certificate_associations": [
+        {
+          "certificate_ref": "asset:cert:checkout-signing-2026q4",
+          "certificate_name": "checkout-signing-certificate",
+          "key_ref": "asset:key:checkout-signing-2026q4",
+          "basis": "certificateProperties.subjectPublicKeyRef"
+        }
+      ],
+      "updated_by_asset_ref": "asset:key:checkout-signing-2026q4",
+      "decided_at": "2026-11-26T10:00:00Z",
+      "evidence_refs": [
+        "ROT-20261126-001:evidence:approval-request",
+        "ROT-20261126-001:evidence:before-inventory",
+        "ROT-20261126-001:evidence:after-inventory",
+        "ROT-20261126-001:evidence:asset-id-association"
+      ]
+    }
+  ],
+  "evidence": [
+    {
+      "id": "ROT-20261126-001:evidence:approval-request",
+      "kind": "approval-request",
+      "digest": "sha256:f019b58f03198bdc9ec079892f0cd47a033937f8b289fd18af2628b009ba1094",
+      "statement": "Signed/fictional change-board approval represented by the submitted request digest."
+    },
+    {
+      "id": "ROT-20261126-001:evidence:before-inventory",
+      "kind": "cyclonedx-inventory-snapshot",
+      "spec_version": "1.7",
+      "digest": "sha256:9972b634d1bda2568d5bcf24dd27d81055fa9634071dd5c338e9b5d2e60ba92f",
+      "statement": "Pre-rotation CycloneDX inventory was re-read and digested before mutation."
+    },
+    {
+      "id": "ROT-20261126-001:evidence:after-inventory",
+      "kind": "cyclonedx-inventory-snapshot",
+      "spec_version": "1.7",
+      "digest": "sha256:c8f6a6104439db8d728ec31cb7061088ea82a4d5d7b42468a6b768239504d0db",
+      "statement": "Post-rotation CycloneDX inventory contains the current material states and references."
+    },
+    {
+      "id": "ROT-20261126-001:evidence:asset-id-association",
+      "kind": "association-rule",
+      "statement": "Updates and certificate relationships are resolved by unique CycloneDX bom-ref, never by name."
+    }
+  ]
+}
