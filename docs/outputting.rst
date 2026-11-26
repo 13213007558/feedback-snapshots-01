@@ -83,3 +83,47 @@ Alternatively, if the output format and schema version are constants, you can us
 
     outputter = XmlV1Dot2(bom=bom)
     outputter.output_to_file(filename='/tmp/sbom-v1.2.xml')
+
+Leveled And Reference-Aware Exports
+-----------------------------------
+
+Source and artifact scans can assign the same ``ComponentEvidence`` instance to
+multiple components.  Use :class:`cyclonedx.output.ExportPolicy` to label
+evidence fields and component reference clearance.  The exporter deep-copies the
+BOM and creates a separate evidence projection for every component reference; the
+original BOM and shared evidence object are never modified.
+
+Fields without an explicit label use ``default_field_level`` (``INTERNAL`` by
+default), so a public outlet only emits explicitly public material unless a
+less conservative default is supplied.
+
+.. code-block:: python
+
+    from cyclonedx.model import Copyright
+    from cyclonedx.model.component_evidence import ComponentEvidence, Occurrence
+    from cyclonedx.output import ExportPolicy, OutputFormat, SchemaVersion, export_bom
+
+    evidence = ComponentEvidence(
+        copyright=[Copyright(text='synthetic marker')],
+        occurrences=[Occurrence(location='private/build/path')],
+    )
+    # source_component.evidence = evidence
+    # artifact_component.evidence = evidence
+
+    policy = ExportPolicy(
+        component_levels={'source-bom-ref': 'internal', 'artifact-bom-ref': 'public'},
+        field_levels={'copyright': 'public', 'occurrences': 'internal'},
+    )
+
+    public_json = export_bom(
+        bom, OutputFormat.JSON, SchemaVersion.V1_7, policy=policy.for_outlet('public')
+    )
+    internal_xml = export_bom(
+        bom, OutputFormat.XML, SchemaVersion.V1_7, policy=policy.for_outlet('internal')
+    )
+
+Calling the existing outputters without a policy, or using
+``ExportPolicy.full()``, keeps the complete manifest behavior.  Policies can be
+passed to :func:`cyclonedx.output.make_outputter` or to an outputter's
+``output_as_string(policy=...)`` method, allowing public and internal exports to
+be generated in any order.

@@ -34,7 +34,8 @@ from ..schema.schema import (
     SchemaVersion1Dot6,
     SchemaVersion1Dot7,
 )
-from . import BaseOutput
+from . import BaseOutput, _POLICY_UNSET
+from .classification import project_bom
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..model.bom import Bom
@@ -53,12 +54,19 @@ class Xml(BaseSchemaVersion, BaseOutput):
     def output_format(self) -> Literal[OutputFormat.XML]:
         return OutputFormat.XML
 
-    def generate(self, force_regeneration: bool = False) -> None:
-        if self.generated and not force_regeneration:
+    def generate(
+        self,
+        force_regeneration: bool = False,
+        policy: Any = _POLICY_UNSET,
+        **policy_options: Any,
+    ) -> None:
+        active_policy = self._resolve_generate_policy(policy, policy_options)
+        if self.generated and not force_regeneration and self._generated_policy is active_policy:
             return
 
         _view = SCHEMA_VERSIONS[self.schema_version_enum]
-        bom = self.get_bom()
+        source_bom = self.get_bom()
+        bom = project_bom(source_bom, active_policy) if active_policy is not None else source_bom
         bom.validate()
         xmlns = self.get_target_namespace()
         with BomRefDiscriminator.from_bom(bom):
@@ -72,6 +80,7 @@ class Xml(BaseSchemaVersion, BaseOutput):
                 # -> so we write the declaration manually, as long as py38 is supported.
                 xml_declaration=False)
 
+        self._generated_policy = active_policy
         self.generated = True
 
     @staticmethod
@@ -84,8 +93,10 @@ class Xml(BaseSchemaVersion, BaseOutput):
 
     def output_as_string(self, *,
                          indent: Optional[Union[int, str]] = None,
+                         policy: Any = _POLICY_UNSET,
                          **kwargs: Any) -> str:
-        self.generate()
+        policy = self._pop_output_policy(policy, kwargs)
+        self.generate(policy=policy)
         return self._bom_xml if indent is None else dom_parseString(  # nosecc B318
             self._bom_xml).toprettyxml(
             indent=self.__make_indent(indent)

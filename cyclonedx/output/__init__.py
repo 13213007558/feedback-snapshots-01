@@ -41,12 +41,17 @@ if TYPE_CHECKING:  # pragma: no cover
     from .xml import Xml as XmlOutputter
 
 
+_POLICY_UNSET: Any = object()
+
+
 class BaseOutput(ABC):
 
     def __init__(self, bom: 'Bom', **kwargs: int) -> None:
         super().__init__(**kwargs)
         self._bom = bom
         self._generated: bool = False
+        self._export_policy: Optional['ExportPolicy'] = None
+        self._generated_policy: Any = _POLICY_UNSET
 
     @property
     @abstractmethod
@@ -71,6 +76,41 @@ class BaseOutput(ABC):
 
     def set_bom(self, bom: 'Bom') -> None:
         self._bom = bom
+
+    def set_export_policy(self, policy: Optional['ExportPolicy']) -> None:
+        from .classification import coerce_policy
+        self._export_policy = coerce_policy(policy)
+
+    def apply_classification(self, policy: Any = None, **policy_options: Any) -> 'BaseOutput':
+        from .classification import coerce_policy
+        self._export_policy = coerce_policy(policy, policy_options)
+        self._generated_policy = _POLICY_UNSET
+        return self
+
+    apply_export_policy = apply_classification
+    with_policy = apply_classification
+
+    def _resolve_generate_policy(self, policy: Any, options: Mapping[str, Any]) -> Any:
+        from .classification import coerce_policy
+        if policy is _POLICY_UNSET and not options:
+            if self._export_policy is not None:
+                return self._export_policy
+            return coerce_policy(None)
+        return coerce_policy(None if policy is _POLICY_UNSET else policy, options)
+
+    def _pop_output_policy(self, policy: Any, kwargs: dict[str, Any]) -> Any:
+        from .classification import _POLICY_OPTION_KEYS, coerce_policy
+        options = {key: kwargs.pop(key) for key in list(kwargs) if key in _POLICY_OPTION_KEYS}
+        if policy is None:
+            return None
+        if policy is not _POLICY_UNSET:
+            return coerce_policy(policy, options)
+        explicit_policy = options.pop('policy', options.pop('export_policy', None))
+        if explicit_policy is not None:
+            return coerce_policy(explicit_policy, options)
+        if options:
+            return coerce_policy(None, options)
+        return _POLICY_UNSET
 
     @abstractmethod
     def generate(self, force_regeneration: bool = False) -> None:
@@ -114,7 +154,13 @@ def make_outputter(bom: 'Bom', output_format: OutputFormat,
     ...  # pragma: no cover
 
 
-def make_outputter(bom: 'Bom', output_format: OutputFormat, schema_version: SchemaVersion) -> BaseOutput:
+def make_outputter(
+    bom: 'Bom',
+    output_format: OutputFormat,
+    schema_version: SchemaVersion,
+    policy: Any = _POLICY_UNSET,
+    **policy_options: Any,
+) -> BaseOutput:
     """
     Helper method to quickly get the correct output class/formatter.
 
@@ -140,7 +186,11 @@ def make_outputter(bom: 'Bom', output_format: OutputFormat, schema_version: Sche
     klass = BY_SCHEMA_VERSION.get(schema_version, None)
     if klass is None:
         raise ValueError(f'Unknown {output_format.name}/schema_version: {schema_version!r}')
-    return klass(bom)
+    outputter = klass(bom)
+    if policy is not _POLICY_UNSET or policy_options:
+        from .classification import coerce_policy
+        outputter.set_export_policy(coerce_policy(None if policy is _POLICY_UNSET else policy, policy_options))
+    return outputter
 
 # region deprecated re-export
 
@@ -158,3 +208,25 @@ class BomRefDiscriminator(_BomRefDiscriminator):
 
 
 # endregion deprecated re-export
+
+
+from .classification import (  # noqa: E402
+    AccessLevel,
+    Classification,
+    ClassificationLevel,
+    ClassificationPolicy,
+    ExportLevel,
+    ExportOutlet,
+    ExportPolicy,
+    ExportTarget,
+    LeveledExporter,
+    Outlet,
+    ReleaseLevel,
+    SecurityLevel,
+    classification_context,
+    coerce_policy,
+    export_bom,
+    export_context,
+    make_leveled_outputter,
+    project_bom,
+)

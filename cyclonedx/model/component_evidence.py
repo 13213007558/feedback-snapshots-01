@@ -654,12 +654,22 @@ class ComponentEvidence:
         callstack: Optional[CallStack] = None,
         licenses: Optional[Iterable[License]] = None,
         copyright: Optional[Iterable[Copyright]] = None,
+        classification: Any = None,
+        security_level: Any = None,
+        release_level: Any = None,
+        field_levels: Optional[dict[str, Any]] = None,
+        security_labels: Optional[dict[str, Any]] = None,
     ) -> None:
         self.identity = identity or []
         self.occurrences = occurrences or []
         self.callstack = callstack
         self.licenses = licenses or []
         self.copyright = copyright or []
+        self.classification = classification
+        self.security_level = security_level
+        self.release_level = release_level
+        self.field_levels = field_levels
+        self.security_labels = security_labels or field_levels
 
     @property
     @serializable.view(SchemaVersion1Dot5)

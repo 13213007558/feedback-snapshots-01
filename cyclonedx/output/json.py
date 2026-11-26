@@ -34,7 +34,8 @@ from ..schema.schema import (
     SchemaVersion1Dot6,
     SchemaVersion1Dot7,
 )
-from . import BaseOutput
+from . import BaseOutput, _POLICY_UNSET
+from .classification import project_bom
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..model.bom import Bom
@@ -54,8 +55,14 @@ class Json(BaseOutput, BaseSchemaVersion):
     def output_format(self) -> Literal[OutputFormat.JSON]:
         return OutputFormat.JSON
 
-    def generate(self, force_regeneration: bool = False) -> None:
-        if self.generated and not force_regeneration:
+    def generate(
+        self,
+        force_regeneration: bool = False,
+        policy: Any = _POLICY_UNSET,
+        **policy_options: Any,
+    ) -> None:
+        active_policy = self._resolve_generate_policy(policy, policy_options)
+        if self.generated and not force_regeneration and self._generated_policy is active_policy:
             return
 
         schema_uri: Optional[str] = self._get_schema_uri()
@@ -69,7 +76,8 @@ class Json(BaseOutput, BaseSchemaVersion):
             'specVersion': self.schema_version.to_version()
         }
         _view = SCHEMA_VERSIONS.get(self.schema_version_enum)
-        bom = self.get_bom()
+        source_bom = self.get_bom()
+        bom = project_bom(source_bom, active_policy) if active_policy is not None else source_bom
         bom.validate()
         with BomRefDiscriminator.from_bom(bom):
             with BomDependencyGraphFlatMerger(bom):
@@ -78,12 +86,15 @@ class Json(BaseOutput, BaseSchemaVersion):
                         view_=_view))
         bom_json.update(_json_core)
         self._bom_json = bom_json
+        self._generated_policy = active_policy
         self.generated = True
 
     def output_as_string(self, *,
                          indent: Optional[Union[int, str]] = None,
+                         policy: Any = _POLICY_UNSET,
                          **kwargs: Any) -> str:
-        self.generate()
+        policy = self._pop_output_policy(policy, kwargs)
+        self.generate(policy=policy)
         return json_dumps(self._bom_json,
                           indent=indent)
 

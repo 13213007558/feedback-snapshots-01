@@ -1015,6 +1015,11 @@ class Component(Dependable):
         tags: Optional[Iterable[str]] = None,
         # Deprecated in v1.6
         author: Optional[str] = None,
+        # Local export-policy annotations; not part of the CycloneDX document.
+        release_level: Any = None,
+        classification: Any = None,
+        security_level: Any = None,
+        access_level: Any = None,
     ) -> None:
         self.type = type
         self.mime_type = mime_type
@@ -1048,6 +1053,10 @@ class Component(Dependable):
         self.author = author
         self.modified = modified
         self.version = version
+        self.release_level = release_level
+        self.classification = classification
+        self.security_level = security_level
+        self.access_level = access_level
 
     @property
     @serializable.type_mapping(_ComponentTypeSerializationHelper)
