@@ -270,6 +270,22 @@ response. Developers can change this behavior with:
     class RefreshTokenGrant(grants.RefreshTokenGrant):
         INCLUDE_NEW_REFRESH_TOKEN = True
 
+Refresh requests are validated before their response is created. Authlib
+re-reads the refresh token immediately before issuing and persisting the new
+tokens, so a revocation that lands after validation causes an
+``invalid_grant`` response instead of publishing the pending result.
+
+For a fully safe compare-and-set handoff, give each authorization generation
+its own stable ``grant_id`` and override
+:meth:`~authlib.oauth2.rfc6749.grants.RefreshTokenGrant.rotate_refresh_token`.
+The override should check, in one storage transaction, that the presented
+refresh token and its original ``grant_id`` are still active; then insert the
+new token carrying that same ``grant_id`` and retire the old credential.
+A later authorization for the same client or device gets a new
+``grant_id``, so an old token's repeated revocation can only target the old
+generation. Include the same ``grant_id`` in synthetic JWT access-token claims
+and in opaque token storage to make persistence and token responses auditable.
+
 .. _flask_oauth2_custom_grant_types:
 
 Custom Grant Types

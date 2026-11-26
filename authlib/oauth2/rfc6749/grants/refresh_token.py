@@ -118,13 +118,64 @@ class RefreshTokenGrant(BaseGrant, TokenEndpointMixin):
             raise InvalidRequestError("There is no 'user' for this token.")
 
         client = self.request.client
+        refresh_token = self.revalidate_refresh_token(refresh_token)
+        self.request.refresh_token = refresh_token
         token = self.issue_token(user, refresh_token)
         log.debug("Issue token %r to %r", token, client)
 
+        # Token generation can be slow or pluggable. Re-read the credential
+        # immediately before the persistence handoff so a revocation that
+        # arrived after validate_token_request() prevents publication.
+        refresh_token = self.revalidate_refresh_token(refresh_token)
+        self.request.refresh_token = refresh_token
         self.request.user = user
+        self.rotate_refresh_token(refresh_token, token)
+        return JsonResponse(token, headers=self.TOKEN_RESPONSE_HEADER)
+
+    def revalidate_refresh_token(self, refresh_token):
+        """Re-read the presented credential before issuing and saving tokens.
+
+        Validation and response creation are separate phases. A revocation can
+        therefore land after :meth:`validate_token_request` but before the new
+        token is persisted. Implementations that look tokens up by their
+        refresh-token value get that late state through this hook.
+
+        Storage implementations can override this method when their token
+        object does not expose the original ``refresh_token`` value. Return
+        ``None`` or raise :class:`InvalidGrantError` to reject the handoff.
+        """
+        token_string = getattr(refresh_token, "refresh_token", None)
+        if token_string is None:
+            get_token_string = getattr(refresh_token, "get_refresh_token", None)
+            if callable(get_token_string):
+                try:
+                    token_string = get_token_string()
+                except NotImplementedError:
+                    token_string = None
+
+        if token_string is None:
+            return refresh_token
+
+        current = self.authenticate_refresh_token(token_string)
+        if not current or not current.check_client(self.request.client):
+            raise InvalidGrantError()
+        self._validate_token_scope(current)
+        return current
+
+    def rotate_refresh_token(self, refresh_token, token):
+        """Persist ``token`` and retire ``refresh_token``.
+
+        The default implementation keeps the historical save/revoke ordering.
+        Applications that need to race refresh requests against revocation
+        should override this method with one atomic compare-and-set operation:
+        check that ``refresh_token`` and its authorization generation are still
+        active, insert the new token, and retire the old credential in the same
+        storage transaction. If the generation was revoked concurrently, raise
+        :class:`InvalidGrantError` instead of saving or returning active token
+        material.
+        """
         self.save_token(token)
         self.revoke_old_credential(refresh_token)
-        return JsonResponse(token, headers=self.TOKEN_RESPONSE_HEADER)
 
     def issue_token(self, user, refresh_token):
         scope = self.request.payload.scope
