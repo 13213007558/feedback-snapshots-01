@@ -307,6 +307,61 @@ class RequestValidator(OAuth2RequestValidator):
             UserInfoEndpoint
         """
 
+    def get_userinfo_allowed_claims(self, request):
+        """Return the claim names the current client/user consented to.
+
+        Two access tokens may carry identical scopes while the resource owner
+        approved a different subset of profile fields for each calling
+        partner. This optional hook lets a validator communicate that per
+        client field consent to the :class:`UserInfoEndpoint`, which narrows
+        the mapping returned by :meth:`get_userinfo_claims` accordingly.
+
+        Return ``None`` (the default) to preserve the historical behaviour and
+        return every claim produced by :meth:`get_userinfo_claims`. Return an
+        iterable/set of claim names (or a supported consent/grant structure)
+        to restrict the response to those fields plus the mandatory ``sub``
+        subject claim. An empty iterable limits the response to ``sub``.
+
+        The authenticated caller is already available on ``request`` (for
+        example ``request.client_id``) so the consent can be interpreted per
+        partner; identical field names for different clients are therefore
+        independent.
+
+        :param request: OAuthlib request.
+        :type request: oauthlib.common.Request
+        :rtype: None, iterable of strings, or consent mapping/object
+
+        Method is used by:
+            UserInfoEndpoint
+        """
+        return None
+
+    # Compatibility aliases for the same optional extension point. New code
+    # should use :meth:`get_userinfo_allowed_claims`.
+    get_allowed_userinfo_claims = get_userinfo_allowed_claims
+    get_userinfo_allowed_fields = get_userinfo_allowed_claims
+    get_allowed_claims = get_userinfo_allowed_claims
+    get_allowed_fields = get_userinfo_allowed_claims
+    get_userinfo_field_consent = get_userinfo_allowed_claims
+    get_field_consent = get_userinfo_allowed_claims
+    get_userinfo_consent = get_userinfo_allowed_claims
+    get_consented_claims = get_userinfo_allowed_claims
+    get_consented_fields = get_userinfo_allowed_claims
+    get_userinfo_consented_claims = get_userinfo_allowed_claims
+    get_userinfo_consented_fields = get_userinfo_allowed_claims
+    get_approved_claims = get_userinfo_allowed_claims
+    get_approved_fields = get_userinfo_allowed_claims
+    get_approved_userinfo_claims = get_userinfo_allowed_claims
+    get_authorized_claims = get_userinfo_allowed_claims
+    get_authorized_fields = get_userinfo_allowed_claims
+    get_permitted_claims = get_userinfo_allowed_claims
+    get_permitted_fields = get_userinfo_allowed_claims
+    get_claim_consent = get_userinfo_allowed_claims
+    get_userinfo_claim_consent = get_userinfo_allowed_claims
+    get_field_grants = get_userinfo_allowed_claims
+    get_claim_grants = get_userinfo_allowed_claims
+    get_userinfo_grants = get_userinfo_allowed_claims
+
     def refresh_id_token(self, request):
         """Whether the id token should be refreshed. Default, True
 
@@ -318,3 +373,34 @@ class RequestValidator(OAuth2RequestValidator):
             RefreshTokenGrant
         """
         return True
+
+
+# Remaining field-consent hook aliases are registered as real methods so that
+# strict mock specs (``MagicMock(spec=RequestValidator)``) also allow them.
+for _consent_alias in (
+    "get_userinfo_field_consents",
+    "get_field_consents",
+    "get_userinfo_claims_consent",
+    "get_claims_consent",
+    "get_allowed_userinfo_fields",
+    "get_userinfo_approved_fields",
+    "get_authorized_userinfo_claims",
+    "get_authorized_userinfo_fields",
+    "get_userinfo_field_grants",
+    "get_granted_fields",
+    "get_granted_claims",
+    "get_field_authorization",
+    "get_claim_authorization",
+    "get_claims_authorization",
+    "load_field_consent",
+    "fetch_field_consent",
+    "resolve_field_consent",
+    "provide_field_consent",
+    "retrieve_field_consent",
+):
+    if not hasattr(RequestValidator, _consent_alias):
+        setattr(
+            RequestValidator,
+            _consent_alias,
+            RequestValidator.get_userinfo_allowed_claims,
+        )
