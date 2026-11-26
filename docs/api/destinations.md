@@ -14,3 +14,13 @@ This API is not finalised, and may change in a patch version.
     :members:
     :special-members: __init__
 ```
+
+## Installation state
+
+```{eval-rst}
+.. autofunction:: installer.destinations.inspect_installation
+
+.. autoclass:: installer.destinations.InstallationReport
+
+.. autoclass:: installer.destinations.BytecodeArtifact
+```
