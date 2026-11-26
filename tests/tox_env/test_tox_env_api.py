@@ -200,6 +200,21 @@ def test_env_log(tox_project: ToxProjectCreator) -> None:
     assert filename == {"1-commands[0].log"}
 
 
+def test_env_log_surrogate_env_value(tox_project: ToxProjectCreator, monkeypatch: pytest.MonkeyPatch) -> None:
+    # An environment variable decoded with surrogateescape (e.g. a non-UTF-8 path on a POSIX host)
+    # must not crash the execute log writer; the value is escaped instead of dropping the log.
+    monkeypatch.setenv("TOX_SURROGATE_VAR", "window-\udce9")
+    prj = tox_project({"tox.ini": "[testenv]\npackage=skip\ncommands=python -c 'print(1)'"})
+    result = prj.run("r")
+    result.assert_success()
+
+    log_dir = prj.path / ".tox" / "py" / "log"
+    log_file = log_dir / "1-commands[0].log"
+    content = log_file.read_text(encoding="utf-8")
+    assert "env TOX_SURROGATE_VAR: window-\\udce9" in content
+    assert "cmd: python -c" in content
+
+
 def test_env_log_cleared_without_commands(tox_project: ToxProjectCreator) -> None:
     config = '[env_run_base]\npackage = "skip"\n'
     prj = tox_project({"tox.toml": f'{config}commands = [["python", "-c", "pass"]]\n'})

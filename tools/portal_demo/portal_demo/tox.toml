@@ -1,0 +1,35 @@
+# Phased configuration for the cloud build portal's external single-file scripts.
+#
+# Two environments point at the same script path and share one work directory,
+# so the preview phase parses PEP 723 metadata without touching an environment,
+# while the run phase reuses the warmed environment once the portal approves the
+# exact script content and the selected environment.
+#
+# Offline baseline: pip is pinned to the wheelhouse approved by the platform.
+#
+# No `requires` line: this demo runs against the repository's editable tox,
+# whose development version cannot satisfy a floor like tox>=4.64.7 and would
+# trigger provisioning (which needs network access the portal does not grant).
+env_list = ["script-preview", "script-run"]
+
+[env.script_base]
+description = "shared PEP 723 script settings for the portal pipeline"
+runner = "virtualenv-pep-723"
+script = "scripts/temp_script.py"
+# The platform baseline is a local, already-vetted wheelhouse: never reach out.
+set_env = { PIP_NO_INDEX = "1", PIP_FIND_LINKS = "{tox_root}/../wheelhouse" }
+
+[env.script-preview]
+description = "phase 1: parse-only preview of the PEP 723 dependency summary (no install, no project commands)"
+base = ["script_base"]
+env_dir = "{work_dir}/script"
+# The portal runs `tox config` for this env, which never executes commands;
+# an empty command list makes that explicit.
+commands = []
+
+[env.script-run]
+description = "phase 3: execute the approved script, reusing the warmed script environment"
+base = ["script_base"]
+env_dir = "{work_dir}/script"
+# The default command for virtualenv-pep-723 is `python <script>`. The portal
+# only reaches this phase after content + environment approval.

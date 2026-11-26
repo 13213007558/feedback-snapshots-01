@@ -1,0 +1,1 @@
+Write execute logs with ``errors="backslashreplace"`` so an environment variable holding surrogate-escaped bytes (for example a non-UTF-8 path on POSIX) no longer causes the per-command log to be dropped.

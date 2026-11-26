@@ -628,7 +628,7 @@ class ToxEnv(ABC):  # ruff:ignore[too-many-public-methods]  # public facade
     def _write_execute_log(env_name: str, log_file: Path, request: ExecuteRequest, status: ExecuteStatus) -> None:
         if not log_file.parent.exists():
             log_file.parent.mkdir(parents=True, exist_ok=True)
-        with log_file.open("wt", encoding="utf-8") as file:
+        with log_file.open("wt", encoding="utf-8", errors="backslashreplace") as file:
             file.write(f"name: {env_name}\n")
             file.write(f"run_id: {request.run_id}\n")
             msg = "".join(
