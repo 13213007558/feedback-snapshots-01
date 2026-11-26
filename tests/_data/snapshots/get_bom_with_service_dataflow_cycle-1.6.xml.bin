@@ -1,0 +1,67 @@
+<?xml version="1.0" ?>
+<bom xmlns="http://cyclonedx.org/schema/bom/1.6" serialNumber="urn:uuid:1441d33a-e0fc-45b5-af3b-61ee52a88bac" version="1">
+  <metadata>
+    <timestamp>2023-01-07T13:44:32.312678+00:00</timestamp>
+  </metadata>
+  <services>
+    <service bom-ref="svc-analytics">
+      <name>analytics</name>
+      <x-trust-boundary>false</x-trust-boundary>
+      <data>
+        <classification flow="inbound">restricted</classification>
+        <classification flow="outbound">public</classification>
+        <classification flow="outbound">restricted</classification>
+      </data>
+      <properties>
+        <property name="cdx:service:dataflow:downgrade-approval">public;approval-id=APR-2026-014;method=pseudonymisation</property>
+        <property name="cdx:service:dataflow:downgrade-justification">Aggregated order metrics with direct identifiers removed</property>
+      </properties>
+    </service>
+    <service bom-ref="svc-notifications">
+      <name>notifications</name>
+      <x-trust-boundary>false</x-trust-boundary>
+    </service>
+    <service bom-ref="svc-orders">
+      <name>orders</name>
+      <x-trust-boundary>true</x-trust-boundary>
+      <data>
+        <classification flow="inbound">restricted</classification>
+        <classification flow="outbound">restricted</classification>
+      </data>
+    </service>
+    <service bom-ref="svc-partner-feed">
+      <name>partner-feed</name>
+      <x-trust-boundary>false</x-trust-boundary>
+      <data>
+        <classification flow="outbound">partner-data</classification>
+      </data>
+    </service>
+    <service bom-ref="svc-status-page">
+      <name>status-page</name>
+      <x-trust-boundary>true</x-trust-boundary>
+      <data>
+        <classification flow="inbound">partner-data</classification>
+        <classification flow="inbound">public</classification>
+      </data>
+    </service>
+  </services>
+  <dependencies>
+    <dependency ref="svc-analytics">
+      <dependency ref="svc-orders"/>
+      <dependency ref="svc-status-page"/>
+    </dependency>
+    <dependency ref="svc-notifications"/>
+    <dependency ref="svc-orders">
+      <dependency ref="svc-analytics"/>
+      <dependency ref="svc-notifications"/>
+    </dependency>
+    <dependency ref="svc-partner-feed">
+      <dependency ref="svc-status-page"/>
+    </dependency>
+    <dependency ref="svc-status-page"/>
+  </dependencies>
+  <properties>
+    <property name="key1">val1</property>
+    <property name="key2">val2</property>
+  </properties>
+</bom>

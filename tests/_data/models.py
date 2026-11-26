@@ -644,6 +644,83 @@ def get_bom_with_services_complex() -> Bom:
     return bom
 
 
+def get_bom_with_service_dataflow_cycle() -> Bom:
+    """Small service graph with a two-service call cycle and an approved downgrade egress.
+
+    Graph (service dependencies, lower to higher):
+
+    * ``orders`` calls ``analytics`` and ``notifications``
+    * ``analytics`` calls ``orders`` and ``status-page`` (two-service cycle with ``orders``)
+    * ``partner-feed`` calls ``status-page``
+
+    The cycle is a deliberate, supported shape: CycloneDX dependencies are a
+    graph, not a tree, and this fixture proves serialization preserves it.
+
+    ``analytics`` receives ``restricted`` data and releases ``public`` data
+    only after an approved de-identification step, evidenced by service
+    properties. ``notifications`` declares no data at all, so the
+    ``orders`` -> ``notifications`` dependency has a missing declaration and
+    must be left for review. ``partner-feed`` releases a classification that is
+    not in the default policy, so that edge stays unknown.
+    """
+    orders = Service(
+        name='orders', bom_ref='svc-orders', x_trust_boundary=True,
+        data=[
+            DataClassification(flow=DataFlow.INBOUND, classification='restricted'),
+            DataClassification(flow=DataFlow.OUTBOUND, classification='restricted'),
+        ],
+    )
+    analytics = Service(
+        name='analytics', bom_ref='svc-analytics', x_trust_boundary=False,
+        data=[
+            DataClassification(flow=DataFlow.INBOUND, classification='restricted'),
+            DataClassification(flow=DataFlow.OUTBOUND, classification='restricted'),
+            DataClassification(flow=DataFlow.OUTBOUND, classification='public'),
+        ],
+        properties=[
+            Property(
+                name='cdx:service:dataflow:downgrade-approval',
+                value='public;approval-id=APR-2026-014;method=pseudonymisation',
+            ),
+            Property(
+                name='cdx:service:dataflow:downgrade-justification',
+                value='Aggregated order metrics with direct identifiers removed',
+            ),
+        ],
+    )
+    status_page = Service(
+        name='status-page', bom_ref='svc-status-page', x_trust_boundary=True,
+        data=[
+            DataClassification(flow=DataFlow.INBOUND, classification='public'),
+            DataClassification(flow=DataFlow.INBOUND, classification='partner-data'),
+        ],
+    )
+    partner_feed = Service(
+        name='partner-feed', bom_ref='svc-partner-feed', x_trust_boundary=False,
+        data=[
+            DataClassification(flow=DataFlow.OUTBOUND, classification='partner-data'),
+        ],
+    )
+    notifications = Service(
+        name='notifications', bom_ref='svc-notifications', x_trust_boundary=False,
+    )
+    bom = _make_bom(services=[orders, analytics, status_page, partner_feed, notifications])
+    bom.dependencies = [
+        Dependency(orders.bom_ref, [
+            Dependency(analytics.bom_ref),
+            Dependency(notifications.bom_ref),
+        ]),
+        Dependency(analytics.bom_ref, [
+            Dependency(orders.bom_ref),
+            Dependency(status_page.bom_ref),
+        ]),
+        Dependency(partner_feed.bom_ref, [
+            Dependency(status_page.bom_ref),
+        ]),
+    ]
+    return bom
+
+
 def get_bom_with_nested_services() -> Bom:
     bom = _make_bom(services=[
         Service(
@@ -1713,6 +1790,7 @@ all_get_bom_funct_with_incomplete_deps = {
     get_bom_with_dependencies_hanging,
     get_bom_with_metadata_component_and_dependencies,
     get_bom_with_nested_services,
+    get_bom_with_service_dataflow_cycle,
     get_bom_with_services_complex,
     get_bom_with_services_simple,
     get_bom_with_licenses,

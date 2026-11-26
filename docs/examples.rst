@@ -31,6 +31,14 @@ Complex Deserialize
   :linenos:
 
 
+Service Data-Flow Approval
+--------------------------
+
+.. literalinclude:: ../examples/service_dataflow_approval.py
+  :language: python
+  :linenos:
+
+
 Complex Validation
 ------------------
 
