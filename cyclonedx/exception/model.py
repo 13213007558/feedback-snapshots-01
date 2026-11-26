@@ -143,3 +143,20 @@ class InvalidConfidenceException(CycloneDxModelException):
     The confidence of the evidence from 0 - 1, where 1 is 100% confidence.
     """
     pass
+
+
+class BomReferenceIntegrityException(CycloneDxModelException):
+    """
+    Raised when a BOM contains a broken relationship.
+
+    This happens when a dependency or a vulnerability target references a `bom-ref` that is not part of the BOM,
+    or when a `bom-ref` is missing/duplicated.
+    """
+    pass
+
+
+class BomIdentityLeakException(CycloneDxModelException):
+    """
+    Raised when a restricted BOM view is missing restricted details internally or still contains them publicly.
+    """
+    pass

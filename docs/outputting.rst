@@ -62,6 +62,34 @@ Alternatively, if the output format and schema version are constants, you can us
     bom_json: str = outputter.output_as_string()
 
 
+Restricted Partner Views
+------------------------
+
+Some BOMs describe components that must not be disclosed to every consumer.
+:mod:`cyclonedx.contrib.bom.views` renders the same BOM twice - an internal view
+that keeps everything, and a partner view in which restricted components are
+replaced by stable placeholders. Dependency edges and vulnerability targets are
+rewritten to the placeholders, so consumers can still see that a risk originates
+from a restricted dependency.
+
+Mark a component as restricted with the property ``urn:cdx:restricted:component``,
+or pass explicit ``bom-ref`` values / a predicate. Both views are re-parsed from
+JSON and XML and their relationship graphs are verified before being returned.
+
+.. code-block:: python
+
+    from cyclonedx.contrib.bom.views import make_bom_views
+
+    pair = make_bom_views(bom)
+    open('internal.json', 'w').write(pair.internal.json)
+    open('partner.json', 'w').write(pair.partner.json)
+
+The source BOM is not modified. The source BOM and both views are checked for
+dangling or duplicate references, and `cyclonedx.exception.model.BomReferenceIntegrityException`
+is raised if a relationship cannot be preserved. See
+:py:mod:`cyclonedx.contrib.bom.views` for the full API.
+
+
 Outputting to XML
 ------------------
 

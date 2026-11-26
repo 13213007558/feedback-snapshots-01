@@ -4,6 +4,7 @@
 
 * [Build & Serialize](complex_serialize.py)
 * [Deserialize](complex_deserialize.py)
+* [Restricted BOM views](restricted_bom_views.py)
 
 ## Data models
 

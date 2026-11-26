@@ -67,7 +67,13 @@ class BomRefDiscriminator:
         encountered value is assigned a newly generated unique identifier.
         """
         known_values = []
+        seen_ids = set()
         for bomref, _ in self._bomrefs:
+            # The same BomRef instance may be reachable more than once (e.g. a root component that is also part of the
+            # dependency graph). It is one reference, not a duplicate, so it must keep a single value.
+            if id(bomref) in seen_ids:
+                continue
+            seen_ids.add(id(bomref))
             value = bomref.value
             if value is None or value in known_values:
                 value = self._make_unique()

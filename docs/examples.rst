@@ -37,3 +37,11 @@ Complex Validation
 .. literalinclude:: ../examples/complex_validation.py
   :language: python
   :linenos:
+
+
+Restricted BOM Views
+--------------------
+
+.. literalinclude:: ../examples/restricted_bom_views.py
+  :language: python
+  :linenos:
