@@ -127,6 +127,17 @@ You can filter and group by these dimensions:
 
 
 
+### Metric label permissions [metric-label-permissions]
+
+Metric sets are accumulated in the agent with their full label set. Some labels are only approved for a subset of their values, and that approval can change while the agent is running. The [`metric_labels_allowlist`](/reference/configuration.md#config-metric-labels-allowlist) and [`metric_labels_denylist`](/reference/configuration.md#config-metric-labels-denylist) settings decide which labels are published:
+
+* The internal metric stores keep every label, so later collection cycles and internal aggregation still have the complete data.
+* Redaction happens when a metricset leaves the process. If a permission changes after a batch was collected but before it is sent, the queued batch is re-checked and only approved labels are published.
+* Removing a label can make two previously distinct series identical. Their samples are merged into one public series, and counters, timers and histograms keep the real totals (`count` and `sum`); gauges keep their latest value.
+
+This can be used to keep, for example, a short-lived health transaction name out of shared dashboards without losing the time it contributed to the aggregate.
+
+
 ### Prometheus metric set (beta) [prometheus-metricset]
 
 ::::{warning}

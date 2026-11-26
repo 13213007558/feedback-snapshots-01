@@ -897,6 +897,27 @@ This feature requires APM Server and Kibana >= 7.3.
 
 
 
+### `metric_labels_allowlist` [config-metric-labels-allowlist]
+
+| Environment | Django/Flask | Default |
+| --- | --- | --- |
+| `ELASTIC_APM_METRIC_LABELS_ALLOWLIST` | `METRIC_LABELS_ALLOWLIST` | None |
+
+Labels that may be published on metric sets, as a comma-separated list of glob patterns. A pattern without `=` matches a label key, while a pattern with `=` matches a specific `key=value` pair, for example `transaction.name=GET /health`. When this option is set, only matching labels are exported; the agent still keeps the full label set internally for aggregation and for later collection cycles. Samples whose labels collapse onto the same public series are merged, so their counts and durations are preserved.
+
+See [Metrics](metrics.md#metric-label-permissions) for more information.
+
+### `metric_labels_denylist` [config-metric-labels-denylist]
+
+| Environment | Django/Flask | Default |
+| --- | --- | --- |
+| `ELASTIC_APM_METRIC_LABELS_DENYLIST` | `METRIC_LABELS_DENYLIST` | None |
+
+Labels that must not be published on metric sets, using the same glob and `key=value` syntax as [`metric_labels_allowlist`](#config-metric-labels-allowlist). A label is exported only if it matches the allowlist (when configured) and does not match the denylist. Permissions are evaluated when a metricset leaves the process, so a change also applies to already queued batches that have not been sent yet.
+
+See [Metrics](metrics.md#metric-label-permissions) for more information.
+
+
 ### `global_labels` [config-global_labels]
 
 | Environment | Django/Flask | Default |

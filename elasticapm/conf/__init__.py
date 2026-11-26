@@ -200,6 +200,34 @@ class _ListConfigValue(_ConfigValue):
         instance._values[self.dict_key] = value
 
 
+class _MetricLabelConfigValue(_ConfigValue):
+    """Configuration value for metric label permissions.
+
+    Accepts a comma-separated string (environment variables), a list of glob
+    patterns, or a mapping of label key to allowed/denied values.
+    """
+
+    def __init__(self, dict_key, **kwargs) -> None:
+        kwargs["type"] = None
+        super(_MetricLabelConfigValue, self).__init__(dict_key, **kwargs)
+
+    def __set__(self, instance, value) -> None:
+        if isinstance(value, str):
+            value = [item.strip() for item in value.split(",") if item.strip()]
+        elif isinstance(value, dict):
+            value = dict(value)
+        elif isinstance(value, (list, tuple, set, frozenset)):
+            value = list(value)
+        elif value is None:
+            pass
+        elif isinstance(value, (bool, int, float)):
+            value = [str(value)]
+        else:
+            value = [value]
+        self._callback_if_changed(instance, value)
+        instance._values[self.dict_key] = value
+
+
 class _DictConfigValue(_ConfigValue):
     def __init__(self, dict_key, item_separator=",", keyval_separator="=", **kwargs) -> None:
         self.item_separator = item_separator
@@ -654,6 +682,8 @@ class Config(_ConfigBase):
     prometheus_metrics = _BoolConfigValue("PROMETHEUS_METRICS", default=False)
     prometheus_metrics_prefix = _ConfigValue("PROMETHEUS_METRICS_PREFIX", default="prometheus.metrics.")
     disable_metrics = _ListConfigValue("DISABLE_METRICS", type=starmatch_to_regex, default=[])
+    metric_labels_allowlist = _MetricLabelConfigValue("METRIC_LABELS_ALLOWLIST", default=None)
+    metric_labels_denylist = _MetricLabelConfigValue("METRIC_LABELS_DENYLIST", default=None)
     central_config = _BoolConfigValue("CENTRAL_CONFIG", default=True)
     api_request_size = _ConfigValue("API_REQUEST_SIZE", type=int, validators=[size_validator], default=768 * 1024)
     api_request_time = _DurationConfigValue("API_REQUEST_TIME", default=timedelta(seconds=10))

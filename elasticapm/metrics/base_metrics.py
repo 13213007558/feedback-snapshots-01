@@ -34,6 +34,7 @@ from collections import defaultdict
 from typing import Union
 
 from elasticapm.conf import constants
+from elasticapm.metrics.redaction import merge_metricsets, metricset_policy
 from elasticapm.utils.logging import get_logger
 from elasticapm.utils.module_import import import_string
 from elasticapm.utils.threading import IntervalTimer, ThreadManager
@@ -97,8 +98,17 @@ class MetricsRegistry(ThreadManager):
             logger.debug("Collecting metrics")
 
             for _, metricset in self._metricsets.items():
+                # The metric stores keep the full label set.  Queue the
+                # current public view; the transport re-checks it once more
+                # right before the batch leaves the process, so a permission
+                # withdrawn after this point is still honoured.
                 for data in metricset.collect():
                     self.client.queue(constants.METRICSET, data)
+
+    @property
+    def label_policy(self):
+        """The label permission that applies to metric egress right now."""
+        return metricset_policy(self)
 
     def start_thread(self, pid=None) -> None:
         super(MetricsRegistry, self).start_thread(pid=pid)
@@ -205,10 +215,48 @@ class MetricSet(object):
 
     def collect(self):
         """
-        Collects all metrics attached to this metricset, and returns it as a generator
-        with one or more elements. More than one element is returned if labels are used.
+        Collects all metrics attached to this metricset and returns the public
+        projection of the collected samples.
 
-        The format of the return value should be
+        With a label permission configured, labels that are no longer allowed
+        are removed and samples that collapse onto the same public series are
+        merged.  The metric stores keep their full label set, so subsequent
+        collection cycles and internal aggregation still have the original
+        information available.
+        """
+        for data in self.collect_public():
+            yield data
+
+    def collect_internal(self):
+        """Collect metrics with their full label set, without projecting them.
+
+        This is the raw form used for internal aggregation.  It must not be
+        used for anything that leaves the process.
+        """
+        return self._collect()
+
+    def collect_public(self, policy=None):
+        """Collect metrics and return their public, redacted projection.
+
+        ``policy`` defaults to the permission currently configured on the
+        client.  Passing a :class:`~elasticapm.metrics.redaction.MetricLabelPolicy`
+        explicitly is useful for callers that already hold the permission
+        that applied when a batch was captured.
+        """
+        if policy is None:
+            policy = self.label_policy
+        events = self._collect()
+        if policy is None:
+            return events
+        return merge_metricsets(events, policy)
+
+    def _collect(self):
+        """
+        Collects all metrics attached to this metricset, and returns a list
+        with one or more metricset events. More than one element is returned
+        if labels are used.
+
+        The format of the return value is
 
             {
                 "samples": {"metric.name": {"value": some_float}, ...},
@@ -222,35 +270,29 @@ class MetricSet(object):
             # iterate over a copy of the dict to avoid threading issues, see #717
             for (name, labels), counter in self._counters.copy().items():
                 if counter is not noop_metric:
-                    val = counter.val
+                    val = counter.read(reset=counter.reset_on_collect)
                     if val or not counter.reset_on_collect:
                         samples[labels].update({name: {"value": val}})
-                    if counter.reset_on_collect:
-                        counter.reset()
         if self._gauges:
             for (name, labels), gauge in self._gauges.copy().items():
                 if gauge is not noop_metric:
-                    val = gauge.val
+                    val = gauge.read(reset=gauge.reset_on_collect)
                     if val or not gauge.reset_on_collect:
                         samples[labels].update({name: {"value": val, "type": "gauge"}})
-                    if gauge.reset_on_collect:
-                        gauge.reset()
         if self._timers:
             for (name, labels), timer in self._timers.copy().items():
                 if timer is not noop_metric:
-                    val, count = timer.val
+                    val, count = timer.read(reset=timer.reset_on_collect)
                     if val or not timer.reset_on_collect:
                         sum_name = ".sum"
                         if timer._unit:
                             sum_name += "." + timer._unit
                         samples[labels].update({name + sum_name: {"value": val}})
                         samples[labels].update({name + ".count": {"value": count}})
-                    if timer.reset_on_collect:
-                        timer.reset()
         if self._histograms:
             for (name, labels), histo in self._histograms.copy().items():
                 if histo is not noop_metric:
-                    counts = histo.val
+                    counts = histo.read(reset=histo.reset_on_collect)
                     if counts or not histo.reset_on_collect:
                         # For the bucket values, we follow the approach described by Prometheus's
                         # histogram_quantile function
@@ -276,15 +318,18 @@ class MetricSet(object):
                         samples[labels].update(
                             {name: {"counts": counts, "values": bucket_midpoints, "type": "histogram"}}
                         )
-                    if histo.reset_on_collect:
-                        histo.reset()
+        events = []
+        for labels, sample in samples.items():
+            result = {"samples": sample, "timestamp": timestamp}
+            if labels:
+                result["tags"] = {k: v for k, v in labels}
+            events.append(self.before_yield(result))
+        return events
 
-        if samples:
-            for labels, sample in samples.items():
-                result = {"samples": sample, "timestamp": timestamp}
-                if labels:
-                    result["tags"] = {k: v for k, v in labels}
-                yield self.before_yield(result)
+    @property
+    def label_policy(self):
+        """The label permission that currently applies to this metricset."""
+        return metricset_policy(self)
 
     def before_collect(self) -> None:
         """
@@ -368,6 +413,14 @@ class Counter(BaseMetric):
             self._val = self._initial_value
         return self
 
+    def read(self, reset=False):
+        """Return the current value, optionally resetting it atomically."""
+        with self._lock:
+            value = self._val
+            if reset:
+                self._val = self._initial_value
+            return value
+
     @property
     def val(self):
         """Returns the current value of the counter"""
@@ -390,6 +443,13 @@ class Gauge(BaseMetric):
         """
         self._val = None
         super(Gauge, self).__init__(name, reset_on_collect=reset_on_collect)
+
+    def read(self, reset=False):
+        """Return the current value, optionally resetting it atomically."""
+        value = self._val
+        if reset:
+            self._val = 0
+        return value
 
     @property
     def val(self):
@@ -423,6 +483,15 @@ class Timer(BaseMetric):
             self._val = 0
             self._count = 0
 
+    def read(self, reset=False):
+        """Return ``(sum, count)``; when ``reset`` is true the reset is atomic."""
+        with self._lock:
+            value = self._val, self._count
+            if reset:
+                self._val = 0
+                self._count = 0
+            return value
+
     @property
     def val(self):
         with self._lock:
@@ -454,6 +523,14 @@ class Histogram(BaseMetric):
             pos += 1
         with self._lock:
             self._counts[pos] += count
+
+    def read(self, reset=False):
+        """Return the bucket counts; when ``reset`` is true the reset is atomic."""
+        with self._lock:
+            value = list(self._counts)
+            if reset:
+                self._counts = [0] * len(self._buckets)
+            return value
 
     @property
     def val(self):

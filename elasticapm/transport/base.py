@@ -32,6 +32,7 @@
 
 import gzip
 import io
+import json
 import os
 import queue as _queue
 import random
@@ -41,6 +42,7 @@ import time
 import timeit
 from collections import defaultdict
 
+from elasticapm.metrics.redaction import policy_from_config, project_metricset_event, reproject_batch_entries
 from elasticapm.utils import json_encoder
 from elasticapm.utils.logging import get_logger
 from elasticapm.utils.threading import ThreadManager
@@ -115,6 +117,7 @@ class Transport(ThreadManager):
 
         buffer = self._init_buffer()
         buffer_written = False
+        batch_metricsets = 0
         # add some randomness to timeout to avoid stampedes of several workers that are booted at the same time
         max_flush_time = (
             self._max_flush_time_seconds * random.uniform(0.9, 1.1) if self._max_flush_time_seconds else None
@@ -134,7 +137,7 @@ class Transport(ThreadManager):
             if event_type == "close":
                 if buffer_written:
                     try:
-                        self._flush(buffer)
+                        self._flush_batch(buffer, batch_metricsets)
                     except Exception as exc:
                         logger.error(
                             "Exception occurred while flushing the buffer "
@@ -144,13 +147,19 @@ class Transport(ThreadManager):
                 return  # time to go home!
 
             if data is not None:
-                data = self._process_event(event_type, data)
+                # Keep the captured payload unprojected in the buffer.  The
+                # batch is re-checked for metric label permissions at flush
+                # time, so a change after capture is still honoured without
+                # keeping a second uncompressed copy of every event in memory.
+                data = self._process_event(event_type, data, apply_label_policy=False)
                 if data is not None:
                     if not buffer_written:
                         # Write metadata just in time to allow for late metadata changes (such as in lambda)
                         self._write_metadata(buffer)
                     buffer.write((self._json_serializer({event_type: data}) + "\n").encode("utf-8"))
                     buffer_written = True
+                    if event_type == "metricset":
+                        batch_metricsets += 1
                     self._counts[event_type] += 1
 
             queue_size = 0 if buffer.fileobj is None else buffer.fileobj.tell()
@@ -175,7 +184,8 @@ class Transport(ThreadManager):
                 flush = True
             if flush:
                 if buffer_written:
-                    self._flush(buffer, forced_flush=forced_flush)
+                    self._flush_batch(buffer, batch_metricsets, forced_flush=forced_flush)
+                    batch_metricsets = 0
                 elif forced_flush and any(x in self.client.config.server_url for x in ("/localhost:", "/127.0.0.1:")):
                     # No data on buffer, but due to manual flush we should send
                     # an empty payload with flushed=true query param, but only
@@ -193,7 +203,7 @@ class Transport(ThreadManager):
                 )
                 self._flushed.set()
 
-    def _process_event(self, event_type, data):
+    def _process_event(self, event_type, data, apply_label_policy=True):
         # Run the data through processors
         for processor in self._processors:
             if not hasattr(processor, "event_types") or event_type in processor.event_types:
@@ -216,6 +226,12 @@ class Transport(ThreadManager):
                         exc_info=True,
                     )
                     return None
+        if apply_label_policy and event_type == "metricset":
+            # Apply the live label permission as a last gate.  This covers
+            # transports that record events directly in ``queue()`` without
+            # going through a batch flush.  The buffered batch is re-checked
+            # again at flush time.
+            data = project_metricset_event(data, self._metric_label_policy())
         return data
 
     def _init_buffer(self):
@@ -242,6 +258,64 @@ class Transport(ThreadManager):
             return ChilledQueue(maxsize=10000, chill_until=chill_until, max_chill_time=max_chill_time)
         else:
             return _queue.Queue(maxsize=10000)
+
+    def _metric_label_policy(self):
+        """Return the label policy that applies to metric egress right now."""
+        client = self.client
+        config = getattr(client, "config", None) if client is not None else None
+        return policy_from_config(config)
+
+    def _flush_batch(self, buffer, batch_metricsets, forced_flush=False) -> None:
+        """Flush a captured batch, re-projecting metricsets against the live policy.
+
+        The batch is captured when events arrive, but the label permission can
+        change before the batch is actually published.  When the batch contains
+        metricsets, the buffered NDJSON is parsed and the public projection is
+        computed for the permission in effect at send time.  Non-metric lines
+        are re-emitted byte-for-byte; the metric stores keep their full labels.
+
+        Batches without metricsets are flushed exactly as before and are never
+        re-serialized by this path.
+        """
+        if not batch_metricsets:
+            self._flush(buffer, forced_flush=forced_flush)
+            return
+
+        try:
+            fileobj = buffer.fileobj
+            buffer.close()
+            compressed = fileobj.getbuffer()
+            try:
+                raw = gzip.decompress(bytes(compressed)).decode("utf-8")
+            finally:
+                compressed.release()
+
+            entries = []
+            for line in raw.splitlines():
+                if not line:
+                    continue
+                record = json.loads(line)
+                if "metadata" in record:
+                    entries.append(("metadata", line, None))
+                    continue
+                (event_type, payload), = record.items()
+                entries.append((event_type, line, payload if event_type == "metricset" else None))
+
+            reprojected = self._init_buffer()
+            for event_type, line, payload in reproject_batch_entries(
+                entries, self._metric_label_policy()
+            ):
+                if line is None:
+                    line = self._json_serializer({event_type: payload})
+                reprojected.write((line + "\n").encode("utf-8"))
+        except Exception:
+            # Never fall back to the unprojected buffer: that would publish
+            # labels whose permission was already withdrawn.
+            logger.error("Failed to re-project metric labels before sending; dropping batch", exc_info=True)
+            self.handle_transport_fail()
+            return
+
+        self._flush(reprojected, forced_flush=forced_flush)
 
     def _flush(self, buffer, forced_flush=False) -> None:
         """
