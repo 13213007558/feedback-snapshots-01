@@ -51,6 +51,25 @@ def build_structured_result(state: State) -> tuple[dict[str, JsonValue], bool]:
     return result, has_exception
 
 
+def build_public_result(state: State) -> tuple[dict[str, JsonValue], bool]:
+    """Build the source-aware public configuration view."""
+    from .provenance import build_public_structured_result
+
+    return build_public_structured_result(state)
+
+
+def build_public_structured_result(state: State) -> tuple[dict[str, JsonValue], bool]:
+    """Alias for :func:`build_public_result` under the structured-result naming."""
+    return build_public_result(state)
+
+
+def collect_public_conf(conf: ConfigSet, keys: list[str]) -> tuple[dict[str, JsonValue], bool]:
+    """Collect an explained public projection for one configuration set."""
+    from .provenance import collect_public_conf as collect
+
+    return collect(conf, keys)
+
+
 def _collect_conf(conf: ConfigSet, keys: list[str]) -> tuple[dict[str, JsonValue], bool]:
     data: dict[str, JsonValue] = {}
     has_exception = False
@@ -115,7 +134,10 @@ def write_output_file(output_file: Path, output: str) -> None:
 
 
 __all__ = [
+    "build_public_result",
+    "build_public_structured_result",
     "build_structured_result",
+    "collect_public_conf",
     "format_config_error",
     "write_output",
     "write_output_file",

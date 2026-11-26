@@ -7,12 +7,13 @@ __lazy_modules__ = [
 ]
 
 import re
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import tomli_w
 from colorama import Fore
 
 from .common import build_structured_result, write_output
+from .provenance import build_public_structured_result, public_option_enabled
 
 if TYPE_CHECKING:
     from tox.session.state import State
@@ -42,7 +43,21 @@ def show_config_toml(state: State) -> int:
     :returns: the exit code
 
     """
-    result, has_exception = build_structured_result(state)
+    if public_option_enabled(state):
+        explained, has_exception = build_public_structured_result(state)
+        result: dict[str, Any] = {"public": True}
+        env_sections = explained.get("env")
+        if isinstance(env_sections, dict):
+            result["env"] = {
+                name: section["values"]
+                for name, section in env_sections.items()
+                if isinstance(section, dict) and isinstance(section.get("values"), dict)
+            }
+        tox_section = explained.get("tox")
+        if isinstance(tox_section, dict) and isinstance(tox_section.get("values"), dict):
+            result["tox"] = tox_section["values"]
+    else:
+        result, has_exception = build_structured_result(state)
     output = tomli_w.dumps(result).removesuffix("\n")
     write_output(output, state.conf.options.output_file, state.conf.options.is_colored, colorize)
     return -1 if has_exception else 0

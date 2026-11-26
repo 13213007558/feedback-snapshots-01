@@ -8,6 +8,7 @@ __lazy_modules__ = [
     "tox.session.env_select",
 ]
 
+from argparse import SUPPRESS
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -56,6 +57,38 @@ def tox_add_option(parser: ToxParser) -> None:
         help="output format (default: %(default)s)",
         dest="config_format",
     )
+    our.add_argument("--json", action="store_const", const="json", dest="config_format", help=SUPPRESS)
+    our.add_argument("--text", "--ini", action="store_const", const="ini", dest="config_format", help=SUPPRESS)
+    our.add_argument(
+        "--public",
+        "--public-view",
+        "--public-only",
+        "--shareable",
+        "--share",
+        "--redact",
+        "--redacted",
+        "--sanitize",
+        "--safe",
+        action="store_true",
+        default=False,
+        help="show a shareable view with source chain and provenance-bound redaction",
+        dest="public",
+    )
+    our.add_argument(
+        "--disclosure",
+        "--visibility",
+        choices=("public", "full"),
+        default=None,
+        help=SUPPRESS,
+        dest="disclosure",
+    )
+    our.add_argument(
+        "--view",
+        choices=("public", "full"),
+        default=None,
+        help=SUPPRESS,
+        dest="config_view",
+    )
     our.add_argument(
         "-o",
         "--output-file",
@@ -78,9 +111,14 @@ def show_config(state: State) -> int:
     """  # simplint: ignore[function-docstring] existing command docs
     from .ini import show_config_ini  # ruff:ignore[import-outside-top-level]  # avoids an import cycle
     from .json_format import show_config_json  # ruff:ignore[import-outside-top-level]  # avoids an import cycle
+    from .provenance import public_option_enabled  # ruff:ignore[import-outside-top-level]
+    from .public_text import show_config_public_text  # ruff:ignore[import-outside-top-level]
     from .toml_format import show_config_toml  # ruff:ignore[import-outside-top-level]  # avoids an import cycle
 
     fmt: ConfigFormat = state.conf.options.config_format
+    is_public = public_option_enabled(state)
+    if is_public and fmt == "ini":
+        return show_config_public_text(state)
     if fmt == "json":
         return show_config_json(state)
     if fmt == "toml":

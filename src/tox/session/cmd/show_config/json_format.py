@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Final
 from colorama import Fore
 
 from .common import build_structured_result, write_output
+from .provenance import build_public_structured_result, public_option_enabled
 
 if TYPE_CHECKING:
     from tox.session.state import State
@@ -35,7 +36,9 @@ def show_config_json(state: State) -> int:
     :returns: the exit code
 
     """
-    result, has_exception = build_structured_result(state)
+    result, has_exception = (
+        build_public_structured_result(state) if public_option_enabled(state) else build_structured_result(state)
+    )
     write_output(json.dumps(result, indent=2), state.conf.options.output_file, state.conf.options.is_colored, colorize)
     return -1 if has_exception else 0
 

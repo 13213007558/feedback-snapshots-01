@@ -1722,6 +1722,16 @@ When an environment fails, use these techniques to investigate:
    structure as ``tox.toml`` (``env.<name>`` for environments, ``tox`` for core settings). The ``-o`` flag always writes
    without color codes.
 
+   For a shareable support report, add ``--public`` to the text or JSON output. The public view keeps the selected
+   source, inheritance candidates, replacement chain, and resolution status (``resolved``, ``default``, or
+   ``unresolved``), while masking values derived from sensitive environment sources. Adjacent public arguments stay
+   visible; normal ``tox run`` execution and the default ``tox config`` output continue to use the full resolved values.
+
+   .. code-block:: bash
+
+       tox config -e support -k commands --public
+       tox config -e support -k commands --public --format json -o public-config.json
+
    To get the list of environments programmatically, query ``-k type`` — the ``env`` keys in the output are the
    environment names:
 
