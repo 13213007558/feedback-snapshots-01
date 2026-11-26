@@ -1,0 +1,30 @@
+{
+  "tickets": [
+    {
+      "id": "WO-2026-224",
+      "title": "导出报表 PDF 排版错乱，客户催办",
+      "requester": "华东大客户成功组",
+      "status": "处理中",
+      "updated_at": "2026-11-25T14:30:00+00:00",
+      "public_field_order": [
+        "summary",
+        "details"
+      ],
+      "internal_fields": [
+        "internal_triage"
+      ],
+      "withdrawn_fields": {
+        "agent_direct_line": {
+          "withdrawn_at": "2026-11-24T10:00:00+00:00",
+          "reason": "值班号码迁移，旧直线停用并撤回对外展示"
+        }
+      },
+      "raw": {
+        "summary": "<p>客户在导出 <strong>季度报表</strong> 为 PDF 后，发现<em>表头与数据错位</em>。</p>\n<p>可参考 <a href=\"https://support.example.com/report-demo\">示例报表</a>，复现步骤如下：</p>\n<ul><li>打开报表页</li><li>点击“导出 PDF”</li><li>查看第 2 页</li></ul>\n<blockquote>客户原话：导出后“合计”行跑到了下一页。</blockquote>\n<p><img src=\"x\" alt=\"broken\" onerror=\"alert('XSSCANARY7731')\"></p>\n<p><a href=\"javascript:alert(1)\">恶意协议链接</a></p>",
+        "details": "<h3>处理进展</h3>\n<p>研发已定位为分页样式问题，预计本周内修复。</p>\n<p><span class=\"internal-tag\">内部标签：VIP 客户 / 底价 SECRET-BID-9001</span></p>\n<div data-internal=\"risk\">风控内部备注：RISK-SECRET-5566 暂不外露。</div>\n<internal-note>自定义内部节点 INTERNAL-CUSTOM-3133</internal-note>\n<p>对外结论：问题可在 6.4.x 版本规避。</p>",
+        "agent_direct_line": "<p>值班直线（该字段已撤回）：<strong>WITHDRAWN-HOTLINE-4242</strong> / 分机 8899。</p>",
+        "internal_triage": "<p>内部定级 P0，仅限值班同学查看：INTERNAL-TRIAGE-6677。</p>"
+      }
+    }
+  ]
+}
