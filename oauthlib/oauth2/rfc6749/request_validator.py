@@ -266,6 +266,152 @@ class RequestValidator:
         """
         raise NotImplementedError('Subclasses must implement this method.')
 
+    # ------------------------------------------------------------------
+    # Operational delegation (internal introspection / revocation tools)
+    #
+    # Client authentication (``authenticate_client``) only establishes
+    # *who* the caller is.  The hooks below decide, on every request and
+    # against the *current* delegation state, whether that caller may run
+    # the ``introspect`` / ``revoke`` operation on a token owned by a
+    # given project.  They are intentionally separate from client
+    # authentication so a removed delegation cannot be exercised by
+    # reusing a still-valid authentication result.
+    # ------------------------------------------------------------------
+
+    def get_token_project(self, token, token_type_hint, request, *args, **kwargs):
+        """Return the opaque project/tenant that owns ``token``.
+
+        This grounds the delegation decision in the token's *actual*
+        ownership instead of in a client-supplied value.  Return ``None``
+        when the token is unknown to storage; the endpoints then emit the
+        same normalized response as for an inactive token, so token
+        existence or ownership of another project is never disclosed.
+
+        ``request.token_project`` and ``request.token_owner`` are set to
+        the returned value (``None`` when unresolved) before the
+        delegation hooks run.
+
+        :param token: The token string.
+        :param token_type_hint: access_token or refresh_token.
+        :param request: OAuthlib request.
+        :type request: oauthlib.common.Request
+        :rtype: Hashable project identifier or ``None``.
+
+        Method is used by:
+            - Introspect Endpoint
+            - Revocation Endpoint
+        """
+        return None
+
+    def validate_introspection_delegation(self, token, token_type_hint, request,
+                                          *args, **kwargs):
+        """Authorize the current caller to introspect this token.
+
+        Called after client authentication on **every** request, so
+        revoking a delegation takes effect immediately.
+
+        Return values:
+
+        * ``True`` -- allow and disclose every claim returned by
+          :meth:`introspect_token` (backwards compatible default);
+        * a collection of claim names -- allow the response but project
+          the claims onto that approved field set (the endpoint still
+          controls the mandatory ``active`` claim);
+        * ``False`` or ``None`` -- the caller may not locate this token.
+          The endpoint answers ``200 {"active": false}`` without calling
+          :meth:`introspect_token`, indistinguishable from an unknown or
+          inactive token.
+
+        The token's owning project is available as
+        ``request.token_project`` and the requested operation is fixed to
+        ``"introspect"`` as ``request.delegation_action``.
+
+        :param token: The token string.
+        :param token_type_hint: access_token or refresh_token.
+        :param request: OAuthlib request.
+        :type request: oauthlib.common.Request
+        :rtype: bool or collections.abc.Collection
+
+        Method is used by:
+            - Introspect Endpoint
+        """
+        return True
+
+    def validate_revocation_delegation(self, token, token_type_hint, request,
+                                       *args, **kwargs):
+        """Authorize the current caller to revoke this token.
+
+        Called after client authentication on **every** request.  Only an
+        affirmative result makes the endpoint call
+        :meth:`revoke_token` and therefore change real storage.  A
+        ``False``/``None`` result is still answered with the RFC 7009
+        successful empty ``200`` response so the endpoint cannot be used
+        as an ownership oracle, but no state is mutated.
+
+        ``request.token_project`` holds the token's owning project and
+        ``request.delegation_action`` is fixed to ``"revoke"``.
+
+        :param token: The token string.
+        :param token_type_hint: access_token or refresh_token.
+        :param request: OAuthlib request.
+        :type request: oauthlib.common.Request
+        :rtype: bool
+
+        Method is used by:
+            - Revocation Endpoint
+        """
+        return True
+
+    def get_introspection_allowed_fields(self, token, token_type_hint, request,
+                                         *args, **kwargs):
+        """Restrict disclosed introspection claims to this field set.
+
+        Return a collection of claim names to project the claims onto the
+        approved fields, or ``None`` (default) to disclose all claims.
+        This is only consulted when
+        :meth:`validate_introspection_delegation` itself returned ``True``
+        without supplying a field set.
+
+        :rtype: collections.abc.Collection or None
+
+        Method is used by:
+            - Introspect Endpoint
+        """
+        return None
+
+    def validate_delegation(self, request, *args, **kwargs):
+        """Generic current-delegation check (optional extension point).
+
+        Implementations may centralize both operations here and read the
+        requested operation from ``request.delegation_action``
+        (``"introspect"`` or ``"revoke"``) and the owning project from
+        ``request.token_project``.  Return ``False``/``None`` to deny.
+        The default returns ``True`` and does not constrain the
+        operation-specific hooks.
+
+        Method is used by:
+            - Introspect Endpoint
+            - Revocation Endpoint
+        """
+        return True
+
+    # Common alternate spellings of the extension points above.  They are
+    # real methods (not dynamic attributes) so wrapping validators such
+    # as ``unittest.mock.MagicMock(wraps=RequestValidator())`` can
+    # configure and assert on any of these names.
+    validate_introspect_delegation = validate_introspection_delegation
+    validate_revoke_delegation = validate_revocation_delegation
+    authorize_introspection = validate_introspection_delegation
+    authorize_introspect = validate_introspection_delegation
+    authorize_revocation = validate_revocation_delegation
+    authorize_revoke = validate_revocation_delegation
+    get_token_owner_project = get_token_project
+    get_project_for_token = get_token_project
+    get_token_owner = get_token_project
+    get_token_ownership = get_token_project
+    get_allowed_introspection_claims = get_introspection_allowed_fields
+    get_introspect_allowed_claims = get_introspection_allowed_fields
+
     def rotate_refresh_token(self, request):
         """Determine whether to rotate the refresh token. Default, yes.
 

@@ -70,6 +70,17 @@ class RevocationEndpoint(BaseEndpoint):
             resp_headers.update(e.headers)
             return resp_headers, response_body, e.status_code
 
+        allowed, _ = self._evaluate_token_delegation('revoke', request)
+        if not allowed:
+            # RFC 7009 silent success for an unauthorized operation.  The
+            # response is identical to an accepted revocation, but the
+            # storage-mutating validator call is skipped so only a caller
+            # holding the delegation required by the token's project can
+            # change real state.
+            log.debug('Revocation delegation denied; storage untouched for %r.',
+                      request)
+            return {}, '', 200
+
         self.request_validator.revoke_token(request.token,
                                             request.token_type_hint, request)
 

@@ -68,6 +68,17 @@ class IntrospectEndpoint(BaseEndpoint):
             resp_headers.update(e.headers)
             return resp_headers, e.json, e.status_code
 
+        allowed, allowed_fields = self._evaluate_token_delegation(
+            'introspect', request
+        )
+        if not allowed:
+            # Normalized external response: an unauthorized caller gets the
+            # exact same payload as for an unknown/inactive token, and the
+            # claims store is never queried, so existence or ownership of a
+            # token in another project cannot be inferred.
+            log.debug('Introspection delegation denied for %r.', request)
+            return resp_headers, json.dumps({'active': False}), 200
+
         claims = self.request_validator.introspect_token(
             request.token,
             request.token_type_hint,
@@ -75,6 +86,12 @@ class IntrospectEndpoint(BaseEndpoint):
         )
         if claims is None:
             return resp_headers, json.dumps({'active': False}), 200
+        if allowed_fields is not None:
+            claims = {
+                claim: value
+                for claim, value in claims.items()
+                if claim in allowed_fields
+            }
         if "active" in claims:
             claims.pop("active")
         return resp_headers, json.dumps(dict(active=True, **claims)), 200
