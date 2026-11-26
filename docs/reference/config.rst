@@ -552,6 +552,34 @@ the top level of ``tox.toml``. Placing these options in an environment section (
        When tox is invoked with the ``--no-provision`` flag, the provision won't be attempted,  tox will fail instead.
 
 .. conf::
+    :keys: run_scope
+    :default: false
+
+    Keep the environments selected by the run, and the approvals to prepare the tox version and to start a project
+    command, when tox provisions a newer tox and re-executes itself (see :ref:`provision_tox_env`). It is also turned
+    on by ``--run-scope``.
+
+    With the setting on, the run writes the environments it selected to ``run.scope.json`` inside the work directory and
+    the provisioned tox selects exactly those; its own defaults, :ref:`env_list` and labels cannot add another one. The
+    provisioned tox reads the record again before preparing its environment and before each project command, so
+    withdrawing an approval while it reads the configuration stops that command before it starts and tells the caller
+    to approve it again. A run that needs no provisioning writes and checks the same record, so it follows the same
+    rule.
+
+    Every process appends what it decided - its arguments, the selected environments, the environments still approved
+    and the command that actually started - to ``run.scope.plan.ndjson`` beside the record, so the outer and inner
+    decisions can be compared. The environment variable ``TOX_RUN_SCOPE_FILE`` points the re-executed tox at the
+    record.
+
+.. conf::
+    :keys: run_scope_approved
+    :default: <every selected environment>
+
+    The environments that may start a project command when :ref:`run_scope` is set. When unset, every selected
+    environment may start a command. Narrowing it here means the provisioned tox, and a later run that inherits the
+    record, refuse to start a command in the environments left out.
+
+.. conf::
     :keys: env_list, envlist
     :default: <empty list>
     :version_added: 1.0

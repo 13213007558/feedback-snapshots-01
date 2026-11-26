@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, NamedTuple, cast
 
+from tox import run_scope
 from tox.config.types import Command
 from tox.execute.api import Outcome, StdinSource
 from tox.report import HandledError
@@ -100,6 +101,8 @@ def _run_commands(  # keeps the signature
         # importing this here to avoid circular import
         from tox.plugin.manager import MANAGER  # ruff:ignore[import-outside-top-level]
 
+        # re-read the approvals before anything of the environment changes, once its setup finished
+        run_scope.check_command(tox_env.name)
         chdir = tox_env.conf.get("change_dir", Path)
         chdir.mkdir(exist_ok=True, parents=True)
         ignore_errors = tox_env.conf.get("ignore_errors", bool)
@@ -143,13 +146,15 @@ def run_command_set(  # ruff:ignore[too-many-arguments]  # public signature
     """
 
     def _execute(cmd: Command, run_id: str) -> Outcome:
-        return tox_env.execute(
+        outcome = tox_env.execute(
             cmd.args,
             cwd=cwd,
             stdin=StdinSource.USER if getattr(tox_env.options, "no_capture", False) else StdinSource.user_only(),
             show=True,
             run_id=run_id,
         )
+        run_scope.record_launch(cmd.args)
+        return outcome
 
     exit_code = Outcome.OK
     for at, cmd in enumerate(tox_env.conf.get(key, list[Command])):

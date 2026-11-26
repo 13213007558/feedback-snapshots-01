@@ -36,6 +36,8 @@ from tox.config.main import Config
 from tox.config.source.discover import discover_source
 from tox.config.types import EnvList
 from tox.report import HandledError
+from tox.run_scope import RunScope
+from tox.run_scope import active as active_run_scope
 from tox.tox_env.api import ToxEnvCreateArgs
 from tox.tox_env.errors import RunnerUnavailable, Skip
 from tox.tox_env.package import PackageToxEnv
@@ -350,14 +352,19 @@ class EnvSelector:
 
     def _env_name_to_active(self) -> dict[str, bool]:
         env_name_to_active_map = {}
+        scope = active_run_scope()
+        keep_scope = scope is not None and scope.envs is not None
         for a_collection, is_active in self._collect_names():
             for name in a_collection:
                 self._ensure_env_name_is_path_safe(name)
                 if name not in env_name_to_active_map:
                     env_name_to_active_map[name] = is_active
         # for factor/label selection update the active flag
+        options = self._state.conf.options
+        selection = getattr(options, "labels", []) or getattr(options, "factors", [])
         if (
-            not (getattr(self._state.conf.options, "labels", []) or getattr(self._state.conf.options, "factors", []))
+            not keep_scope
+            and not selection
             # if no active environment is defined fallback to py
             and self.on_empty_fallback_py
             and not any(env_name_to_active_map.values())
@@ -372,6 +379,13 @@ class EnvSelector:
             if self._provision[0]:
                 # The provisioned tox may support configuration that this version does not.
                 return
+        scope = active_run_scope()
+        if scope is not None and scope.envs is not None:
+            self._enforce_scope(scope)
+            # keep the environments the outer process selected; names only the branch ignored stay inactive
+            yield scope.envs, True
+            yield (name for name in self._state.conf if name not in set(scope.envs)), False
+            return
         env_list, everything_active = self._state.conf.core.get("env_list", EnvList), False
         if self._cli_envs is None or self._cli_envs.is_default_list:
             yield env_list, True
@@ -386,6 +400,27 @@ class EnvSelector:
         )
         if label_envs:
             yield label_envs.keys(), False
+
+    def _enforce_scope(self, scope: RunScope) -> None:
+        if self._cli_envs is not None and self._cli_envs.is_all:
+            msg = "the outer tox process selected specific environments, so ALL cannot be used in this invocation"
+            raise HandledError(msg)
+        if self._cli_envs is None or self._cli_envs.is_default_list:
+            return
+        config_envs = set(self._state.conf)
+        selected = set(scope.envs or ())
+        if extra := [name for name in self._cli_envs if name not in selected]:
+            if missing := [name for name in extra if name not in config_envs]:
+                msg = (
+                    f"run scope selected {', '.join(scope.envs or ())}, but the configuration no longer defines "
+                    f"{', '.join(missing)}"
+                )
+            else:
+                msg = (
+                    f"run scope selected {', '.join(scope.envs or ())}, so {', '.join(extra)} cannot run in this "
+                    f"invocation"
+                )
+            raise HandledError(msg)
 
     @property
     def _cli_envs(self) -> CliEnv | None:
@@ -666,6 +701,10 @@ class EnvSelector:
     def _mark_active(self) -> None:
         labels = set(getattr(self._state.conf.options, "labels", []))
         factors = self._parse_factors()
+        scope = active_run_scope()
+        if scope is not None and scope.envs is not None:
+            # the outer process already turned labels and factors into these names; do not grow the set again
+            labels, factors = set(), ()
 
         assert self._defined_envs_ is not None  # ruff:ignore[assert]  # invariant, narrows type
         if labels or factors:

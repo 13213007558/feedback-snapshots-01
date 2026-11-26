@@ -64,8 +64,11 @@ def main(args: Sequence[str]) -> int:
 
     """
     state = setup_state(args)
+    from . import run_scope  # ruff:ignore[import-outside-top-level]  # avoids an import cycle
     from .provision import provision  # ruff:ignore[import-outside-top-level]  # avoids an import cycle
 
+    run_scope.register_config(state.conf.core)
+    run_scope.prepare(state)
     if (result := provision(state)) is not False:
         return result
     # internal access

@@ -19,6 +19,15 @@
       "description": "Deprecated: use 'tox_root' instead",
       "deprecated": true
     },
+    "package_root": {
+      "type": "string",
+      "description": "indicates where the packaging root file exists (historically setup.py file or pyproject.toml now)"
+    },
+    "setupdir": {
+      "$ref": "#/properties/package_root",
+      "description": "Deprecated: use 'package_root' instead",
+      "deprecated": true
+    },
     "work_dir": {
       "type": "string",
       "description": "working directory"
@@ -58,6 +67,17 @@
         "$ref": "#/definitions/subs"
       },
       "description": "inherit missing keys from these sections"
+    },
+    "run_scope": {
+      "type": "boolean",
+      "description": "keep the selected environments and approvals when tox provisions a newer version"
+    },
+    "run_scope_approved": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/subs"
+      },
+      "description": "environments that may start a project command when run_scope is set (unset means every selected one)"
     },
     "min_version": {
       "type": "string",
@@ -118,15 +138,6 @@
     "isolated_build_env": {
       "$ref": "#/properties/package_env",
       "description": "Deprecated: use 'package_env' instead",
-      "deprecated": true
-    },
-    "package_root": {
-      "type": "string",
-      "description": "indicates where the packaging root file exists (historically setup.py file or pyproject.toml now)"
-    },
-    "setupdir": {
-      "$ref": "#/properties/package_root",
-      "description": "Deprecated: use 'package_root' instead",
       "deprecated": true
     },
     "env_run_base": {
@@ -627,7 +638,10 @@
           "type": "string"
         }
       },
-      "required": ["replace", "name"],
+      "required": [
+        "replace",
+        "name"
+      ],
       "additionalProperties": false
     },
     "replace_ref": {
@@ -669,7 +683,9 @@
           "type": "string"
         }
       },
-      "required": ["replace"],
+      "required": [
+        "replace"
+      ],
       "additionalProperties": false
     },
     "replace_posargs": {
@@ -696,7 +712,9 @@
           "type": "string"
         }
       },
-      "required": ["replace"],
+      "required": [
+        "replace"
+      ],
       "additionalProperties": false
     },
     "replace_glob": {
@@ -729,7 +747,10 @@
           "type": "string"
         }
       },
-      "required": ["replace", "pattern"],
+      "required": [
+        "replace",
+        "pattern"
+      ],
       "additionalProperties": false
     },
     "replace_if": {
@@ -751,7 +772,11 @@
           "type": "string"
         }
       },
-      "required": ["replace", "condition", "then"],
+      "required": [
+        "replace",
+        "condition",
+        "then"
+      ],
       "additionalProperties": false
     },
     "replace_object": {
@@ -776,7 +801,9 @@
     },
     "factor_range_dict": {
       "type": "object",
-      "required": ["prefix"],
+      "required": [
+        "prefix"
+      ],
       "properties": {
         "prefix": {
           "type": "string"
@@ -796,7 +823,9 @@
     },
     "factor_values_dict": {
       "type": "object",
-      "required": ["values"],
+      "required": [
+        "values"
+      ],
       "properties": {
         "values": {
           "type": "array",
@@ -819,7 +848,9 @@
         "properties": {
           "prefix": {}
         },
-        "required": ["prefix"]
+        "required": [
+          "prefix"
+        ]
       },
       "additionalProperties": {
         "oneOf": [
@@ -862,7 +893,9 @@
         },
         {
           "type": "object",
-          "required": ["product"],
+          "required": [
+            "product"
+          ],
           "properties": {
             "product": {
               "type": "array",

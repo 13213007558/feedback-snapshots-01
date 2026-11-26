@@ -626,6 +626,15 @@ invocations are forwarded to the tox installed inside ``.tox/.tox`` (referred to
 This allows tox to automatically set up itself with all its plugins for the current project. If the host tox satisfies
 the constraints no provisioning is done (to avoid setup cost and indirection).
 
+When a run may not prepare the tox version or start project commands in every environment it selects - for example a
+build system that grants access per environment and may withdraw it - turn on :ref:`run_scope`. The outer tox then
+records the environments it selected and the approvals it holds in ``run.scope.json`` inside the work directory, and
+the provisioned tox selects exactly those environments and checks the record again before it prepares the tox
+environment and before each project command. Withdrawing an approval while the provisioned tox reads the configuration
+stops that command before it starts, and the error says to approve it again. A run that needs no provisioning writes
+and checks the same record, so it follows the same rule. Both processes append their arguments, selection and launched
+command to ``run.scope.plan.ndjson`` beside the record.
+
 .. note::
 
     The provisioning environment (``.tox`` by default) does **not** inherit settings from ``env_run_base`` (TOML) or

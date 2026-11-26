@@ -758,6 +758,8 @@ class Parsed(Namespace):
 
     #: whether provisioning is skipped and fails instead, or the path its metadata is written to
     no_provision: bool | str
+    #: whether the provisioned tox keeps this run's environment selection and approvals
+    run_scope: bool
     #: whether the provisioning environment is kept when ``recreate`` is set
     no_recreate_provision: bool
     #: the directory of the development environment

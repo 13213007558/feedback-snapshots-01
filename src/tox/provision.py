@@ -85,6 +85,14 @@ def tox_add_option(parser: ArgumentParser) -> None:
         action="store_true",
     )
     parser.add_argument(
+        "--run-scope",
+        dest="run_scope",
+        action="store_true",
+        default=False,
+        help="keep the environments selected here, and the approvals to prepare tox and run project commands, "
+        "when tox provisions a newer version and re-executes itself",
+    )
+    parser.add_argument(
         "-r",
         "--recreate",
         dest="recreate",
@@ -286,13 +294,26 @@ def run_provision(name: str, state: State) -> int:
 
 
 def _setup_and_execute(tox_env: PythonRun, env_python: Path, state: State) -> int:
+    from . import run_scope  # ruff:ignore[import-outside-top-level]  # avoids an import cycle
+
+    scope = run_scope.active()
+    if scope is not None:
+        # re-check the preparation approval right before the environment and its requirements are installed, and let
+        # a caller withdraw it between preparation and the re-exec
+        run_scope.check_prepare(state)
     tox_env.setup()
     # -m adds the start directory to sys.path, where another user may have planted a module.
     args: list[str] = [str(env_python), "-P" if tox_env.base_python.version_info >= (3, 11) else "-I", "-m", "tox"]
     if state.conf.options.is_colored and "--colored" not in state.args:
         args.extend(["--colored", "yes"])
     args.extend(state.args)
-    outcome = tox_env.execute(cmd=args, stdin=StdinSource.user_only(), show=True, run_id="provision", cwd=Path.cwd())
+    env = dict(tox_env.environment_variables)
+    if scope is not None:
+        # point the provisioned tox at the scope recorded by this process; it selects and approves the same set
+        env[run_scope.SCOPE_FILE_ENV] = str(run_scope.scope_path(state.conf.core))
+    outcome = tox_env.execute(
+        cmd=args, stdin=StdinSource.user_only(), show=True, run_id="provision", cwd=Path.cwd(), env=env
+    )
     return cast("int", outcome.exit_code)
 
 

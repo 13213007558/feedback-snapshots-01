@@ -448,6 +448,7 @@ class ToxEnv(ABC):  # ruff:ignore[too-many-public-methods]  # public facade
         executor: Execute | None = None,
         *,
         capture: bool = False,
+        env: dict[str, str] | None = None,
     ) -> Outcome:
         """Execute a command and wait for its outcome.
 
@@ -458,6 +459,7 @@ class ToxEnv(ABC):  # ruff:ignore[too-many-public-methods]  # public facade
         :param run_id: label for command logs
         :param executor: executor override, or ``None`` for this environment's executor
         :param capture: capture output even in no-capture mode
+        :param env: environment variables to add to the ones of the environment, or ``None`` to add none
 
         :returns: completed command outcome
 
@@ -466,7 +468,7 @@ class ToxEnv(ABC):  # ruff:ignore[too-many-public-methods]  # public facade
         :raises RuntimeError: when the execution produced no outcome
 
         """
-        with self.execute_async(cmd, stdin, show, cwd, run_id, executor, capture=capture) as status:
+        with self.execute_async(cmd, stdin, show, cwd, run_id, executor, capture=capture, env=env) as status:
             while status.wait() is None:
                 pass  # pragma: no cover  # untested error path
         if status.outcome is None:  # pragma: no cover # this should not happen
@@ -484,6 +486,7 @@ class ToxEnv(ABC):  # ruff:ignore[too-many-public-methods]  # public facade
         executor: Execute | None = None,
         *,
         capture: bool = False,
+        env: dict[str, str] | None = None,
     ) -> Generator[ExecuteStatus, None, None]:
         """Run a command while exposing its execution status.
 
@@ -494,6 +497,7 @@ class ToxEnv(ABC):  # ruff:ignore[too-many-public-methods]  # public facade
         :param run_id: label for command logs
         :param executor: executor override, or ``None`` for this environment's executor
         :param capture: capture output even in no-capture mode
+        :param env: environment variables to add to the ones of the environment, or ``None`` to add none
 
         :raises SystemExit: if execution was interrupted
         :raises ValueError: if the command is empty
@@ -508,9 +512,10 @@ class ToxEnv(ABC):  # ruff:ignore[too-many-public-methods]  # public facade
             cwd = cast("Path", self.core["tox_root"])
         if show is None:
             show = self.options.verbosity > 3  # ruff:ignore[magic-value-comparison]  # fixed protocol value
-        request = ExecuteRequest(
-            cmd, cwd, self.environment_variables, stdin, run_id, allow=self._allow_externals, capture=capture
-        )
+        command_env = self.environment_variables
+        if env:
+            command_env = {**command_env, **env}
+        request = ExecuteRequest(cmd, cwd, command_env, stdin, run_id, allow=self._allow_externals, capture=capture)
         if request.cwd == _CWD:
             repr_cwd = ""
         else:

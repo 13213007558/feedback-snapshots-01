@@ -925,3 +925,28 @@ def test_provision_no_recreate_json_pinned_tox(tox_project: ToxProjectCreator) -
     project.run("c", "-e", "py", "--no-provision", "out.json").assert_failed()
     requires = json.loads((project.path / "out.json").read_text())
     assert requires == {"minversion": "999", "requires": ["tox==999", "tox"]}
+
+
+@pytest.mark.integration
+@pytest.mark.usefixtures("_pypi_index_self")
+def test_provision_keeps_the_run_scope(tox_project: ToxProjectCreator) -> None:
+    # the provisioned tox selects exactly the outer selection and records both decisions for comparison
+    project = tox_project({
+        "tox.ini": "[tox]\nrequires=demo-pkg-inline\nrun_scope=true\n"
+        "[testenv]\npackage=skip\ncommands=python -c \"print('ran {env_name}')\"",
+    })
+    scope_file = project.path / ".tox" / "run.scope.json"
+    plan_file = project.path / ".tox" / "run.scope.plan.ndjson"
+
+    result = project.run("r", "-e", "py", "--no-list-dependencies")
+
+    result.assert_success()
+    assert "ran py" in result.out
+    scope = json.loads(scope_file.read_text())
+    assert scope["envs"] == ["py"]
+    plans = [json.loads(line) for line in plan_file.read_text().splitlines() if line]
+    roles = {(plan["role"], plan["stage"]) for plan in plans}
+    assert ("outer", "prepare") in roles
+    assert ("inner", "execute") in roles
+    launched = [plan["launched"] for plan in plans if plan["launched"] is not None]
+    assert launched == [["python", "-c", "print('ran py')"]]
