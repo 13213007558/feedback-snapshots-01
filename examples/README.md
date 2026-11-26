@@ -4,6 +4,7 @@
 
 * [Build & Serialize](complex_serialize.py)
 * [Deserialize](complex_deserialize.py)
+* [Offline approval-aware risk review](risk_review_offline_review.py)
 
 ## Data models
 
