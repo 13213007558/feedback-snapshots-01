@@ -1,7 +1,115 @@
 from openfga_sdk.client.models.tuple import ClientTuple, convert_tuple_keys
+from openfga_sdk.exceptions import (
+    ApiValueError,
+    AuthenticationError,
+    ForbiddenException,
+    NotFoundException,
+    OpenApiException,
+    UnauthorizedException,
+    ValidationException,
+)
 from openfga_sdk.models.batch_check_item import BatchCheckItem
+from openfga_sdk.models.batch_check_single_result import BatchCheckSingleResult
+from openfga_sdk.models.check_error import CheckError
 from openfga_sdk.models.check_request_tuple_key import CheckRequestTupleKey
 from openfga_sdk.models.contextual_tuple_keys import ContextualTupleKeys
+
+
+# Server-side internal errors that represent a transient failure and can be
+# retried. Validation/authorization errors are terminal.
+RETRYABLE_BATCH_CHECK_INTERNAL_ERRORS = frozenset(
+    {
+        "internal_error",
+        "deadline_exceeded",
+        "resource_exhausted",
+        "unavailable",
+        "aborted",
+    }
+)
+
+
+def is_retryable_batch_check_error(err: Exception) -> bool:
+    """
+    Return whether a failed BatchCheck request can be retried without losing an
+    authoritative result. Throttling, transient server failures and transport
+    errors qualify; validation/auth/not-found errors are terminal.
+    """
+    if isinstance(
+        err,
+        AuthenticationError
+        | UnauthorizedException
+        | ForbiddenException
+        | NotFoundException
+        | ValidationException
+        | ApiValueError,
+    ):
+        return False
+
+    status = getattr(err, "status", None)
+    if status is None:
+        # Transport-level failures (reset connection, timeout) have no status;
+        # they are safe to retry because no result was returned.
+        return not isinstance(err, OpenApiException)
+    if status == 429 or status >= 500:
+        return status != 501
+    return False
+
+
+def _error_code_value(value) -> str | None:
+    """
+    Normalize a generated error-code model (which is a placeholder object, not a
+    real enum) or a plain string to its wire value.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    enum_value = getattr(value, "value", None)
+    if isinstance(enum_value, str):
+        return enum_value
+    return None
+
+
+def is_retryable_batch_check_result(result) -> bool:
+    """
+    Return whether a per-item BatchCheck result represents a transient failure
+    that should be retried rather than reported as a final outcome.
+    """
+    if result is None or getattr(result, "error", None) is None:
+        return False
+    internal_error = _error_code_value(result.error.internal_error)
+    return internal_error in RETRYABLE_BATCH_CHECK_INTERNAL_ERRORS
+
+
+def unconfirmed_batch_check_error(err: Exception) -> CheckError:
+    """
+    Build the CheckError reported for checks whose outcome could not be confirmed.
+    """
+    message = getattr(err, "reason", None) or str(err) or type(err).__name__
+    status = getattr(err, "status", None)
+    if status is not None:
+        message = f"{type(err).__name__} (HTTP {status}): {message}"
+    else:
+        message = f"{type(err).__name__}: {message}"
+    return CheckError(message=message)
+
+
+def resolve_batch_check_result(result: BatchCheckSingleResult):
+    """
+    Turn a server BatchCheckSingleResult into ``(allowed, confirmed, error)``.
+    A result without ``allowed`` and without an explicit error is ambiguous, so
+    it is reported as unconfirmed rather than silently treated as a denial.
+    """
+    if result is None:
+        return None
+    if result.error is not None:
+        # Server-reported validation/authorization errors are authoritative:
+        # the check was definitively rejected. Transient internal errors have
+        # already been filtered out for retry before reaching this point.
+        return (False, True, result.error)
+    if result.allowed is None:
+        return (None, False, None)
+    return (result.allowed, True, None)
 
 
 def construct_batch_item(check) -> BatchCheckItem:

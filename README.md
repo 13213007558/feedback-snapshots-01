@@ -861,7 +861,9 @@ Similar to [check](#check), but instead of checking a single user-object relatio
 
 [API Documentation](https://openfga.dev/api/service#/Relationship%20Queries/BatchCheck)
 
-> **Note**: The order of `batch_check` results is not guaranteed to match the order of the checks provided. Use `correlation_id` to pair responses with requests.
+> **Note**: The order of `batch_check` results is not guaranteed to match the order of the checks provided. Use `correlation_id` to pair responses with requests, or read `response.result[i].request` to recover the original tuple. Results are returned in the order of the checks you passed in.
+>
+> If a batch request fails transiently (429/5xx or a transient per-check error), only the checks that did not get an authoritative result are retried; confirmed results are kept. A check the server never confirms is returned with `confirmed=False` and an explanatory `error`; do not treat it as a denial. The number of retries defaults to the client's `retry_params.max_retry` and can be set per call with the `max_retries` option.
 
 ```python
 # from openfga_sdk import OpenFgaClient
@@ -915,8 +917,9 @@ checks = [ClientBatchCheckItem(
 response = await fga_client.batch_check(ClientBatchCheckRequest(checks=checks), options)
 # response.result = [{
 #   allowed: false,
+#   confirmed: true,  # false means no authoritative result; do not treat as a denial
 #   correlation_id: "de3630c2-f9be-4ee5-9441-cb1fbd82ce75",
-#   tuple: {
+#   request: {
 #     user: "user:81684243-9356-4421-8fbf-a4f8d36aa31b",
 #     relation: "viewer",
 #     object: "document:0192ab2a-d83f-756d-9397-c5ed9f3cb69a",

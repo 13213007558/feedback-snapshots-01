@@ -9,6 +9,10 @@ from openfga_sdk.client.models.assertion import ClientAssertion
 from openfga_sdk.client.models.batch_check_item import (
     ClientBatchCheckItem,
     construct_batch_item,
+    is_retryable_batch_check_error,
+    is_retryable_batch_check_result,
+    resolve_batch_check_result,
+    unconfirmed_batch_check_error,
 )
 from openfga_sdk.client.models.batch_check_request import ClientBatchCheckRequest
 from openfga_sdk.client.models.batch_check_response import ClientBatchCheckResponse
@@ -48,6 +52,7 @@ from openfga_sdk.exceptions import (
 )
 from openfga_sdk.models.assertion import Assertion
 from openfga_sdk.models.batch_check_request import BatchCheckRequest
+from openfga_sdk.models.check_error import CheckError
 from openfga_sdk.models.check_request import CheckRequest
 from openfga_sdk.models.contextual_tuple_keys import ContextualTupleKeys
 from openfga_sdk.models.create_store_request import CreateStoreRequest
@@ -205,6 +210,29 @@ class OpenFgaClient:
                 f"authorization_model_id ('{authorization_model_id}') is not in a valid ulid format"
             )
         return authorization_model_id
+
+    def _get_batch_check_max_retry(
+        self,
+        options: dict[str, int | str | dict[str, int | str]] | None = None,
+    ) -> int:
+        """
+        Return how many times unconfirmed checks in a batch may be retried.
+
+        Defaults to the client's configured ``retry_params.max_retry``. A per-call
+        ``max_retries`` option overrides it; ``retry_params`` in options only
+        affects the HTTP layer.
+        """
+        if options is not None and "max_retries" in options:
+            value = options["max_retries"]
+            if isinstance(value, str) and value.isdigit():
+                return int(value)
+            if isinstance(value, int) and value >= 0:
+                return value
+
+        retry_params = self._client_configuration.retry_params
+        if retry_params is not None and retry_params.max_retry is not None:
+            return retry_params.max_retry
+        return 0
 
     def _get_consistency(
         self,
@@ -777,9 +805,16 @@ class OpenFgaClient:
         :param max_parallel_requests(options) - Max number of requests to issue in parallel. Defaults to 10
         :param max_batch_size(options) - Max number of checks to include in a request. Defaults to 50
         :param header(options) - Custom headers to send alongside the request
-        :param retryParams(options) - Override the retry parameters for this request
+        :param retryParams(options) - Override the HTTP retry parameters for this request
         :param retryParams.maxRetry(options) - Override the max number of retries on each API request
         :param retryParams.minWaitInMs(options) - Override the minimum wait before a retry is initiated
+        :param max_retries(options) - How many times checks without an authoritative result may be retried. Defaults to the client's configured retry_params.max_retry
+
+        Results are returned in the same order as ``body.checks`` and each entry
+        keeps its original ``request`` identity. If a batch request fails
+        transiently, only the checks without a confirmed result are retried; the
+        rest are kept. Entries the server never confirmed have ``confirmed`` set
+        to ``False`` and must not be treated as denials.
         """
         options = set_heading_if_not_set(
             options, CLIENT_BULK_REQUEST_ID_HEADER, str(uuid.uuid4())
@@ -830,39 +865,112 @@ class OpenFgaClient:
             for i in range((len(body.checks) + max_batch_size - 1) // max_batch_size)
         ]
 
-        def map_response(id, result):
-            check = id_to_check[id]
+        def build_response(correlation_id, allowed, error, confirmed, response):
             return ClientBatchCheckSingleResponse(
-                allowed=result.allowed,
-                request=check,
-                correlation_id=id,
-                error=result.error,
+                allowed=allowed,
+                request=id_to_check[correlation_id],
+                correlation_id=correlation_id,
+                error=error,
+                confirmed=confirmed,
+                response=response,
             )
 
-        def single_batch_check(checks):
-            res = self._single_batch_check(
+        def dispatch(batch_checks):
+            return self._single_batch_check(
                 BatchCheckRequest(
-                    checks=checks,
+                    checks=batch_checks,
                     authorization_model_id=self._get_authorization_model_id(options),
                     consistency=self._get_consistency(options),
                 ),
                 options,
             )
 
-            return res
+        max_retry = self._get_batch_check_max_retry(options)
 
-        result = []
+        def run_batch(batch_checks):
+            """
+            Resolve one SDK-created batch. Only checks without an authoritative
+            result are retried, and they are retried as their own batch so a
+            single transient failure does not discard the whole batch.
+            """
+            pending = list(batch_checks)
+            responses: dict[str, ClientBatchCheckSingleResponse] = {}
+            unresolved = False
+
+            for attempt in range(max_retry + 1):
+                if not pending:
+                    break
+
+                try:
+                    res = dispatch(pending)
+                except Exception as err:
+                    if isinstance(err, AuthenticationError | UnauthorizedException):
+                        raise
+                    if (
+                        attempt < max_retry
+                        and pending
+                        and is_retryable_batch_check_error(err)
+                    ):
+                        # The HTTP layer already applied its own backoff for this
+                        # batch; retry immediately with only the unconfirmed checks.
+                        continue
+                    check_error = unconfirmed_batch_check_error(err)
+                    for item in pending:
+                        responses[item.correlation_id] = build_response(
+                            item.correlation_id, None, check_error, False, None
+                        )
+                    break
+
+                results = getattr(res, "result", None) or {}
+                retry_items = []
+                for item in pending:
+                    correlation_id = item.correlation_id
+                    result = results.get(correlation_id)
+                    if result is None or is_retryable_batch_check_result(result):
+                        retry_items.append(item)
+                        continue
+                    resolved = resolve_batch_check_result(result)
+                    if resolved is None:
+                        retry_items.append(item)
+                        continue
+                    allowed, confirmed, error = resolved
+                    responses[correlation_id] = build_response(
+                        correlation_id, allowed, error, confirmed, result
+                    )
+
+                pending = retry_items
+                if pending and attempt == max_retry:
+                    unresolved = True
+
+            if unresolved:
+                check_error = CheckError(
+                    message="No authoritative result returned by the server"
+                )
+                for item in pending:
+                    responses[item.correlation_id] = build_response(
+                        item.correlation_id, None, check_error, False, None
+                    )
+
+            return responses
 
         with ThreadPoolExecutor(max_workers=max_parallel_requests) as executor:
-            for response in executor.map(single_batch_check, checks):
-                result.extend(
-                    [
-                        map_response(c_id, c_result)
-                        for c_id, c_result in response.result.items()
-                    ]
-                )
+            responses_by_batch = list(executor.map(run_batch, checks))
 
-        return ClientBatchCheckResponse(result)
+        # Return results in the caller's order, keyed by correlation_id so an
+        # out-of-order server response can never shift a decision onto a
+        # different user/object/relation check.
+        by_id = {
+            correlation_id: response
+            for batch in responses_by_batch
+            for correlation_id, response in batch.items()
+        }
+        return ClientBatchCheckResponse(
+            [
+                by_id[check.correlation_id]
+                for check in body.checks
+                if check.correlation_id in by_id
+            ]
+        )
 
     def expand(
         self,
