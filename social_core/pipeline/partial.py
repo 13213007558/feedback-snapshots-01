@@ -3,6 +3,10 @@ from __future__ import annotations
 from functools import wraps
 from typing import TYPE_CHECKING, Any, Never, Protocol, TypeVar
 
+from social_core.invitations import (
+    invitation_id_from_mapping,
+    remember_invitation_partial,
+)
 from social_core.utils import (
     PARTIAL_PIPELINE_ALLOW_EXTERNAL_RESUME,
     PARTIAL_TOKEN_SESSION_NAME,
@@ -111,6 +115,11 @@ def partial_step(
                     strategy.session_set(
                         PARTIAL_TOKEN_SESSION_NAME, current_partial.token
                     )
+                remember_invitation_partial(
+                    strategy,
+                    invitation_id_from_mapping(kwargs),
+                    current_partial.token,
+                )
             return out
 
         return wrapper

@@ -40,6 +40,10 @@ from .exceptions import (
     ErrorStage,
     SocialAuthBaseException,
 )
+from .invitations import (
+    invitation_id_from_mapping,
+    session_owns_invitation_partial,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection
@@ -445,6 +449,12 @@ def partial_pipeline_result(
         backend, partial, effective_request_data, pipeline_type
     )
     if partial and partial_matches:
+        if not selection.owns_token and session_owns_invitation_partial(
+            backend.strategy,
+            invitation_id_from_mapping(partial.kwargs),
+            selection.token,
+        ):
+            selection.owns_token = True
         if (
             user is not None
             and partial.kwargs.get("user") is None

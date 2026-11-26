@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
+from social_core.invitations import InvitationStage, invitation_id_from_mapping
 from social_core.utils import module_member, slugify
 
 if TYPE_CHECKING:
@@ -128,8 +129,6 @@ def user_details(
     if not user or (backend is not None and backend.ASSOCIATION_ONLY):
         return
 
-    changed_fields: set[str] = set()
-
     # Default protected user fields (username, id, pk and email) can be ignored
     # by setting the SOCIAL_AUTH_NO_DEFAULT_PROTECTED_USER_FIELDS to True
     protected: tuple[str, ...]
@@ -158,6 +157,7 @@ def user_details(
     # example username and id fields. It's also possible to disable update
     # on fields defined in SOCIAL_AUTH_PROTECTED_USER_FIELDS.
     field_mapping = strategy.setting("USER_FIELD_MAPPING", {}, backend=backend)
+    planned_changes: list[tuple[str, object]] = []
     for name, value in details.items():
         # Convert to existing user field if mapping exists
         name = field_mapping.get(name, name)
@@ -177,7 +177,19 @@ def user_details(
         if name in immutable_fields and current_value:
             continue
 
-        changed_fields.add(name)
+        planned_changes.append((name, value))
+
+    changed_fields = {name for name, _ in planned_changes}
+    strategy.validate_invitation(
+        invitation_id_from_mapping(kwargs),
+        stage=InvitationStage.PROFILE_SYNC,
+        backend=backend,
+        user=user,
+        changed_fields=changed_fields,
+        details=details,
+    )
+
+    for name, value in planned_changes:
         setattr(user, name, value)
 
     if changed_fields:

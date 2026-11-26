@@ -172,6 +172,16 @@ REASONS: dict[str, tuple[str, ErrorSource, RecoveryAction]] = {
         "local_policy",
         "none",
     ),
+    "invitation_invalid": (
+        "This authentication invitation is no longer valid.",
+        "local_policy",
+        "contact_administrator",
+    ),
+    "invitation_revoked": (
+        "This authentication invitation has been revoked.",
+        "local_policy",
+        "none",
+    ),
     "identity_in_use": (
         "This identity is already associated with another account.",
         "storage",
@@ -320,6 +330,29 @@ class AuthPolicyError(AuthException):
     """A local authentication or disconnect policy rejected the operation."""
 
     default_code = "authentication_disallowed"
+
+
+class AuthInvitationError(AuthPolicyError):
+    """An application-issued authentication invitation cannot be used."""
+
+    default_code = "invitation_invalid"
+
+    def __init__(self, *args: Any, invitation_id: str | None = None, **kwargs: Any):
+        self.invitation_id = invitation_id
+        super().__init__(*args, **kwargs)
+        if invitation_id is not None:
+            self.context.setdefault("invitation_id", invitation_id)
+
+
+class AuthInvitationRevoked(AuthInvitationError):
+    """An invitation was revoked and has reached its terminal state."""
+
+    default_code = "invitation_revoked"
+    end_state = "revoked"
+
+    def __init__(self, *args: Any, **kwargs: Any):
+        super().__init__(*args, **kwargs)
+        self.context.setdefault("end_state", self.end_state)
 
 
 class AuthAssociationError(AuthException):

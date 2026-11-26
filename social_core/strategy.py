@@ -3,14 +3,20 @@ from __future__ import annotations
 import secrets
 from contextlib import contextmanager
 from contextvars import ContextVar
+from inspect import Parameter, signature
 from typing import TYPE_CHECKING, Any, Generic, TypeAlias, TypeVar, cast
 
 from .backends.base import ResponseT_co
 
 # Preserve the historical import path for integrations and tests.
 from .backends.utils import get_backend
-from .exceptions import AuthConfigurationError, ErrorStage
+from .exceptions import AuthConfigurationError, AuthInvitationError, ErrorStage
 from .groups import validate_group_mapping
+from .invitations import (
+    INVITATION_PARTIAL_TOKENS_SESSION_NAME,
+    InvitationCheck,
+    InvitationDecision,
+)
 from .pipeline import DEFAULT_AUTH_PIPELINE, DEFAULT_DISCONNECT_PIPELINE
 from .pipeline.utils import partial_load, to_plain_dict
 from .response_types import HttpResponseProtocol as _HttpResponseProtocol
@@ -35,6 +41,43 @@ if TYPE_CHECKING:
 
 
 _BackendResponseT = TypeVar("_BackendResponseT")
+
+
+def _call_invitation_callable(
+    validator: Any, check: InvitationCheck, *, backend: BaseAuth[object] | None
+) -> Any:
+    context_kwargs = dict(check.context)
+    kwargs = {
+        **context_kwargs,
+        "check": check,
+        "invitation_id": check.invitation_id,
+        "stage": check.stage,
+        "provider": check.provider,
+        "backend": backend,
+        "user": check.user,
+        "user_id": check.user_id,
+        "session_key": check.session_key,
+        "partial": check.partial,
+        "partial_token": check.partial_token,
+        "uid": check.uid,
+        "changed_fields": check.changed_fields,
+    }
+    try:
+        parameters = signature(validator).parameters
+    except (TypeError, ValueError):
+        return validator(check)
+
+    if any(
+        parameter.kind is Parameter.VAR_KEYWORD for parameter in parameters.values()
+    ):
+        return validator(**kwargs)
+
+    accepted = {name: value for name, value in kwargs.items() if name in parameters}
+    try:
+        signature(validator).bind(**accepted)
+    except TypeError:
+        return validator(check)
+    return validator(**accepted)
 
 
 class BaseTemplateStrategy:
@@ -75,6 +118,7 @@ class BaseStrategy(Generic[ResponseT_co]):
         self._pipeline_request_data: ContextVar[dict[str, Any] | None] = ContextVar(
             "pipeline_request_data", default=None
         )
+        self.invitation_validator: Any = None
         self.tpl = (tpl or self.DEFAULT_TEMPLATE_STRATEGY)(self)
 
     @property
@@ -184,6 +228,113 @@ class BaseStrategy(Generic[ResponseT_co]):
             self.session_pop(PARTIAL_TOKEN_PENDING_SESSION_NAME)
             self.session_pop(PARTIAL_TOKEN_PENDING_REQUEST_SESSION_NAME)
             self.session_pop(PARTIAL_TOKEN_PENDING_CONFIRMATION_SESSION_NAME)
+
+        invitation_tokens = (
+            self.session_get(INVITATION_PARTIAL_TOKENS_SESSION_NAME, {}) or {}
+        )
+        if isinstance(invitation_tokens, dict):
+            for invitation_id, stored_token in list(invitation_tokens.items()):
+                if stored_token == token:
+                    invitation_tokens.pop(invitation_id, None)
+            self.session_set(INVITATION_PARTIAL_TOKENS_SESSION_NAME, invitation_tokens)
+
+    def get_session_key(self) -> str | None:
+        """Return the application's stable session identifier when available."""
+        try:
+            session_key = self.session_get("session_key")
+        except NotImplementedError:
+            return None
+        return session_key if isinstance(session_key, str) else None
+
+    def validate_invitation(
+        self,
+        invitation_id: str | None,
+        *,
+        stage: str,
+        backend: BaseAuth[object] | None = None,
+        user: UserProtocol | object | int | str | None = None,
+        partial: PartialMixin | None = None,
+        session_key: str | None = None,
+        **context: Any,
+    ) -> InvitationDecision | None:
+        """Ask the application whether this flow's invitation is still valid.
+
+        The default implementation is a compatibility no-op. Applications can
+        assign an object with ``validate_invitation(check)`` or a callable to
+        ``strategy.invitation_validator``, configure
+        ``INVITATION_VALIDATOR`` as a dotted path/callable, or override this
+        method. Checks must be live at each write boundary rather than caching
+        a decision from an earlier pipeline stage.
+        """
+        if invitation_id is None:
+            return None
+
+        validator = getattr(self, "invitation_validator", None)
+        if validator is None:
+            validator = self.setting("INVITATION_VALIDATOR", None, backend=backend)
+        if isinstance(validator, str):
+            validator = module_member(validator)
+        if validator is None:
+            return None
+        if not callable(validator) and not hasattr(validator, "validate_invitation"):
+            raise AuthConfigurationError(
+                backend,
+                code="unsupported_feature",
+                parameter="INVITATION_VALIDATOR",
+                stage="pipeline",
+            )
+
+        principal_id = getattr(user, "id", user)
+        check = InvitationCheck(
+            invitation_id=invitation_id,
+            stage=stage,
+            provider=getattr(backend, "name", None),
+            user=user,
+            user_id=principal_id,
+            session_key=session_key
+            if session_key is not None
+            else self.get_session_key(),
+            partial=partial,
+            partial_token=getattr(partial, "token", None),
+            uid=context.get("uid"),
+            changed_fields=frozenset(context.get("changed_fields") or ()),
+            context=context,
+        )
+
+        if hasattr(validator, "validate_invitation"):
+            result = validator.validate_invitation(check)
+        else:
+            result = _call_invitation_callable(validator, check, backend=backend)
+
+        if isinstance(result, InvitationDecision):
+            decision = result
+        elif result is False:
+            decision = InvitationDecision(
+                invitation_id=invitation_id,
+                stage=stage,
+                allowed=False,
+                status="invalid",
+            )
+        else:
+            decision = InvitationDecision(
+                invitation_id=invitation_id,
+                stage=stage,
+                allowed=True,
+                status="approved",
+            )
+
+        if not decision.allowed:
+            raise AuthInvitationError(
+                backend,
+                code="invitation_revoked"
+                if decision.end_state == "revoked"
+                else "invitation_invalid",
+                stage="callback"
+                if stage.startswith("partial_")
+                else "pipeline",
+                invitation_id=invitation_id,
+            )
+        return decision
 
     def partial_pipeline_external_resume_confirmation(
         self,

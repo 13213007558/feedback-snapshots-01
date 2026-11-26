@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Add an invitation validation boundary for authenticated association flows. Applications can now revalidate a specific invitation when a partial pipeline resumes, before an association is saved, and before profile attributes are synchronized; invitation-scoped session indexes allow multiple partials in one login session without weakening token ownership checks.
+
 ## [7.2.0](https://github.com/python-social-auth/social-core/releases/tag/7.2.0) - 2026-11-12
 
 ### Added

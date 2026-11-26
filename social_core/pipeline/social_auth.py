@@ -8,6 +8,7 @@ from social_core.exceptions import (
     AuthResponseError,
 )
 from social_core.identifiers import identifier_matches
+from social_core.invitations import InvitationStage, invitation_id_from_mapping
 from social_core.utils import normalize_user_names
 
 if TYPE_CHECKING:
@@ -232,6 +233,15 @@ def associate_user(
     **kwargs,
 ):
     if user and not social:
+        invitation_id = invitation_id_from_mapping(kwargs)
+        backend.strategy.validate_invitation(
+            invitation_id,
+            stage=InvitationStage.ASSOCIATION_SAVE,
+            backend=backend,
+            user=user,
+            uid=uid,
+            id_key=id_key,
+        )
         try:
             storage = backend.strategy.storage.user
             social = storage.create_social_auth(user, uid, backend.name, id_key=id_key)

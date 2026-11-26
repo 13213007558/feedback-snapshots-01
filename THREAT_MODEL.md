@@ -143,8 +143,14 @@ Core does not run an HTTP service or supply application authorization, account
 recovery, MFA, session-cookie policy, route-level CSRF, TLS termination, Host
 validation, or trusted-proxy configuration. Integrations must supply those
 boundaries and preserve the authenticated user across ordinary linking, or
-reject and restart the flow when that principal changes. Strategies that return
-core-generated HTML must apply the requested response headers.
+reject and restart the flow when that principal changes. Application-issued
+invitations, consent, and revocation records are also application-owned;
+integrations that use them must implement the strategy invitation hook so core
+revalidates the named flow when a partial resumes, before association creation,
+and before profile synchronization. The optional invitation-to-partial session
+index only correlates flow identities inside the existing trusted session and
+does not itself authorize a callback. Strategies that return core-generated
+HTML must apply the requested response headers.
 
 Operators must protect configuration, tokens, secrets, sessions, and persisted
 records. Core does not encrypt them at rest or protect them from a compromised

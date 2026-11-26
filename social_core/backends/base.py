@@ -23,6 +23,12 @@ from social_core.exceptions import (
     SocialAuthBaseException,
 )
 from social_core.identifiers import UNVERIFIED_LEGACY_TRANSITIONS
+from social_core.invitations import (
+    InvitationStage,
+    invitation_id_from_mapping,
+    remember_invitation_partial,
+    session_owns_invitation_partial,
+)
 from social_core.registry import REGISTRY
 from social_core.response_types import HttpResponseProtocol as _HttpResponseProtocol
 from social_core.utils import (
@@ -702,6 +708,15 @@ class BaseAuth(Generic[ResponseT_co]):
         self, partial: PartialMixin
     ) -> UserProtocol | ResponseT_co | None:
         """Continue previous halted pipeline"""
+        invitation_id = invitation_id_from_mapping(partial.kwargs)
+        self.strategy.validate_invitation(
+            invitation_id,
+            stage=InvitationStage.PARTIAL_RESUME,
+            backend=self,
+            partial=partial,
+            user=partial.kwargs.get("user"),
+        )
+        remember_invitation_partial(self.strategy, invitation_id, partial.token)
         with self._partial_pipeline_context(partial):
             return self.strategy.authenticate(
                 self, *partial.args, pipeline_index=partial.next_step, **partial.kwargs
@@ -746,6 +761,22 @@ class BaseAuth(Generic[ResponseT_co]):
                     code="user_mismatch",
                     stage="callback",
                 )
+
+        invitation_id = invitation_id_from_mapping(partial.kwargs)
+        self.strategy.validate_invitation(
+            invitation_id,
+            stage=InvitationStage.PARTIAL_VALIDATE,
+            backend=self,
+            partial=partial,
+            user=user or partial.kwargs.get("user"),
+        )
+
+    def invitation_partial_owned_in_session(self, partial: PartialMixin) -> bool:
+        """Whether an invitation-scoped session index owns this partial."""
+        invitation_id = invitation_id_from_mapping(partial.kwargs)
+        return session_owns_invitation_partial(
+            self.strategy, invitation_id, partial.token
+        )
 
     def auth_extra_arguments(self) -> dict[str, str]:
         """Return extra arguments needed on auth process.
