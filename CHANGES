@@ -1,6 +1,19 @@
 Bleach changes
 ==============
 
+Development
+-----------
+
+**New features**
+
+* Add ``bleach.clean_text`` and ``Cleaner.clean_text`` which apply the same
+  sanitization rules as ``bleach.clean`` but return plain text with every tag
+  and comment removed, intended for non-HTML contexts such as an HTML
+  attribute value or a plain-text preview. Character entities are decoded,
+  plain quotation marks and non-ASCII characters are preserved, and the
+  result is returned unescaped so a template engine can encode it for the
+  target context.
+
 Version 6.4.0 (June 5th, 2026)
 ------------------------------
 

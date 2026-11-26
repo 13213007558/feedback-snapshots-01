@@ -46,6 +46,57 @@ can be used in HTML as is.
 .. autofunction:: bleach.clean
 
 
+Plain text for non-HTML contexts (``clean_text``)
+==================================================
+
+:py:func:`bleach.clean` returns HTML and is only safe to render as HTML
+content. Sometimes you need the same user-supplied text somewhere markup is
+not wanted--for example a preview summary placed in an HTML attribute value.
+For those contexts, Bleach provides :py:func:`bleach.clean_text`.
+
+``clean_text`` applies the same tag, attribute and protocol rules as
+``clean``, but returns the visible text with every tag, attribute and comment
+removed. Character entities are decoded to the characters they represent, so
+the result contains no markup and no HTML entity references. Plain quotation
+marks and non-ASCII characters are kept verbatim.
+
+For example:
+
+.. doctest::
+
+   >>> import bleach
+
+   >>> user_text = '<p>Hello <b>"naïve"</b> &amp; 中文</p>'
+
+   >>> bleach.clean(user_text)
+   '&lt;p&gt;Hello <b>"naïve"</b> &amp; 中文&lt;/p&gt;'
+
+   >>> bleach.clean_text(user_text)
+   'Hello "naïve" & 中文'
+
+Use ``clean`` for the message body (HTML content) and ``clean_text`` for the
+preview (plain text)::
+
+   body_html = bleach.clean(user_text)
+   preview = bleach.clean_text(user_text)
+
+   # The template engine escapes ``preview`` while it fills the attribute.
+   '<a title="{{ preview }}">{{ body_html|safe }}</a>'
+
+.. Note::
+
+   ``clean_text`` returns unescaped text on purpose. It is safe to hand to a
+   template engine, which escapes the value when it fills an attribute or any
+   other context. Concatenating it into an HTML string without the template
+   engine's escaping is unsafe, just as it would be for any other raw text.
+
+Tags and comments are always stripped, so the returned text never contains
+literal markup--even when the equivalent :py:class:`bleach.sanitizer.Cleaner`
+is configured to escape (rather than strip) disallowed tags.
+
+.. autofunction:: bleach.clean_text
+
+
 Allowed tags (``tags``)
 =======================
 

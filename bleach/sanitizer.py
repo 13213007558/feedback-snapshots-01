@@ -189,7 +189,73 @@ class Cleaner:
             return ""
 
         dom = self.parser.parseFragment(text)
+        filtered = self._sanitize(dom)
+
+        # Apply any filters after the BleachSanitizerFilter
+        for filter_class in self.filters:
+            filtered = filter_class(source=filtered)
+
+        return self.serializer.render(filtered)
+
+    def clean_text(self, text):
+        """Clean text and return the visible text content as unicode
+
+        This applies the same tag, attribute and protocol rules as
+        :py:meth:`clean`, but instead of serializing the result back to HTML,
+        it returns the plain text content with every tag and comment removed.
+        Character entities are decoded to the characters they represent, so the
+        result contains no markup and no HTML entity references.
+
+        Tags are always stripped--including tags the cleaner is configured to
+        escape--so the returned text never contains literal ``<`` or ``>``
+        markup, regardless of the cleaner's ``strip`` setting.
+
+        The returned value is intended for non-HTML contexts such as an HTML
+        attribute value or a plain-text preview. It is returned unescaped--the
+        caller is responsible for encoding it appropriately for the target
+        context (for example, through the template engine's escaping).
+
+        :arg str text: text to be cleaned
+
+        :returns: sanitized plain text as unicode
+
+        :raises TypeError: if ``text`` is not a text type
+
+        """
+        if not isinstance(text, str):
+            message = (
+                f"argument cannot be of {text.__class__.__name__!r} type, "
+                + "must be of text type"
+            )
+            raise TypeError(message)
+
+        if not text:
+            return ""
+
+        # The body-oriented parser keeps disallowed tags as escaped text when
+        # strip=False. Plain text must never contain markup, so parse with a
+        # strip-mode parser that removes them instead.
+        text_parser = html5lib_shim.BleachHTMLParser(
+            tags=self.tags,
+            strip=True,
+            consume_entities=False,
+            namespaceHTMLElements=False,
+        )
+        dom = text_parser.parseFragment(text)
         filtered = BleachSanitizerFilter(
+            source=self.walker(dom),
+            allowed_tags=self.tags,
+            attributes=self.attributes,
+            strip_disallowed_tags=True,
+            strip_html_comments=True,
+            css_sanitizer=self.css_sanitizer,
+            allowed_protocols=self.protocols,
+        )
+        return TextExtractFilter(source=filtered).get_text()
+
+    def _sanitize(self, dom):
+        """Builds the BleachSanitizerFilter stream for a parsed fragment"""
+        return BleachSanitizerFilter(
             source=self.walker(dom),
             allowed_tags=self.tags,
             attributes=self.attributes,
@@ -199,11 +265,30 @@ class Cleaner:
             allowed_protocols=self.protocols,
         )
 
-        # Apply any filters after the BleachSanitizerFilter
-        for filter_class in self.filters:
-            filtered = filter_class(source=filtered)
 
-        return self.serializer.render(filtered)
+class TextExtractFilter(html5lib_shim.Filter):
+    """html5lib Filter that collects the plain text content of a stream
+
+    This consumes an already-sanitized token stream (the output of
+    :class:`BleachSanitizerFilter`) and yields nothing but the text carried by
+    its ``Characters`` and ``SpaceCharacters`` tokens. Tags, attributes and
+    comments are dropped rather than serialized, so the result is plain text
+    that is safe to hand to a context which does not interpret HTML (such as
+    an HTML attribute value).
+
+    Character entities have already been decoded by the sanitizer, so the
+    collected text contains no HTML entity references. The result is returned
+    unescaped--callers must encode it for their target context.
+
+    """
+
+    def get_text(self):
+        """Returns the concatenated text content of the stream as unicode"""
+        parts = []
+        for token in self:
+            if token["type"] in ("Characters", "SpaceCharacters"):
+                parts.append(token["data"])
+        return "".join(parts)
 
 
 def attribute_filter_factory(attributes):
