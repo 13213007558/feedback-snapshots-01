@@ -4,6 +4,7 @@ __lazy_modules__ = [
     "pathlib",
     "virtualenv.info",
     "virtualenv.util.path",
+    f"{__spec__.parent}.system_site_packages",  # ty: ignore[missing-union-attribute]  # imported modules have a spec
 ]
 
 import logging
@@ -11,7 +12,9 @@ from abc import ABC
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
+from virtualenv.config.cli.parser import ExtendAction
 from virtualenv.create.creator import Creator, CreatorMeta
+from virtualenv.create.via_global_ref import system_site_packages
 from virtualenv.info import fs_supports_symlink
 from virtualenv.util.path import write_file
 
@@ -62,6 +65,8 @@ class ViaGlobalRefApi(Creator, ABC):
 
     :var symlinks: ``True`` to link files instead of copying them
     :var enable_system_site_package: ``True`` to give the environment access to the system site-packages
+    :var system_site_allow: the approved top-level names of a scoped inheritance, empty when unscoped
+    :var system_site_dirs: the parent site directories of a scoped inheritance, empty when unscoped
 
     """
 
@@ -69,6 +74,19 @@ class ViaGlobalRefApi(Creator, ABC):
         super().__init__(options, interpreter)
         self.symlinks = self._should_symlink(options)
         self.enable_system_site_package = options.system_site
+        self.system_site_allow = system_site_packages.approve(getattr(options, "system_site_allow", None) or ())
+        self.system_site_dirs = system_site_packages.check_directories(
+            getattr(options, "system_site_dir", None) or (),
+        )
+        if self.system_site_allow and self.enable_system_site_package:
+            msg = (
+                "--system-site-packages and --system-site-packages-allow exclude each other: the first exposes every "
+                "system package, the second only the approved names"
+            )
+            raise ValueError(msg)
+        if self.system_site_dirs and not self.system_site_allow:
+            msg = "--system-site-packages-dir needs --system-site-packages-allow to name the approved packages"
+            raise ValueError(msg)
 
     @staticmethod
     def _should_symlink(options: VirtualEnvOptions) -> bool:
@@ -108,7 +126,7 @@ class ViaGlobalRefApi(Creator, ABC):
         app_data: AppData,
         # narrows meta to ViaGlobalRefMeta, which the base hook types as CreatorMeta
     ) -> None:  # ty: ignore[incompatible-method-override]
-        """Add the ``--system-site-packages``, ``--symlinks`` and ``--copies`` options.
+        """Add the system site-packages, ``--symlinks`` and ``--copies`` options.
 
         The copy and symlink options are only added when the matching method is supported.
 
@@ -126,7 +144,27 @@ class ViaGlobalRefApi(Creator, ABC):
             default=False,
             action="store_true",
             dest="system_site",
-            help="give the virtual environment access to the system site-packages dir",
+            help="give the virtual environment access to all of the system site-packages dir",
+        )
+        parser.add_argument(
+            "--system-site-packages-allow",
+            dest="system_site_allow",
+            metavar="name",
+            type=str,
+            nargs="+",
+            action=ExtendAction,
+            default=[],
+            help="give the environment access to only these top-level packages of the system site-packages",
+        )
+        parser.add_argument(
+            "--system-site-packages-dir",
+            dest="system_site_dir",
+            metavar="d",
+            type=Path,
+            nargs="+",
+            action=ExtendAction,
+            default=[],
+            help="an additional parent site-packages dir the approved packages may come from (can be set 1+ times)",
         )
         if not meta.can_symlink and not meta.can_copy:
             errors = []
@@ -156,8 +194,9 @@ class ViaGlobalRefApi(Creator, ABC):
             )
 
     def create(self) -> None:
-        """Create the environment by installing the patch that guards the import hook."""
+        """Create the environment, installing the import patch and the system site-packages scope."""
         self.install_patch()
+        self.install_system_site_scope()
 
     def install_patch(self) -> None:
         """Write the distutils guard files into the purelib folder, only on interpreters older than Python 3.10."""
@@ -174,6 +213,25 @@ class ViaGlobalRefApi(Creator, ABC):
             LOGGER.debug("create %s", dest_path)
             write_file(dest_path, text.encode("utf-8"))
 
+    def install_system_site_scope(self) -> None:
+        """Replace the runtime scope artifacts of the purelib folder with those of the selected mode."""
+        if not self.system_site_allow:
+            system_site_packages.remove_scope(self.purelib)
+            return
+        roots = system_site_packages.parent_directories(self.interpreter, self.system_site_dirs)
+        system_site_packages.write_scope(self.purelib, self.system_site_scope_text(), self.system_site_allow, roots)
+
+    def system_site_scope_text(self) -> str:
+        """Return the source text of the runtime gate module.
+
+        :returns: the gate source text
+
+        """
+        with self.app_data.ensure_extracted(
+            Path(__file__).parent / f"{system_site_packages.GATE_MODULE}.py",
+        ) as resolved_path:
+            return resolved_path.read_text(encoding="utf-8")
+
     def env_patch_text(self) -> str:
         """Patch the distutils package to not be derailed by its configuration files.
 
@@ -184,12 +242,20 @@ class ViaGlobalRefApi(Creator, ABC):
             return resolved_path.read_text(encoding="utf-8")
 
     def _args(self) -> list[tuple[str, str | bool]]:
-        return [*super()._args(), ("global", self.enable_system_site_package)]
+        result = [*super()._args(), ("global", self.enable_system_site_package)]
+        if self.system_site_allow:
+            result.append(("allow", ",".join(self.system_site_allow)))
+        return result
 
     def set_pyenv_cfg(self) -> None:
-        """Record whether the system site-packages are visible to the environment."""
+        """Record whether the system site-packages are visible to the environment, and the approved subset."""
         super().set_pyenv_cfg()
         self.pyenv_cfg["include-system-site-packages"] = "true" if self.enable_system_site_package else "false"
+        if self.system_site_allow:
+            # the approved names resolve through the runtime gate, so the interpreter itself must not add the parent
+            # site directories to sys.path
+            self.pyenv_cfg[system_site_packages.CFG_SCOPE_KEY] = system_site_packages.SCOPE_MARKER
+            self.pyenv_cfg[system_site_packages.CFG_ALLOW_KEY] = " ".join(self.system_site_allow)
 
 
 __all__ = [

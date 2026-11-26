@@ -53,6 +53,17 @@ Three keys carry the version, and they differ in precision and in who should rea
 ``prompt`` appears as an extra key when you pass ``--prompt``. The ``base-*`` keys come from the creator and vary by
 creation method.
 
+Two more keys mark a scoped system site-packages inheritance, written when you pass ``--system-site-packages-allow``:
+
+.. code-block:: ini
+
+    include-system-site-packages = false
+    system-site-packages-scope = allow-list
+    system-site-packages-allow = acme_core acme_tools
+
+``include-system-site-packages`` stays ``false`` because the parent directories are kept off ``sys.path``. The scope
+keys name the approved top-level packages and mark how they resolve. See :ref:`system-site-packages-scope`.
+
 ``CACHEDIR.TAG``
 ================
 
@@ -71,6 +82,14 @@ untouched, and writes nothing for Mercurial, Bazaar or Subversion, none of which
 The interpreter, the console scripts of any seeded package, and the activation scripts for each shell.
 :doc:`environment-layout` lists the names the interpreter answers to, and :ref:`explanation:Activators` covers the
 shells.
+
+``_virtualenv_system_site_packages.*``
+======================================
+
+Written into the environment's site-packages when ``--system-site-packages-allow`` names an approved subset of the
+parent's system packages. The ``.json`` manifest lists the approved top-level names and the parent site directories they
+resolve from; the ``.py`` module and its ``.pth`` file install the import gate that enforces the list. Deleting them
+restores plain isolation rather than full system access, and recreating the environment without the scope removes them.
 
 *******************************
  Beside the environment folder

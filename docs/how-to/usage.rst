@@ -226,6 +226,66 @@ packages from a virtual environment:
 
     application = create_app()
 
+.. _system-site-packages-scope:
+
+*******************************
+ Share selected system packages
+*******************************
+
+``--system-site-packages`` exposes every package installed for the parent interpreter. When an internal project needs
+only the organization's shared packages, pass their top-level import names to ``--system-site-packages-allow`` instead:
+
+.. code-block:: console
+
+    $ virtualenv --system-site-packages-allow acme_core acme_tools venv
+
+Each name is a top-level module or package name, written without dots or path separators. Only those names resolve from
+the parent's site-packages directories; every other package there stays hidden, as if the environment were isolated.
+
+The scope is recorded in three places, so it can be audited after creation:
+
+- ``pyvenv.cfg`` carries ``system-site-packages-scope = allow-list`` and the approved names in
+  ``system-site-packages-allow``. ``include-system-site-packages`` stays ``false``, because the parent directories never
+  become part of ``sys.path``.
+- ``_virtualenv_system_site_packages.json`` in the environment's site-packages lists the approved names and the parent
+  site directories they resolve from.
+- ``_virtualenv_system_site_packages.py`` and its ``.pth`` file install the import gate that enforces the list.
+
+A normal interpreter start and ``activate_this.py`` see the same set. Under activation, any parent site directories
+that the host process already put on ``sys.path`` are removed, and the same gate applies.
+
+Adding the approved directory
+=============================
+
+The approved names resolve from the parent interpreter's own site-packages directories and any directories its ``.pth``
+files add. Pass ``--system-site-packages-dir`` to name another directory, such as a read-only mount of the
+organization's packages:
+
+.. code-block:: console
+
+    $ virtualenv --system-site-packages-allow acme_core --system-site-packages-dir /opt/acme/site-packages venv
+
+Both options also accept several values in the configuration file or through the environment variable, like the other
+multi-value options:
+
+.. code-block:: console
+
+    $ VIRTUALENV_SYSTEM_SITE_PACKAGES_ALLOW="acme_core,acme_tools" virtualenv venv
+
+What the scope does not change
+==============================
+
+The approved names resolve from the parent directories at import time, so a module added to an approved directory after
+the environment is created is visible to new processes without recreating the environment. A module added to a
+directory outside the scope stays hidden. If two parent directories carry the same approved name, the first directory
+in the recorded order wins, and that order is the interpreter's own site directories, the directories their ``.pth``
+files add, then the ones passed with ``--system-site-packages-dir``.
+
+``--system-site-packages`` keeps its meaning: it still exposes every system package. It cannot be combined with
+``--system-site-packages-allow``, since one exposes everything and the other names a subset. Recreating a destination
+without the scope removes the gate an earlier creation wrote, so the destination returns to plain isolation rather than
+keeping the old approved set.
+
 ********************
  Configure defaults
 ********************

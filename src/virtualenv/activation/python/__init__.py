@@ -49,10 +49,13 @@ class PythonActivator(ViaTemplateActivator):  # fmt: skip
         replacements = super().replacements(creator, dest_folder)
         lib_folders = OrderedDict((os.path.relpath(str(i), str(dest_folder)), None) for i in creator.libs)
         lib_folders = os.pathsep.join(lib_folders.keys())
+        scoped = bool(getattr(creator, "system_site_allow", None))
         replacements.update(
             {
                 "__LIB_FOLDERS__": lib_folders,
                 "__DECODE_PATH__": "",
+                # the placeholder is quoted into a string literal, so the empty string is the falsy "no scope" marker
+                "__SYSTEM_SITE_SCOPE__": "1" if scoped else "",
             },
         )
         return replacements

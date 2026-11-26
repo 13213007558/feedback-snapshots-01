@@ -351,6 +351,23 @@ base prefix, which saves copying the DLLs and the standard library zip into ever
 makes no difference to where it lands, since the redirector resolves its target from a value compiled into it rather
 than from its own file name.
 
+System package inheritance
+==========================
+
+An isolated environment resolves nothing from the parent's site-packages. ``--system-site-packages`` changes that all
+or nothing: the interpreter reads ``include-system-site-packages = true`` from ``pyvenv.cfg`` and appends the parent
+site directories to ``sys.path``.
+
+Narrowing the inherited set cannot work that way, because ``sys.path`` has no notion of a partial directory. Instead,
+``--system-site-packages-allow`` keeps ``include-system-site-packages`` at ``false`` and records the approved names in a
+manifest inside the environment. A finder at the end of ``sys.meta_path`` resolves only those names, from the parent
+directories, and raises for any other name those directories would otherwise provide.
+
+The finder is installed by a ``.pth`` file during startup and by ``activate_this.py`` during in-process activation, so
+both routes reach the same decision without either one adding the parent directories to ``sys.path``. Because the check
+happens per import rather than once at creation, a package installed into an approved directory later is visible to a
+new process, while one installed into a hidden directory stays hidden.
+
 *********
  Seeders
 *********

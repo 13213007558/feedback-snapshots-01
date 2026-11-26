@@ -49,6 +49,11 @@ for lib in __LIB_FOLDERS__.split(os.pathsep):  # ty: ignore[unresolved-reference
     site.addsitedir(path.decode("utf-8") if __DECODE_PATH__ else path)  # ty: ignore[unresolved-reference,missing-attribute]
 sys.path[:] = sys.path[prev_length:] + sys.path[0:prev_length]
 
+# __SYSTEM_SITE_SCOPE__ is filled in when the environment inherits only an approved set of system site packages
+if __SYSTEM_SITE_SCOPE__:  # ty: ignore[unresolved-reference]
+    # importing the gate installs it and drops the parent site directories the host process already had on sys.path
+    import _virtualenv_system_site_packages  # noqa: F401
+
 # sys.real_prefix is a legacy attribute that older tools read
 sys.real_prefix = sys.prefix  # ty: ignore[missing-attribute]
 sys.prefix = base
