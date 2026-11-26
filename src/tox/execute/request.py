@@ -45,6 +45,9 @@ class ExecuteRequest:
         allow: list[str] | None = None,
         *,
         capture: bool = False,
+        stdin_data: bytes | None = None,
+        stdin_path: Path | None = None,
+        detach_terminal: bool = False,
     ) -> None:
         """Create a new execution request.
 
@@ -55,6 +58,9 @@ class ExecuteRequest:
         :param run_id: an id to identify this run
         :param allow: executable allowlist, or ``None`` to allow any command
         :param capture: capture output even when no-capture mode is enabled
+        :param stdin_data: fixed bytes to pipe to the subprocess
+        :param stdin_path: fixed file whose descriptor is inherited by the subprocess
+        :param detach_terminal: run the subprocess without a controlling terminal
 
         :raises ValueError: if the command is empty
 
@@ -62,12 +68,18 @@ class ExecuteRequest:
         if len(cmd) == 0:
             msg = "cannot execute an empty command"
             raise ValueError(msg)
+        if stdin_data is not None and stdin_path is not None:
+            msg = "stdin_data and stdin_path are mutually exclusive"
+            raise ValueError(msg)
         self.cmd: list[str] = [str(i) for i in cmd]  #: the command to run
         self.cwd = cwd  #: the working directory to use
         self.env = env  #: the environment variables to use
         self.stdin = stdin  #: the type of standard input interaction allowed
         self.run_id = run_id  #: an id to identify this run
         self.capture = capture
+        self.stdin_data = stdin_data
+        self.stdin_path = stdin_path
+        self.detach_terminal = detach_terminal
         if allow is not None and "*" in allow:
             allow = None  # if we allow everything we can just disable the check
         self.allow = allow

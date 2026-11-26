@@ -8,6 +8,7 @@ __lazy_modules__ = [
     "re",
     "string",
     "tox.config.set_env",
+    "tox.execute.input_arbiter",
     "tox.execute.request",
     "tox.report",
     "tox.util.path",
@@ -25,11 +26,12 @@ import re
 import string
 import sys
 from abc import ABC, abstractmethod
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, NamedTuple, cast
 
 from tox.config.set_env import SetEnv
+from tox.execute.input_arbiter import owner_name
 from tox.execute.request import ExecuteRequest
 from tox.report import HandledError
 from tox.util.path import ensure_cachedir_tag, ensure_empty_dir, ensure_gitignore, ensure_private_dir, is_junction
@@ -508,33 +510,49 @@ class ToxEnv(ABC):  # ruff:ignore[too-many-public-methods]  # public facade
             cwd = cast("Path", self.core["tox_root"])
         if show is None:
             show = self.options.verbosity > 3  # ruff:ignore[magic-value-comparison]  # fixed protocol value
-        request = ExecuteRequest(
-            cmd, cwd, self.environment_variables, stdin, run_id, allow=self._allow_externals, capture=capture
-        )
-        if request.cwd == _CWD:
-            repr_cwd = ""
-        else:
-            try:
-                repr_cwd = f" {_CWD.relative_to(cwd)}"
-            except ValueError:
-                repr_cwd = f" {cwd}"
-        _LOGGER.warning("%s%s> %s", run_id, repr_cwd, request.shell_cmd_redacted)
-        out_err = self.log_handler.stdout, self.log_handler.stderr
-        if executor is None:
-            executor = self.executor
-        with self._execute_call(executor, out_err, request, show) as execute_status:
-            execute_id = id(execute_status)
-            try:
-                self._interruption.running[execute_id] = execute_status
-                yield execute_status
-            finally:
-                self._interruption.running.pop(execute_id)
-        if show and self._hidden_outcomes is not None and execute_status.outcome is not None:
-            # if it gets canceled before even starting
-            self._hidden_outcomes.append(execute_status.outcome)
-        if self.journal and execute_status.outcome is not None:
-            self.journal.add_execute(execute_status.outcome, run_id)
-        self._log_execute(request, execute_status)
+        arbiter = getattr(self.options, "input_arbiter", None)
+        input_owner = owner_name(self.conf.name, run_id) if run_id else None
+        grant_context = arbiter.authorize(input_owner, stdin) if arbiter is not None else nullcontext(None)
+        with grant_context as grant:
+            if interruption.forced or (interruption.requested and not interruption.allow_execution):
+                raise SystemExit(-2)
+            request_stdin = stdin if grant is None else grant.source
+            request = ExecuteRequest(
+                cmd,
+                cwd,
+                self.environment_variables,
+                request_stdin,
+                run_id,
+                allow=self._allow_externals,
+                capture=capture,
+                stdin_data=None if grant is None else grant.stdin_data,
+                stdin_path=None if grant is None else grant.stdin_path,
+                detach_terminal=False if grant is None else grant.detach_terminal,
+            )
+            if request.cwd == _CWD:
+                repr_cwd = ""
+            else:
+                try:
+                    repr_cwd = f" {_CWD.relative_to(cwd)}"
+                except ValueError:
+                    repr_cwd = f" {cwd}"
+            _LOGGER.warning("%s%s> %s", run_id, repr_cwd, request.shell_cmd_redacted)
+            out_err = self.log_handler.stdout, self.log_handler.stderr
+            if executor is None:
+                executor = self.executor
+            with self._execute_call(executor, out_err, request, show) as execute_status:
+                execute_id = id(execute_status)
+                try:
+                    self._interruption.running[execute_id] = execute_status
+                    yield execute_status
+                finally:
+                    self._interruption.running.pop(execute_id)
+            if show and self._hidden_outcomes is not None and execute_status.outcome is not None:
+                # if it gets canceled before even starting
+                self._hidden_outcomes.append(execute_status.outcome)
+            if self.journal and execute_status.outcome is not None:
+                self.journal.add_execute(execute_status.outcome, run_id)
+            self._log_execute(request, execute_status)
 
     @property
     def environment_variables(self) -> dict[str, str]:

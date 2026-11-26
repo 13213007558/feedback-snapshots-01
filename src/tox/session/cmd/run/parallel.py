@@ -4,6 +4,7 @@ from __future__ import annotations
 
 __lazy_modules__ = [
     "argparse",
+    "tox.execute.input_arbiter",
     "tox.session.env_select",
     "tox.util.ci",
     "tox.util.cpu",
@@ -12,8 +13,10 @@ __lazy_modules__ = [
 
 import logging
 from argparse import ArgumentParser, ArgumentTypeError
+from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
+from tox.execute.input_arbiter import InputArbiter
 from tox.plugin import impl
 from tox.session.env_select import CliEnv, register_env_select_flags
 from tox.util.ci import is_ci
@@ -61,6 +64,7 @@ def run_parallel(state: State) -> int:
     if option.no_capture:
         msg = "--no-capture cannot be used with parallel mode"
         raise SystemExit(msg)
+    option.input_arbiter = build_input_arbiter(option)
     return execute(
         state,
         max_workers=1 if option.parallel == OFF_VALUE else option.parallel,
@@ -108,6 +112,42 @@ def parallel_flags(
         default=is_ci(),
         help="disable the spinner when running in parallel, enabled by default in CI",
     )
+    our.add_argument(
+        "--terminal-input",
+        dest="terminal_input",
+        action="append",
+        default=[],
+        metavar="ENV:commands[INDEX]",
+        help="explicitly allow one exact pre/main/post command to inherit the terminal input",
+    )
+    our.add_argument(
+        "--fixed-input",
+        dest="fixed_input",
+        action="append",
+        default=[],
+        metavar="OWNER=TEXT|@FILE",
+        help="give one exact command its own fixed stdin bytes without access to the terminal",
+    )
+
+
+def build_input_arbiter(option: object) -> InputArbiter:
+    """Build the strict parallel stdin arbiter from parsed operator grants."""
+    terminal_owners = tuple(getattr(option, "terminal_input", []) or [])
+    fixed_inputs: dict[str, bytes | Path] = {}
+    for grant in getattr(option, "fixed_input", []) or []:
+        owner, separator, value = str(grant).partition("=")
+        if not separator or not owner or not value:
+            msg = f"invalid --fixed-input grant {grant!r}; expected OWNER=TEXT or OWNER=@FILE"
+            raise SystemExit(msg)
+        if value.startswith("@"):
+            path = Path(value[1:]).expanduser()
+            if not path.is_file():
+                msg = f"fixed input file does not exist: {path}"
+                raise SystemExit(msg)
+            fixed_inputs[owner] = path
+        else:
+            fixed_inputs[owner] = value.encode()
+    return InputArbiter(terminal_owners, fixed_inputs, strict=True)
 
 
 def parse_num_processes(str_value: str) -> int | None:

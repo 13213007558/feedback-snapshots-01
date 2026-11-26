@@ -1803,6 +1803,14 @@ The ``--no-capture`` flag is mutually exclusive with ``--result-json`` (which re
 (where multiple environments' output would interleave). When enabled, tox cannot log command output to
 ``.tox/<env_name>/log/`` files.
 
+In parallel mode, tox does not let every environment inherit terminal input. Grant the terminal to one exact
+``commands_pre``, ``commands``, or ``commands_post`` invocation with ``--terminal-input``; the owner is
+``environment:run_id``, for example ``alpha:commands[0]``. Give another environment its own bytes with
+``--fixed-input owner=@file`` (or ``owner=text``). Non-owners receive ``stdin=DEVNULL`` or their fixed pipe and run in
+a separate session on POSIX so they cannot reopen ``/dev/tty``. The terminal lease is released when the real subprocess
+exits, including after cancellation, so a later ``commands_post`` grant can take over. Non-interactive CI already
+resolves stdin to ``OFF`` and needs no grant.
+
 .. note::
 
     ``tox exec`` always runs in interactive mode without output capture. Use ``tox exec`` for one-off commands that

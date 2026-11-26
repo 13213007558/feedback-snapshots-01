@@ -12,6 +12,7 @@ __lazy_modules__ = [
     "signal",
     "struct",
     "subprocess",
+    "threading",
     "tox.execute.request",
     "tox.execute.util",
     "tox.tox_env.errors",
@@ -33,6 +34,7 @@ from subprocess import (
     PIPE,
     TimeoutExpired,
 )
+from threading import Thread
 from typing import TYPE_CHECKING, Any, Final
 
 from tox.execute.api import (
@@ -131,6 +133,7 @@ class LocalSubProcessExecuteInstance(ExecuteInstance):
         self._read_stdout: ReadViaThread | None = None
         self._file_no_generators: list[Generator[int, Popen[bytes], None]] = []
         self._on_exit_drain = on_exit_drain
+        self._stdin_writer: Thread | None = None
 
     @override
     def __enter__(self) -> ExecuteStatus:
@@ -153,17 +156,23 @@ class LocalSubProcessExecuteInstance(ExecuteInstance):
         if sys.platform == "win32" and is_batch_file(resolved_cmd[0]):
             cmd = batch_file_command_line(resolved_cmd[0], resolved_cmd[1:])
             executable = str(Path(os.environ.get("SYSTEMROOT", r"C:\Windows")) / "System32" / "cmd.exe")
+        stdin_target, stdin_file = self._stdin_target()
+        popen_options: dict[str, Any] = {}
+        if self.request.detach_terminal and os.name == "posix":
+            popen_options["start_new_session"] = True
         try:
             self.process = process = Popen(
                 cmd,
                 executable=executable,
                 stdout=None if inherit_console else next(stdout),
                 stderr=None if inherit_console else next(stderr),
-                stdin={StdinSource.USER: None, StdinSource.OFF: DEVNULL, StdinSource.API: PIPE}[self.request.stdin],
+                stdin=stdin_target,
                 cwd=str(self.request.cwd),
                 env=self.request.env,
+                **popen_options,
             )
         except OSError as exception:
+            self._close_stdin_file(stdin_file)
             # We log a nice error message to avout returning opaque error codes,
             # like exit code 2 (filenotfound).
             error = str(exception)
@@ -173,6 +182,9 @@ class LocalSubProcessExecuteInstance(ExecuteInstance):
                 "Exception running subprocess %s", error
             )
             return LocalSubprocessExecuteFailedStatus(self.options, self._out, self._err, exception)
+        self._close_stdin_file(stdin_file)
+        if self.request.stdin_data is not None:
+            self._start_fixed_stdin_writer(process)
 
         status = LocalSubprocessExecuteStatus(self.options, self._out, self._err, process)
         if not inherit_console:
@@ -182,6 +194,42 @@ class LocalSubProcessExecuteInstance(ExecuteInstance):
             self._read_stdout = ReadViaThread(stdout.send(process), self.out_handler, name=f"out-{pid}", drain=drain)
             self._read_stdout.__enter__()
         return status
+
+    def _stdin_target(self) -> tuple[Any, Any]:
+        if self.request.stdin_path is not None:
+            stdin_file = self.request.stdin_path.open("rb")
+            return stdin_file, stdin_file
+        if self.request.stdin_data is not None:
+            return PIPE, None
+        return {StdinSource.USER: None, StdinSource.OFF: DEVNULL, StdinSource.API: PIPE}[self.request.stdin], None
+
+    @staticmethod
+    def _close_stdin_file(stdin_file: Any) -> None:
+        if stdin_file is not None:
+            with suppress(OSError):
+                stdin_file.close()
+
+    def _start_fixed_stdin_writer(self, process: Popen[bytes]) -> None:
+        data = self.request.stdin_data
+        if data is None:
+            return
+
+        def write_fixed_input() -> None:
+            stdin = process.stdin
+            if stdin is None:
+                return
+            try:
+                LocalSubprocessExecuteStatus._write_stdin_bytes(stdin, data)
+            except OSError:
+                # The child may exit without consuming all fixed input; wait/exit status remains authoritative.
+                pass
+            finally:
+                with suppress(OSError):
+                    stdin.close()
+
+        writer = Thread(target=write_fixed_input, name=f"stdin-{process.pid}", daemon=True)
+        self._stdin_writer = writer
+        writer.start()
 
     @staticmethod
     def get_stream_file_no(key: str) -> Generator[int, Popen[bytes], None]:
@@ -270,6 +318,8 @@ class LocalSubProcessExecuteInstance(ExecuteInstance):
             self._read_stderr.__exit__(exc_type, exc_val, exc_tb)
         if self._read_stdout is not None:
             self._read_stdout.__exit__(exc_type, exc_val, exc_tb)
+        if self._stdin_writer is not None:
+            self._stdin_writer.join(timeout=1.0)
         if self.process is not None:  # cleanup the file handlers
             for stream in (self.process.stdout, self.process.stderr, self.process.stdin):
                 if stream is not None and not getattr(stream, "closed", False):
