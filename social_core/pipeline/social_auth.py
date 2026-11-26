@@ -8,6 +8,7 @@ from social_core.exceptions import (
     AuthResponseError,
 )
 from social_core.identifiers import identifier_matches
+from social_core.renaming import get_renamed_social_auth
 from social_core.utils import normalize_user_names
 
 if TYPE_CHECKING:
@@ -169,6 +170,21 @@ def _migrate_social_auth(backend, storage, social, uid, id_key, evidence_key):
     return migrated
 
 
+def _rename_social_auth_provider(backend, storage, social):
+    try:
+        return storage.user.rename_social_auth_provider(social, backend.name)
+    except Exception as err:
+        is_integrity_error = backend.strategy.storage.is_integrity_error(err)
+        if not isinstance(err, ValueError) and not is_integrity_error:
+            raise
+        raise AuthAssociationError(
+            backend,
+            "Social-auth provider rename conflict",
+            code="identifier_migration_conflict",
+            stage="pipeline",
+        ) from err
+
+
 def social_user(
     backend: BaseAuth[object],
     uid,
@@ -183,7 +199,13 @@ def social_user(
     provider = backend.name
     storage = backend.strategy.storage.user
     uid = str(uid)
-    social = storage.get_social_auth(provider, uid, id_key=id_key)
+    social = get_renamed_social_auth(backend, backend.strategy.storage, uid, id_key)
+    if social is not None and social.provider != provider:
+        # The binding still carries its approved old provider name. Move only the
+        # provider label onto the current backend, preserving its provenance.
+        social = _rename_social_auth_provider(
+            backend, backend.strategy.storage, social
+        )
     if social is None:
         social, evidence_key = _legacy_social_auth(
             backend, storage, provider, uid, id_key, legacy_identifiers, legacy_uids

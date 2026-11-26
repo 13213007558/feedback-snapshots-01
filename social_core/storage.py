@@ -344,6 +344,22 @@ class UserMixin:
         raise NotImplementedError("Implement in subclass")
 
     @classmethod
+    def get_social_auth_for_provider(cls, provider: str):
+        """Return every association stored under the given provider name."""
+        raise NotImplementedError("Implement in subclass")
+
+    @classmethod
+    def rename_social_auth_provider(cls, social, new_provider: str):
+        """Atomically move one association to another provider name.
+
+        Implementations must reject the move when another association already
+        occupies the target ``(provider, uid)`` slot and must keep the stored
+        ``uid`` and ``id_key`` untouched, so the provenance of the account
+        identifier survives an approved backend rename.
+        """
+        raise NotImplementedError("Implement in subclass")
+
+    @classmethod
     def create_social_auth(
         cls, user: UserProtocol, uid: str, provider: str, id_key: str = ""
     ):

@@ -152,6 +152,7 @@ class TestUserSocialAuth(UserMixin, BaseModel):
     @classmethod
     def disconnect(cls, entry) -> None:
         cls.cache.pop(entry.id, None)
+        cls.cache_by_uid.pop((entry.provider, entry.uid), None)
         entry.user.social = [s for s in entry.user.social if entry != s]
 
     @classmethod
@@ -204,6 +205,23 @@ class TestUserSocialAuth(UserMixin, BaseModel):
             for usa in getattr(user, "social", [])
             if provider in (None, usa.provider) and id in (None, usa.id)
         ]
+
+    @classmethod
+    def get_social_auth_for_provider(cls, provider: str):
+        return [
+            social
+            for social in cls.cache_by_uid.values()
+            if social.provider == provider
+        ]
+
+    @classmethod
+    def rename_social_auth_provider(cls, social, new_provider: str):
+        existing = cls.get_social_auth(new_provider, social.uid, id_key=None)
+        if existing is not None and existing is not social:
+            raise ValueError("Social-auth provider rename conflict")
+        social.provider = new_provider
+        social.save()
+        return social
 
     @classmethod
     def create_social_auth(

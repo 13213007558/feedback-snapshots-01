@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Support approved backend (provider) renames through the
+  `SOCIAL_AUTH_BACKENDS_RENAME` mapping. The migration moves only the stored
+  provider label while preserving the provider-scoped `uid`/`id_key`, reports
+  identifier-slot conflicts and same-username/email collisions as verifiable
+  status without merging accounts, stays idempotent for interrupted runs, lets
+  logins started under the old name finish from their saved partial, and falls
+  back to approved legacy provider names during post-cutover lookups.
+
 ## [7.2.0](https://github.com/python-social-auth/social-core/releases/tag/7.2.0) - 2026-11-12
 
 ### Added

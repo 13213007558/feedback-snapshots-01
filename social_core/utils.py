@@ -40,6 +40,7 @@ from .exceptions import (
     ErrorStage,
     SocialAuthBaseException,
 )
+from .renaming import approved_backend_renames
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection
@@ -269,11 +270,14 @@ def _partial_pipeline_matches_request(
     request_data: dict[str, Any],
     pipeline_type: str,
 ) -> bool:
-    if (
-        not partial
-        or partial.backend != backend.name
-        or partial.pipeline_type != pipeline_type
-    ):
+    if not partial or partial.pipeline_type != pipeline_type:
+        return False
+
+    # A login started before a backend rename keeps the old provider name on
+    # its saved partial. The approved mapping lets that in-flight flow finish on
+    # the current backend without accepting partials from unrelated providers.
+    renames = approved_backend_renames(backend)
+    if partial.backend != backend.name and renames.get(partial.backend) != backend.name:
         return False
 
     # Normally when resuming a pipeline, request_data will be empty. We only
