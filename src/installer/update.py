@@ -1,0 +1,265 @@
+"""An optional, safe update flow for already-installed distributions."""
+
+import posixpath
+import shutil
+import tempfile
+import uuid
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING, Literal
+
+from installer._core import _process_WHEEL_file, install
+from installer.destinations import SchemeDictionaryDestination
+from installer.exceptions import UpdateConflictError, UpdateFailedError
+from installer.records import RecordEntry
+from installer.utils import Scheme
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+    from installer.sources import WheelSource
+
+__all__ = [
+    "UpdateConflict",
+    "UpdateReport",
+    "update",
+    "verify_installation",
+]
+
+ConflictReason = Literal["missing", "modified", "unconfirmed", "foreign"]
+
+
+@dataclass
+class UpdateConflict:
+    """A file that the safe update flow cannot reliably account for."""
+
+    scheme: Scheme
+    """The scheme that ``path`` is relative to."""
+
+    path: str
+    """Path of the file, within ``scheme``."""
+
+    reason: ConflictReason
+    """Why the file cannot be accounted for.
+
+    - ``"missing"``: listed in the approved record, but not on disk.
+    - ``"modified"``: on disk, but no longer matches the approved record.
+    - ``"unconfirmed"``: the approved record has no hash or size to check
+      against, so the file cannot be confirmed.
+    - ``"foreign"``: on disk, but not part of the previous install -- likely
+      owned by another distribution.
+    """
+
+
+@dataclass
+class UpdateReport:
+    """Describes the outcome of a successful :py:func:`update`."""
+
+    records: list[tuple[Scheme, RecordEntry]]
+    """All ``(scheme, record)`` pairs written into the new ``RECORD`` file.
+
+    This explains where every file went, including generated scripts (which
+    use the ``"scripts"`` scheme).
+    """
+
+    added: list[tuple[Scheme, RecordEntry]]
+    """Entries that did not exist in the previous install."""
+
+    removed: list[tuple[Scheme, RecordEntry]]
+    """Entries of the previous install that are no longer present."""
+
+
+def _is_record_file(path: str) -> bool:
+    """Check whether ``path`` is a ``RECORD`` file of some distribution."""
+    return path.endswith(".dist-info/RECORD")
+
+
+def verify_installation(
+    destination: SchemeDictionaryDestination,
+    records: "Iterable[tuple[Scheme, RecordEntry]]",
+) -> list[UpdateConflict]:
+    """Check that the files of a previous install are still intact.
+
+    ``RECORD`` entries are skipped: a ``RECORD`` file never carries its own
+    hash, so it can only be verified out-of-band (the deployment service
+    provides the approved copy).
+
+    :param destination: destination that the records were written to.
+    :param records: approved ``(scheme, record)`` pairs of the previous
+        install, as provided by the deployment service.
+    :return: the conflicts found; empty when every recorded file is
+        confirmed to be intact.
+    """
+    conflicts = []
+    for scheme, entry in records:
+        if _is_record_file(entry.path):
+            continue
+        target = destination._path_with_destdir(scheme, entry.path)
+        if not target.exists():
+            conflicts.append(UpdateConflict(scheme, entry.path, "missing"))
+        elif entry.hash_ is None and entry.size is None:
+            conflicts.append(UpdateConflict(scheme, entry.path, "unconfirmed"))
+        else:
+            with target.open("rb") as stream:
+                if not entry.validate_stream(stream):
+                    conflicts.append(UpdateConflict(scheme, entry.path, "modified"))
+    return conflicts
+
+
+def update(
+    source: "WheelSource",
+    destination: SchemeDictionaryDestination,
+    previous_records: "Iterable[tuple[Scheme, RecordEntry]]",
+    additional_metadata: dict[str, bytes] | None = None,
+) -> UpdateReport:
+    """Safely update a previously-installed distribution to ``source``.
+
+    The update is prepared in a staging area (covering every scheme of
+    ``destination``) and only published once every file involved has been
+    accounted for:
+
+    - Files of the previous install are verified against
+      ``previous_records`` -- the approved install record provided by the
+      deployment service.
+    - Files on disk that belong to another distribution are never touched.
+
+    If publishing fails before the new ``RECORD`` is written, the previous
+    install is restored, so that it can still be verified against
+    ``previous_records`` (see :py:func:`verify_installation`).
+
+    :param source: wheel to update to.
+    :param destination: where the previous version is installed, and where
+        the new version should go.
+    :param previous_records: approved ``(scheme, record)`` pairs of the
+        previous install, as returned by :py:func:`installer.install` when
+        it was installed.
+    :param additional_metadata: additional metadata files to generate,
+        usually generated by the caller.
+    :return: a report of what the new ``RECORD`` explains: added files,
+        removed files and where generated scripts went.
+    :raises UpdateConflictError: if a file cannot be confirmed to belong to
+        the distribution being updated. Nothing is modified in this case.
+    :raises UpdateFailedError: if publishing failed; the previous install
+        has been restored.
+    """
+    root_scheme = _process_WHEEL_file(source)
+    record_file_path = posixpath.join(source.dist_info_dir, "RECORD")
+    record_key = (root_scheme, record_file_path)
+
+    previous = list(previous_records)
+    conflicts = verify_installation(destination, previous)
+
+    staging_root = Path(tempfile.mkdtemp(prefix="installer-update-"))
+    try:
+        staging_destination = SchemeDictionaryDestination(
+            {scheme: str(staging_root / scheme) for scheme in destination.scheme_dict},
+            interpreter=destination.interpreter,
+            script_kind=destination.script_kind,
+            hash_algorithm=destination.hash_algorithm,
+        )
+        records = install(source, staging_destination, additional_metadata or {})
+
+        owned = {
+            (scheme, entry.path)
+            for scheme, entry in previous
+            if not _is_record_file(entry.path)
+        }
+        for scheme, record in records:
+            if (scheme, record.path) == record_key or (scheme, record.path) in owned:
+                continue
+            if destination._path_with_destdir(scheme, record.path).exists():
+                conflicts.append(UpdateConflict(scheme, record.path, "foreign"))
+
+        if conflicts:
+            raise UpdateConflictError(conflicts)
+
+        report = _publish(
+            destination=destination,
+            staging_destination=staging_destination,
+            root_scheme=root_scheme,
+            record_file_path=record_file_path,
+            records=records,
+            previous=previous,
+        )
+    finally:
+        shutil.rmtree(staging_root, ignore_errors=True)
+
+    return report
+
+
+def _publish(
+    *,
+    destination: SchemeDictionaryDestination,
+    staging_destination: SchemeDictionaryDestination,
+    root_scheme: Scheme,
+    record_file_path: str,
+    records: list[tuple[Scheme, RecordEntry]],
+    previous: list[tuple[Scheme, RecordEntry]],
+) -> UpdateReport:
+    """Move staged files into place, restoring the old install on failure."""
+    suffix = f".~installer-{uuid.uuid4().hex}"
+    record_key = (root_scheme, record_file_path)
+
+    new_paths = {(scheme, record.path) for scheme, record in records}
+    removed = [(s, e) for s, e in previous if (s, e.path) not in new_paths]
+    replaced = [(s, e) for s, e in previous if (s, e.path) in new_paths]
+
+    # Everything of the previous install that is about to change.
+    backup_targets = [
+        destination._path_with_destdir(scheme, entry.path)
+        for scheme, entry in removed + replaced
+    ]
+    # Defensive: the previous RECORD is normally part of ``previous``, but
+    # make sure a new RECORD never overwrites an unrecorded one.
+    old_record = destination._path_with_destdir(root_scheme, record_file_path)
+    if old_record.exists() and old_record not in backup_targets:
+        backup_targets.append(old_record)
+
+    backups: list[tuple[Path, Path]] = []
+    placed: list[Path] = []
+    try:
+        for target in backup_targets:
+            if not target.exists():
+                continue
+            backup = target.with_name(target.name + suffix)
+            target.rename(backup)
+            backups.append((target, backup))
+
+        for scheme, record in records:
+            if (scheme, record.path) == record_key:
+                continue
+            staged = staging_destination._path_with_destdir(scheme, record.path)
+            target = destination._path_with_destdir(scheme, record.path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            staged.replace(target)
+            placed.append(target)
+
+        # The RECORD file is written last: everything before this point is
+        # still fully explained by the previous RECORD.
+        destination.finalize_installation(
+            scheme=root_scheme,
+            record_file_path=record_file_path,
+            records=records,
+        )
+    except Exception as error:
+        for target in reversed(placed):
+            target.unlink(missing_ok=True)
+        for target, backup in reversed(backups):
+            if backup.exists():
+                backup.replace(target)
+        raise UpdateFailedError(
+            "Update failed before the new RECORD was written; "
+            "the previous installation has been restored."
+        ) from error
+
+    for _, backup in backups:
+        backup.unlink(missing_ok=True)
+
+    previous_paths = {(scheme, entry.path) for scheme, entry in previous}
+    added = [
+        (scheme, record)
+        for scheme, record in records
+        if (scheme, record.path) not in previous_paths
+        and (scheme, record.path) != record_key
+    ]
+    return UpdateReport(records=records, added=added, removed=removed)
