@@ -7,6 +7,7 @@ from json import loads
 from oauthlib.oauth2.rfc6749.errors import (
     ConsentRequired, InvalidRequestError, LoginRequired,
 )
+from oauthlib.oauth2.rfc6749.utils import openid_in_code_provenance
 
 log = logging.getLogger(__name__)
 
@@ -84,8 +85,19 @@ class GrantTypeBase:
         - at_hash
         - c_hash
         """
-        # Treat it as normal OAuth 2 auth code request if openid is not present
-        if not request.scopes or 'openid' not in request.scopes:
+        # Treat it as normal OAuth 2 auth code request if openid is not present.
+        # When code-scope provenance has been resolved for this exchange it is
+        # authoritative, so a post-validation mutation of request.scopes
+        # cannot suppress an approved id_token or escalate an OAuth code.
+        provenance = getattr(
+            request, 'authorization_code_scope_provenance', None)
+        if provenance is not None:
+            openid_approved = openid_in_code_provenance(
+                provenance, request.scopes)
+        else:
+            openid_approved = bool(
+                request.scopes and 'openid' in request.scopes)
+        if not openid_approved:
             return token
 
         # Only add an id token on auth/token step if asked for.

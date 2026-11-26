@@ -485,6 +485,55 @@ class RequestValidator:
         """
         raise NotImplementedError('Subclasses must implement this method.')
 
+    def get_authorization_code_scopes(self, client_id, code, redirect_uri,
+                                      request, *args, **kwargs):
+        """Return the scopes originally approved and persisted with a code.
+
+        The result is the provenance used to decide, at the token endpoint,
+        whether the exchange follows plain OAuth 2.0 or OpenID Connect
+        semantics. In particular, an approved ``openid`` scope means an
+        ``id_token`` must be issued, and its absence means no ``id_token``
+        may be issued. The decision is therefore independent of any ``scope``
+        parameter sent on the token request and of client default scopes that
+        may have changed after the authorization was approved.
+
+        Return a list/tuple/set of scopes (or a space-delimited scope string)
+        loaded from the grant persisted by ``save_authorization_code``.
+
+        Return ``None`` for a *legacy* record created without recoverable
+        approved scopes/protocol provenance. The framework then applies the
+        explicit conservative disposition: the record can never be upgraded
+        to OpenID Connect on the strength of current request data (no
+        ``id_token`` is issued and token dispatch stays on the plain OAuth
+        grant), while the plain OAuth exchange may still complete as long as
+        ``validate_code`` accepts the code. Deployments that would rather
+        refuse such unproven records can raise
+        :class:`oauthlib.oauth2.rfc6749.errors.InvalidGrantError` (or another
+        :class:`~oauthlib.oauth2.rfc6749.errors.OAuth2Error`) from this
+        method instead. Deployments that can infer the original protocol from
+        other stored fields may simply return the corresponding scopes.
+
+        The default implementation returns ``None``. The OpenID Connect
+        validator overrides this and documents it as required for routing
+        token requests based on the approved code scopes.
+
+        Only the ``code`` parameter should be sufficient to retrieve the
+        grant; ``client_id`` and ``redirect_uri`` may be blank.
+
+        :param client_id: Unicode client identifier.
+        :param code: Unicode authorization code grant.
+        :param redirect_uri: Unicode absolute URI, may be ``None``/``""``.
+        :param request: OAuthlib request.
+        :type request: oauthlib.common.Request
+        :return: An iterable/string of scopes, or ``None`` when the origin of
+                 a legacy record cannot be proven.
+
+        Method is used by:
+            - Authorization Token Grant Dispatcher (OpenID Connect)
+            - Authorization Code Grant scope pinning
+        """
+        return None
+
     def validate_grant_type(self, client_id, grant_type, client, request, *args, **kwargs):
         """Ensure client is authorized to use the grant_type requested.
 

@@ -4,6 +4,19 @@ Changelog
 Unreleased:
 ------------------
 OAuth2.0 Provider:
+* OpenID Connect vs plain OAuth 2.0 dispatch at the token endpoint is now
+  bound to the scopes approved and persisted with the authorization code
+  (``RequestValidator.get_authorization_code_scopes``) instead of the mutable
+  token-request scopes. The approved scopes are restored onto the request
+  after code validation, so a client adding/removing ``openid`` on the token
+  request, or changing client default scopes after consent, can no longer
+  suppress an approved ``id_token`` or upgrade an OAuth-only code to OIDC.
+  A ``None`` provenance result denotes a legacy record whose origin cannot be
+  proven and gets an explicit conservative disposition: it is exchanged as
+  plain OAuth 2.0 (no ``id_token``) while the exchange may still complete;
+  validators can instead raise ``InvalidGrantError`` to reject it. A default
+  ``get_authorization_code_scopes`` returning ``None`` was added to the core
+  ``RequestValidator``.
 * **Breaking**: #988: PKCE parameters are now validated against RFC 7636
   syntax. ``code_verifier`` must be 43-128 unreserved ASCII characters
   (``[A-Za-z0-9-._~]``) at the token endpoint (rejected with ``invalid_grant``)

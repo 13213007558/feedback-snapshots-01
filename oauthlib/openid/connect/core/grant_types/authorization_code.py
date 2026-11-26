@@ -7,6 +7,9 @@ import logging
 from oauthlib.oauth2.rfc6749.grant_types.authorization_code import (
     AuthorizationCodeGrant as OAuth2AuthorizationCodeGrant,
 )
+from oauthlib.oauth2.rfc6749.utils import (
+    authorization_code_scope_provenance, openid_in_code_provenance,
+)
 
 from .base import GrantTypeBase
 
@@ -30,8 +33,23 @@ class AuthorizationCodeGrant(GrantTypeBase):
         The authorization_code version of this method is used to
         retrieve the nonce accordingly to the code storage.
         """
-        # Treat it as normal OAuth 2 auth code request if openid is not present
-        if not request.scopes or 'openid' not in request.scopes:
+        # Protocol semantics are fixed by the scopes approved when the code
+        # was issued, not by the (possibly modified) token-request scopes.
+        provenance = getattr(
+            request, 'authorization_code_scope_provenance', None)
+        if provenance is None:
+            provenance = authorization_code_scope_provenance(
+                self.request_validator,
+                request.client_id,
+                request.code,
+                request.redirect_uri,
+                request,
+            )
+            request.authorization_code_scope_provenance = provenance
+
+        if not openid_in_code_provenance(provenance, request.scopes):
+            # Plain OAuth 2.0 (or a legacy record whose OIDC origin cannot be
+            # proven): never attach an id_token.
             return token
 
         nonce = self.request_validator.get_authorization_code_nonce(

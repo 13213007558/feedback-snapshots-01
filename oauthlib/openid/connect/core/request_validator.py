@@ -21,6 +21,19 @@ class RequestValidator(OAuth2RequestValidator):
 
         With that the token endpoint knows when to include OpenIDConnect
         id_token in token response only based on authorization code scopes.
+        The presence of ``openid`` in these *approved* scopes is the stable
+        protocol election for the code exchange: later changes to the token
+        request's ``scope`` parameter or to client default scopes do not
+        alter it.
+
+        Return ``None`` for a legacy code record that cannot prove its
+        original scopes/protocol. The framework then applies an explicit
+        conservative disposition: the exchange is routed as plain OAuth 2.0
+        and no ``id_token`` is ever issued from current request data, while
+        the plain OAuth exchange may still complete if ``validate_code``
+        accepts the code. To refuse such records instead, raise
+        :class:`~oauthlib.oauth2.rfc6749.errors.InvalidGrantError` from this
+        method.
 
         Only code param should be sufficient to retrieve grant code from
         any storage you are using, `client_id` and `redirect_uri` can have a
@@ -30,7 +43,8 @@ class RequestValidator(OAuth2RequestValidator):
         :param client_id: Unicode client identifier
         :param code: Unicode authorization code grant
         :param redirect_uri: Unicode absolute URI
-        :return: A list of scope
+        :return: A list/tuple/set of scopes, a space-delimited scope string,
+                 or ``None`` when a legacy record's origin cannot be proven.
 
         Method is used by:
             - Authorization Token Grant Dispatcher

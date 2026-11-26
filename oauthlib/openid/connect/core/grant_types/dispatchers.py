@@ -1,5 +1,11 @@
 import logging
 
+from oauthlib.oauth2.rfc6749 import errors
+from oauthlib.oauth2.rfc6749.utils import (
+    SCOPE_PROVENANCE_NOT_IMPLEMENTED, SCOPE_PROVENANCE_UNKNOWN,
+    authorization_code_scope_provenance, openid_in_code_provenance,
+)
+
 log = logging.getLogger(__name__)
 
 
@@ -78,7 +84,6 @@ class AuthorizationTokenGrantDispatcher(Dispatcher):
 
     def _handler_for_request(self, request):
         handler = self.default_grant
-        scopes = ()
         parameters = dict(request.decoded_body)
         client_id = parameters.get('client_id')
         code = parameters.get('code')
@@ -87,15 +92,46 @@ class AuthorizationTokenGrantDispatcher(Dispatcher):
         # If code is not present fallback to `default_grant` which will
         # raise an error for the missing `code` in `create_token_response` step.
         if code:
-            scopes = self.request_validator.get_authorization_code_scopes(client_id, code, redirect_uri, request)
-
-        if 'openid' in scopes:
-            handler = self.oidc_grant
+            # Route on the scopes/protocol approved when the code was issued,
+            # never on the current token-request scopes or client defaults.
+            provenance = authorization_code_scope_provenance(
+                self.request_validator, client_id, code, redirect_uri, request
+            )
+            # Stash the routing provenance on the request for observability;
+            # the grant re-resolves it after validate_code and pins scopes.
+            request.authorization_code_scope_provenance = provenance
+            if provenance is SCOPE_PROVENANCE_UNKNOWN:
+                log.warning(
+                    'Authorization code %r for client %r has no provable '
+                    'approved-scope origin; routing as plain OAuth 2.0.',
+                    code, client_id,
+                )
+            if provenance is SCOPE_PROVENANCE_NOT_IMPLEMENTED:
+                # No stored-scope lookup exists, so the protocol cannot be
+                # chosen before code validation. The OIDC grant is a superset
+                # of the OAuth code grant and its id_token modifier makes the
+                # final decision from the scopes that ``validate_code``
+                # restores from the persisted grant.
+                handler = self.oidc_grant
+            elif openid_in_code_provenance(provenance, request.scopes):
+                handler = self.oidc_grant
 
         log.debug('Selecting handler for request %r.', handler)
         return handler
 
     def create_token_response(self, request, token_handler):
         """Read scope and route to the designated handler."""
-        handler = self._handler_for_request(request)
+        try:
+            handler = self._handler_for_request(request)
+        except errors.OAuth2Error as error:
+            # A validator may enforce a strict disposition for legacy codes by
+            # raising (e.g. InvalidGrantError) from its scope lookup while
+            # routing. Render it like any other token endpoint error.
+            headers = {
+                'Content-Type': 'application/json',
+                'Cache-Control': 'no-store',
+                'Pragma': 'no-cache',
+            }
+            headers.update(error.headers or {})
+            return headers, error.json, error.status_code
         return handler.create_token_response(request, token_handler)

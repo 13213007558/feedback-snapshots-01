@@ -12,6 +12,9 @@ import re
 from oauthlib import common
 
 from .. import errors
+from ..utils import (
+    authorization_code_scope_provenance, list_to_scope,
+)
 from .base import GrantTypeBase, revalidate_response_mode
 
 log = logging.getLogger(__name__)
@@ -581,8 +584,45 @@ class AuthorizationCodeGrant(GrantTypeBase):
                       request.redirect_uri, request.client_id, request.client)
             raise errors.MismatchingRedirectURIError(request=request)
 
+        # Pin the effective scopes/protocol to the ones approved when the
+        # code was issued, so a token-request scope parameter or changed
+        # client default configuration cannot alter the semantics.
+        self._restore_approved_scopes(request)
+
         for validator in self.custom_validators.post_token:
             validator(request)
+
+    def _restore_approved_scopes(self, request):
+        """Restore scope provenance persisted with the authorization code.
+
+        When the validator exposes genuine stored scopes through
+        ``get_authorization_code_scopes`` they become the sole effective
+        ``request.scopes``/``request.scope`` for token issuance. The resolved
+        provenance is stashed on the request for the OIDC token modifier.
+
+        A legacy record whose provenance is explicitly unknown
+        (``None``) is tagged as such but otherwise left to the scopes
+        established by ``validate_code``; the protocol layer treats the tag
+        conservatively (never OIDC). Validators without a usable provenance
+        lookup keep the historical behaviour of owning ``request.scopes`` in
+        ``validate_code``.
+        """
+        # Always resolve afresh: a Request may be reused across token calls
+        # in tests, and the redirect_uri has now been validated/defaulted.
+        provenance = authorization_code_scope_provenance(
+            self.request_validator,
+            request.client_id,
+            request.code,
+            request.redirect_uri,
+            request,
+        )
+        request.authorization_code_scope_provenance = provenance
+
+        if isinstance(provenance, tuple):
+            # An empty provenance is treated like "no scope claim" so the
+            # token response omits ``scope`` instead of emitting ``scope=""``.
+            request.scopes = list(provenance) if provenance else None
+            request.scope = list_to_scope(provenance) if provenance else None
 
     def validate_code_challenge(self, challenge, challenge_method, verifier):
         if challenge_method in self._code_challenge_methods:
