@@ -38,7 +38,7 @@ from zipfile import ZipFile
 
 from virtualenv.seed.wheels import get_wheel, pip_wheel_env_run
 from virtualenv.seed.wheels.acquire import PIP_RUN
-from virtualenv.seed.wheels.util import Version
+from virtualenv.seed.wheels.util import Version, Wheel
 from virtualenv.util.path import write_file
 from virtualenv.util.subprocess import LogCmd
 
@@ -50,7 +50,6 @@ if TYPE_CHECKING:
 
     from virtualenv.config.cli.parser import VirtualEnvOptions
     from virtualenv.create.creator import Creator
-    from virtualenv.seed.wheels.util import Wheel
 
 
 class PipInvoke(BaseEmbed):
@@ -79,6 +78,7 @@ class PipInvoke(BaseEmbed):
             self._execute(cmd, pip_wheel_env_run(self.extra_search_dir, self.app_data, self.env, for_py_version))
         if os.name == "posix":
             self._rewrite_launchers(creator)
+        self.write_approval_receipt(creator, {Wheel(path).distribution: Wheel(path) for path in self._wheels})
 
     @contextmanager
     def get_pip_install_cmd(self, exe: Path, for_py_version: str) -> Generator[list[str], None, None]:
@@ -93,6 +93,7 @@ class PipInvoke(BaseEmbed):
 
         """
         self._wheels.clear()
+        selection = self.select_approval_set(for_py_version)
         cmd: Final[list[str]] = [
             str(exe),
             "-c",
@@ -109,16 +110,28 @@ class PipInvoke(BaseEmbed):
         with TemporaryDirectory(prefix="virtualenv-seed-") as folder:
             cmd.extend(["--find-links", folder])
             for dist, version in self.distribution_to_versions().items():
-                wheel: Final[Wheel | None] = get_wheel(
-                    distribution=dist,
-                    version=version,
-                    for_py_version=for_py_version,
-                    search_dirs=self.extra_search_dir,
-                    download=self.download,
-                    app_data=self.app_data,
-                    do_periodic_update=self.periodic_update,
-                    env=self.env,
-                )
+                wheel: Wheel | None = None
+                if selection is not None:
+                    approved = selection.wheel_for(dist)
+                    approved_path = selection.path_for(approved) if approved is not None else None
+                    if approved is not None and approved_path is not None:
+                        candidate = Wheel(approved_path)
+                        requested_version = Version.of_version(version)
+                        if version != Version.embed and (
+                            requested_version is None or candidate.has_version(requested_version)
+                        ):
+                            wheel = candidate
+                if wheel is None:
+                    wheel = get_wheel(
+                        distribution=dist,
+                        version=version,
+                        for_py_version=for_py_version,
+                        search_dirs=self.extra_search_dir,
+                        download=self.download,
+                        app_data=self.app_data,
+                        do_periodic_update=self.periodic_update,
+                        env=self.env,
+                    )
                 if wheel is None:
                     msg: Final[str] = f"could not get wheel for distribution {dist}"
                     raise RuntimeError(msg)

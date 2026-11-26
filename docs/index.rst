@@ -57,6 +57,7 @@ into the standard library under the ``venv`` module. For how ``virtualenv`` comp
 - :doc:`how-to/install` — Install virtualenv on your system
 - :doc:`how-to/usage` — Select Python versions, activate environments, configure defaults, and use from Python code
 - :doc:`how-to/verify-release` — Check that a downloaded release came from the virtualenv release workflow
+- :doc:`how-to/approved-seed-wheels` — Record and reuse the approved seed-wheel set in a shared cache
 
 **Reference** - Technical information
 

@@ -24,7 +24,8 @@ from typing import TYPE_CHECKING, Final
 
 from virtualenv.info import fs_supports_symlink
 from virtualenv.seed.embed.base_embed import BaseEmbed
-from virtualenv.seed.wheels import get_wheel
+from virtualenv.seed.wheels import Version, get_wheel
+from virtualenv.seed.wheels.util import Wheel
 
 from .pip_install.copy import CopyPipInstall
 from .pip_install.symlink import SymlinkPipInstall
@@ -38,7 +39,6 @@ if TYPE_CHECKING:
     from virtualenv.app_data.base import AppData
     from virtualenv.config.cli.parser import VirtualEnvOptions
     from virtualenv.create.creator import Creator
-    from virtualenv.seed.wheels.util import Wheel
     from virtualenv.util.lock import PathLockBase
 
     from .pip_install.base import PipInstall
@@ -131,15 +131,29 @@ class FromAppData(BaseEmbed):
                     exc_type, exc_value, exc_traceback = value
                     messages.append("".join(traceback.format_exception(exc_type, exc_value, exc_traceback)))
                 raise RuntimeError("\n".join(messages))
+            self.write_approval_receipt(creator, name_to_whl)
 
     @contextmanager
     # the wheel lookup and its image build share one context, splitting it passes the lock around
     def _get_seed_wheels(self, creator: Creator) -> Generator[dict[str, Wheel], None, None]:  # ruff:ignore[complex-structure]
         name_to_whl, lock, fail = {}, Lock(), {}
+        for_py_version = creator.interpreter.version_release_str
+        selection = self.select_approval_set(for_py_version)
 
         def _get(distribution: str, version: str | None) -> None:
-            for_py_version = creator.interpreter.version_release_str
             failure, result = None, None
+            if selection is not None:
+                approved = selection.wheel_for(distribution)
+                approved_path = selection.path_for(approved) if approved is not None else None
+                if approved is not None and approved_path is not None:
+                    candidate = Wheel(approved_path)
+                    requested_version = Version.of_version(version)
+                    if version != Version.embed and (
+                        requested_version is None or candidate.has_version(requested_version)
+                    ):
+                        with lock:
+                            name_to_whl[distribution] = candidate
+                        return
             # fallback to download in case the exact version is not available
             for download in [True] if self.download else [False, True]:
                 failure = None
@@ -185,6 +199,16 @@ class FromAppData(BaseEmbed):
             thread.start()
         for thread in threads:
             thread.join()
+        if selection is not None:
+            for distribution, wheel in list(name_to_whl.items()):
+                approved_path = selection.path_for(distribution)
+                if approved_path is not None and wheel.path != approved_path:
+                    fail[distribution] = getattr(self, f"{distribution}_version", None)
+                    LOGGER.error(
+                        "seed wheel %s is not the wheel recorded by approval %s",
+                        wheel.name,
+                        selection.approval_id,
+                    )
         if fail:
             msg = f"seed failed due to failing to download wheels {', '.join(fail.keys())}"
             raise RuntimeError(msg)

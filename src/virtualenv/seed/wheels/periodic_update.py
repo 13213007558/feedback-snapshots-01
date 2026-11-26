@@ -128,10 +128,24 @@ def handle_auto_update(  # ruff:ignore[too-many-arguments]  # simplint: ignore[u
 ) -> None:
     u_log = UpdateLog.from_app_data(app_data, distribution, for_py_version)
     if u_log.needs_update:
+        from .approval import load_approval  # ruff:ignore[import-outside-top-level]
+
+        approval = load_approval(env=env)
+        if approval is not None:
+            u_log.approval_id = approval.id
         u_log.periodic = True
         u_log.started = datetime.now(tz=timezone.utc)
         app_data.embed_update_log(distribution, for_py_version).write(u_log.to_dict())
-        trigger_update(distribution, for_py_version, wheel, search_dirs, app_data, periodic=True, env=env)
+        trigger_update(
+            distribution,
+            for_py_version,
+            wheel,
+            search_dirs,
+            app_data,
+            periodic=True,
+            env=env,
+            approval_id=u_log.approval_id,
+        )
 
 
 def trigger_update(  # ruff:ignore[too-many-arguments]  # the background update process needs every input
@@ -142,6 +156,7 @@ def trigger_update(  # ruff:ignore[too-many-arguments]  # the background update 
     app_data: AppData,
     env: dict[str, str],
     periodic: bool,
+    approval_id: str | None = None,
 ) -> None:
     """Start a background process that updates the wheels of a distribution.
 
@@ -152,6 +167,7 @@ def trigger_update(  # ruff:ignore[too-many-arguments]  # the background update 
     :param app_data: the application data folder
     :param env: the environment variables for the update
     :param periodic: ``True`` when the update is a periodic check rather than a manual one
+    :param approval_id: approval revision frozen when the update was queued
 
     """
     wheel_path = None if wheel is None else str(wheel.path)
@@ -167,6 +183,9 @@ def trigger_update(  # ruff:ignore[too-many-arguments]  # the background update 
         .strip()
         .format(distribution, for_py_version, wheel_path, str(app_data), [str(p) for p in search_dirs], periodic)
     )
+    if approval_id is not None:
+        final_call = code.rfind(")")
+        code = f"{code[:final_call]}, approval_id={approval_id!r}{code[final_call:]}"
     code = (
         f"import runpy\nwith runpy.run_path({ROOT!r}, run_name='__loader__')['VersionedFindLoad']():\n{indent(code, '    ')}"
         if IS_ZIPAPP
@@ -207,16 +226,23 @@ class UpdateLog:
     :param completed: when the last update completed, ``None`` when it never did
     :param versions: the versions found
     :param periodic: ``True`` when the update was periodic, ``None`` when unknown
+    :param approval_id: identifier of the approval/mirror revision used by this log
 
     """
 
     def __init__(
-        self, started: datetime | None, completed: datetime | None, versions: list[NewVersion], periodic: bool | None
+        self,
+        started: datetime | None,
+        completed: datetime | None,
+        versions: list[NewVersion],
+        periodic: bool | None,
+        approval_id: str | None = None,
     ) -> None:
         self.started = started
         self.completed = completed
         self.versions = versions
         self.periodic = periodic
+        self.approval_id = approval_id
 
     @classmethod
     def from_app_data(cls, app_data: AppData, distribution: str, for_py_version: str) -> UpdateLog:
@@ -263,6 +289,8 @@ class UpdateLog:
             [NewVersion.from_dict(v) for v in dictionary.get("versions", [])],  # ty: ignore[not-iterable]
             # the log is parsed JSON, typed object, so the value is not narrowed
             dictionary.get("periodic"),  # ty: ignore[invalid-argument-type]
+            # the log may use either the explicit field or the shorter provenance name
+            dictionary.get("approval_id") or dictionary.get("approval"),  # ty: ignore[invalid-argument-type]
         )
 
     @property
@@ -284,12 +312,16 @@ class UpdateLog:
         :returns: the update log as a dictionary
 
         """
-        return {
+        result: dict[str, object] = {
             "started": dump_datetime(self.started),
             "completed": dump_datetime(self.completed),
             "periodic": self.periodic,
             "versions": [r.to_dict() for r in self.versions],
         }
+        if self.approval_id is not None:
+            result["approval_id"] = self.approval_id
+            result["approval"] = self.approval_id
+        return result
 
 
 def load_datetime(value: str | None) -> datetime | None:
@@ -548,11 +580,18 @@ def manual_upgrade(app_data: AppData, env: dict[str, str]) -> int:
     """
     failed: list[str] = []
 
+    from .approval import load_approval  # ruff:ignore[import-outside-top-level]
+
+    approval = load_approval(env=env)
+    approval_id = None if approval is None else approval.id
     threads = []
     for for_py_version, distribution_to_package in BUNDLE_SUPPORT.items():
         # load extra search dir for the given for_py
         for distribution in distribution_to_package:
-            thread = Thread(target=_run_manual_upgrade, args=(app_data, distribution, for_py_version, env, failed))
+            thread = Thread(
+                target=_run_manual_upgrade,
+                args=(app_data, distribution, for_py_version, env, failed, approval_id),
+            )
             thread.start()
             threads.append(thread)
 
@@ -562,10 +601,15 @@ def manual_upgrade(app_data: AppData, env: dict[str, str]) -> int:
 
 
 def _run_manual_upgrade(
-    app_data: AppData, distribution: str, for_py_version: str, env: dict[str, str], failed: list[str]
+    app_data: AppData,
+    distribution: str,
+    for_py_version: str,
+    env: dict[str, str],
+    failed: list[str],
+    approval_id: str | None = None,
 ) -> None:
     try:
-        _manual_upgrade_one(app_data, distribution, for_py_version, env)
+        _manual_upgrade_one(app_data, distribution, for_py_version, env, approval_id)
     # Worker exceptions do not propagate through join(), so record them for the exit status.
     except Exception as exception:  # ruff:ignore[blind-except]
         details = getattr(exception, "stderr", None) or ""
@@ -575,7 +619,13 @@ def _run_manual_upgrade(
         failed.append(f"{distribution} for python {for_py_version}")
 
 
-def _manual_upgrade_one(app_data: AppData, distribution: str, for_py_version: str, env: dict[str, str]) -> None:
+def _manual_upgrade_one(
+    app_data: AppData,
+    distribution: str,
+    for_py_version: str,
+    env: dict[str, str],
+    approval_id: str | None = None,
+) -> None:
     start = datetime.now(tz=timezone.utc)
     # bundle imports this module, so the import must wait until it is needed
     from .bundle import from_bundle  # ruff:ignore[import-outside-top-level]
@@ -603,6 +653,7 @@ def _manual_upgrade_one(app_data: AppData, distribution: str, for_py_version: st
         app_data=app_data,
         search_dirs=[],
         periodic=False,
+        approval_id=approval_id,
     )
 
     args = [
@@ -625,6 +676,7 @@ def do_update(  # ruff:ignore[too-many-arguments]
     app_data: str | AppData,
     search_dirs: list[str] | list[Path],
     periodic: bool,
+    approval_id: str | None = None,
 ) -> list[NewVersion] | None:
     """Download the newest wheel of a distribution and record it in the update log.
 
@@ -634,13 +686,26 @@ def do_update(  # ruff:ignore[too-many-arguments]
     :param app_data: the application data folder, or its path
     :param search_dirs: the folders searched for wheels
     :param periodic: ``True`` when the update is a periodic check rather than a manual one
+    :param approval_id: optional approval revision used for this update
 
     :returns: the versions downloaded, ``None`` when the update did not run
 
     """
+    if approval_id is None:
+        from .approval import load_approval  # ruff:ignore[import-outside-top-level]
+
+        approval = load_approval(env=os.environ)  # ty: ignore[invalid-argument-type]
+        if approval is None:
+            approval_id = None
+        else:
+            approval_id = approval.id
+            # download_wheel reads os.environ in this update process; apply an approved document's mirror.
+            os.environ.update(approval.environment(os.environ))
     versions = None
     try:
-        versions = _run_do_update(app_data, distribution, embed_filename, for_py_version, periodic, search_dirs)
+        versions = _run_do_update(
+            app_data, distribution, embed_filename, for_py_version, periodic, search_dirs, approval_id
+        )
     finally:
         LOGGER.debug("done %s %s with %s", distribution, for_py_version, versions)
     return versions
@@ -654,6 +719,7 @@ def _run_do_update(  # ruff:ignore[too-many-arguments]
     for_py_version: str,
     periodic: bool,
     search_dirs: list[str] | list[Path],
+    approval_id: str | None = None,
 ) -> list[NewVersion]:
     wheel_filename = None if embed_filename is None else Path(embed_filename)
     embed_version = None if wheel_filename is None else Wheel(wheel_filename).parsed_version
@@ -661,6 +727,8 @@ def _run_do_update(  # ruff:ignore[too-many-arguments]
     search_dirs = [Path(p) if isinstance(p, str) else p for p in search_dirs]
     wheelhouse = app_data.house
     u_log = UpdateLog.from_app_data(app_data, distribution, for_py_version)
+    if approval_id is not None:
+        u_log.approval_id = approval_id
     now = datetime.now(tz=timezone.utc)
 
     update_versions, other_versions = [], []

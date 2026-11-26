@@ -8,6 +8,7 @@ __lazy_modules__ = [
     "virtualenv.seed.wheels.embed",
 ]
 
+import json
 import logging
 from abc import ABC
 from argparse import SUPPRESS, ArgumentTypeError
@@ -26,6 +27,9 @@ if TYPE_CHECKING:
 
     from virtualenv.app_data.base import AppData
     from virtualenv.config.cli.parser import VirtualEnvOptions
+    from virtualenv.create.creator import Creator
+    from virtualenv.seed.wheels.approval import ApprovalSelection
+    from virtualenv.seed.wheels.util import Wheel
 
 LOGGER: Final[logging.Logger] = logging.getLogger(__name__)  # simplint: ignore[module-variable-prefix]  # existing name
 #: Whether the bundled wheels are updated periodically when ``--no-periodic-update`` is not passed. Distributions
@@ -69,6 +73,13 @@ class BaseEmbed(Seeder, ABC):
         self.no_setuptools = options.no_setuptools
         self.app_data = options.app_data
         self.periodic_update = not options.no_periodic_update
+        self.seed_approval_value = getattr(options, "seed_approval", None)
+        from virtualenv.seed.wheels.approval import load_approval
+
+        self.seed_approval = load_approval(self.seed_approval_value, env=getattr(options, "env", None))
+        if self.seed_approval is not None:
+            self.env = self.seed_approval.environment(self.env)
+        self.approval_selection = None
 
         if options.wheel is not None or options.no_wheel:
             LOGGER.warning(
@@ -91,6 +102,91 @@ class BaseEmbed(Seeder, ABC):
             for distribution in self.distributions()
             if getattr(self, f"no_{distribution}", None) is False and getattr(self, f"{distribution}_version") != "none"
         }
+
+    def select_approval_set(self, for_py_version: str) -> ApprovalSelection | None:
+        """Select the shared-cache approved set for an offline creation.
+
+        :param for_py_version: target Python ``major.minor`` version
+
+        :returns: the selection, or ``None`` when no approval ledger exists
+
+        """
+        from virtualenv.seed.wheels.approval import ApprovalError, ApprovalLedger
+
+        ledger = ApprovalLedger(self.app_data)
+        try:
+            selection = ledger.select(for_py_version, self.seed_approval, offline=True)
+        except ApprovalError:
+            if self.seed_approval is not None:
+                raise
+            selection = None
+        self.approval_selection = selection
+        return selection
+
+    def write_approval_receipt(self, creator: Creator, name_to_whl: dict[str, Wheel]) -> None:
+        """Record the approval actually used by a successful creation.
+
+        :param creator: environment creator carrying the destination and config
+        :param name_to_whl: wheels selected for seeding
+
+        """
+        selection = self.approval_selection
+        from virtualenv.seed.wheels.approval import RECEIPT_NAME, ApprovalLedger
+        from virtualenv.seed.wheels.periodic_update import UpdateLog
+
+        update_log_approvals: dict[str, str] = {}
+        if self.seed_approval is not None:
+            for distribution in name_to_whl:
+                try:
+                    update_log = UpdateLog.from_app_data(
+                        self.app_data, distribution, creator.interpreter.version_release_str
+                    )
+                except Exception:  # ruff:ignore[blind-except]  # provenance must not break creation
+                    continue
+                if update_log.approval_id:
+                    update_log_approvals[distribution] = update_log.approval_id
+
+        if selection is None and not update_log_approvals:
+            return
+
+        installed_versions: dict[str, str] = {}
+        for dist_info in creator.purelib.glob("*.dist-info"):
+            stem = dist_info.name[: -len(".dist-info")]
+            distribution, separator, version = stem.rpartition("-")
+            if separator:
+                installed_versions[distribution] = version
+
+        if selection is not None:
+            receipt_path = ApprovalLedger(self.app_data).write_receipt(
+                creator.dest,
+                selection,
+                installed_versions=installed_versions,
+            )
+            payload = json.loads(receipt_path.read_text(encoding="utf-8"))
+        else:
+            payload = {"offline": True, "wheels": []}
+            receipt_path = creator.dest / RECEIPT_NAME
+        payload["update_log_approvals"] = update_log_approvals
+        if selection is None:
+            payload["installed_versions"] = installed_versions
+        receipt_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = receipt_path.with_name(f".{RECEIPT_NAME}.tmp")
+        temporary.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        temporary.replace(receipt_path)
+
+        creator.pyenv_cfg["seed-approval-receipt"] = receipt_path.name
+        if selection is not None:
+            creator.pyenv_cfg["seed-approval-id"] = selection.approval_id
+            creator.pyenv_cfg["seed-approval-set"] = selection.set.id
+            if selection.stale:
+                creator.pyenv_cfg["seed-approval-stale"] = "true"
+                creator.pyenv_cfg["seed-approval-requested-id"] = selection.requested_approval_id or ""
+        elif len(set(update_log_approvals.values())) == 1:
+            creator.pyenv_cfg["seed-approval-id"] = next(iter(update_log_approvals.values()))
+        LOGGER.warning(
+            "recorded seed approval evidence in %s",
+            receipt_path,
+        )
 
     @classmethod
     def distributions(cls) -> dict[str, str]:
@@ -181,6 +277,13 @@ class BaseEmbed(Seeder, ABC):
             action=ExtendAction,
             help="a path containing wheels to extend the internal wheel list (can be set 1+ times)",
             default=[],
+        )
+        parser.add_argument(
+            "--seed-approval",
+            dest="seed_approval",
+            metavar="id|file|json",
+            default=None,
+            help="approved mirror identity or JSON approval document; offline creation records the cached approval",
         )
         for distribution, default in cls.distributions().items():
             help_ = f"version of {distribution} to install as seed: embed, bundle, none or exact version"
