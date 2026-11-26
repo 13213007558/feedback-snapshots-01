@@ -3,6 +3,7 @@
 
 import json
 import os
+from collections.abc import Callable
 from typing import Any
 
 import grpc
@@ -53,6 +54,7 @@ class _AsyncCerbosHubClientBase:
         credentials: Credentials | None = None,
         api_endpoint: str | None = None,
         timeout_secs: float | None = None,
+        credential_provider: Callable[[], Credentials] | None = None,
     ):
         target = os.getenv("CERBOS_HUB_API_ENDPOINT", "dns:///api.cerbos.cloud")
         if api_endpoint:
@@ -72,9 +74,13 @@ class _AsyncCerbosHubClientBase:
             credentials=grpc.ssl_channel_credentials(),
             options=options,
         )
-        auth_interceptor = _AsyncAuthInterceptor(
-            _AsyncAuthClient(channel, self._timeout_secs, credentials)
+        self._auth_client = _AsyncAuthClient(
+            channel,
+            self._timeout_secs,
+            credentials,
+            credential_provider=credential_provider,
         )
+        auth_interceptor = _AsyncAuthInterceptor(self._auth_client)
 
         # We have to create a new channel here because aio.channels have no way to add interceptors after creation.
         self._channel = grpc.aio.secure_channel(
@@ -83,6 +89,12 @@ class _AsyncCerbosHubClientBase:
             options=options,
             interceptors=(auth_interceptor,),
         )
+
+    def refresh_credentials(self, credentials: Credentials | None = None) -> None:
+        self._auth_client.refresh_credentials(credentials)
+
+    async def refresh_auth(self, credentials: Credentials | None = None) -> str:
+        return await self._auth_client.refresh(credentials)
 
     async def __aenter__(self):
         return self

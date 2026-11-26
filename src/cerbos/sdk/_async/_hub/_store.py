@@ -1,8 +1,9 @@
 # Copyright 2021-2025 Zenauth Ltd.
 # SPDX-License-Identifier: Apache-2.0
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from functools import wraps
+from typing import Any
 
 import circuitbreaker
 import grpc
@@ -13,6 +14,13 @@ from cerbos.cloud.store.v1 import store_pb2, store_pb2_grpc
 from cerbos.sdk._async._hub._auth import InvalidCredentialsError
 from cerbos.sdk._async._hub._client import _AsyncCerbosHubClientBase
 from cerbos.sdk.hub.model import Credentials
+from cerbos.sdk.hub.capabilities import (
+    AsyncGuardedHubClient,
+    CredentialSource,
+    HubAccessPolicy,
+    HubCapability,
+    HubRequest,
+)
 from cerbos.sdk.hub.store_model import (
     AbortedError,
     AuthenticationFailedError,
@@ -159,9 +167,78 @@ class AsyncCerbosHubStoreClient(_AsyncCerbosHubClientBase):
         credentials: Credentials | None = None,
         api_endpoint: str | None = None,
         timeout_secs: float | None = None,
+        credential_provider: Callable[[], Credentials] | None = None,
+        transport: Any | None = None,
+        capability: HubCapability | None = None,
+        capabilities: HubCapability | Iterable[HubCapability] | None = None,
+        credential_ref: str | None = None,
     ):
-        super().__init__(credentials, api_endpoint, timeout_secs)
+        self._guarded: AsyncGuardedHubClient | None = None
+        self._hub_policy = HubAccessPolicy(
+            capability if capability is not None else capabilities
+        )
+        if transport is not None:
+            credential_source = CredentialSource(
+                credentials,
+                refresher=credential_provider,
+                ref=credential_ref,
+                identity=capability.identity if capability is not None else None,
+            )
+            self._guarded = AsyncGuardedHubClient(
+                transport,
+                capability=capability,
+                capabilities=capabilities,
+                credential_source=credential_source,
+                credential_ref=credential_ref,
+            )
+            self._channel = None
+            self._store_stub = None
+            return
+
+        super().__init__(
+            credentials,
+            api_endpoint,
+            timeout_secs,
+            credential_provider=credential_provider,
+        )
         self._store_stub = store_pb2_grpc.CerbosStoreServiceStub(self._channel)
+
+    async def close(self):
+        if self._guarded is None:
+            await super().close()
+
+    def refresh_credentials(
+        self, credentials: Credentials | None = None
+    ) -> None:
+        if self._guarded is not None:
+            self._guarded.refresh_credentials(credentials)
+        else:
+            self._auth_client.refresh_credentials(credentials)
+
+    async def refresh_auth(
+        self, credentials: Credentials | None = None
+    ) -> str | None:
+        if self._guarded is not None:
+            self._guarded.refresh_credentials(credentials)
+            return None
+        return await self._auth_client.refresh(credentials)
+
+    async def reconcile(self, error_or_ticket: Any) -> Any:
+        if self._guarded is None:
+            raise NotImplementedError(
+                "reconciliation requires a local/capability transport"
+            )
+        return await self._guarded.reconcile(error_or_ticket)
+
+    async def recover(self, error_or_ticket: Any, **kwargs: Any) -> Any:
+        return await self.reconcile(error_or_ticket, **kwargs)
+
+    async def verify_publication(self, error_or_ticket: Any, **kwargs: Any) -> Any:
+        return await self.reconcile(error_or_ticket, **kwargs)
+
+    def _check_hub_scope(self, action: str, store_id: str) -> None:
+        if self._hub_policy.capabilities:
+            self._hub_policy.prepare(HubRequest(action=action, store_id=store_id))
 
     @handle_store_errors
     @_CIRCUIT_BREAKER
@@ -177,6 +254,20 @@ class AsyncCerbosHubStoreClient(_AsyncCerbosHubClientBase):
         Overwrite the store such that it only contains the files included in this request.
         Raises OperationDiscardedError if the store is already at the desired state.
         """
+
+        self._check_hub_scope("replace_files", store_id)
+        if self._guarded is not None:
+            response = await self._guarded.replace_files(
+                store_id,
+                message,
+                contents,
+                version_must_equal=version_must_equal,
+            )
+            return ReplaceFilesResponse(
+                store_pb2.ReplaceFilesResponse(
+                    new_store_version=response.version or 0
+                )
+            )
 
         if not (store_id and store_id.strip()):
             raise InvalidRequestError(ValueError("store_id is required"))
@@ -279,6 +370,20 @@ class AsyncCerbosHubStoreClient(_AsyncCerbosHubClientBase):
         Raises OperationDiscardedError if the operation does not change store state.
         """
 
+        self._check_hub_scope("modify_files", store_id)
+        if self._guarded is not None:
+            response = await self._guarded.modify_files(
+                store_id,
+                message,
+                file_ops,
+                version_must_equal=version_must_equal,
+            )
+            return ModifyFilesResponse(
+                store_pb2.ModifyFilesResponse(
+                    new_store_version=response.version or 0
+                )
+            )
+
         if not (store_id and store_id.strip()):
             raise InvalidRequestError(ValueError("store_id is required"))
 
@@ -363,6 +468,19 @@ class AsyncCerbosHubStoreClient(_AsyncCerbosHubClientBase):
         """
         Retrieve the contents of the given files.
         """
+        self._check_hub_scope("get_files", store_id)
+        if self._guarded is not None:
+            response = await self._guarded.get_files(store_id, file_paths)
+            raw = store_pb2.GetFilesResponse(
+                store_version=response.version or 0,
+                files=[
+                    store_pb2.File(path=path, contents=contents)
+                    for path, contents in response.files.items()
+                    if contents is not None
+                ],
+            )
+            return GetFilesResponse(raw)
+
         if not (store_id and store_id.strip()):
             raise InvalidRequestError(ValueError("store_id is required"))
 
@@ -384,6 +502,23 @@ class AsyncCerbosHubStoreClient(_AsyncCerbosHubClientBase):
           - FilterPathLike: Match a path partially
           - FilterPathIn: Match any or all of the paths in the given list
         """
+        self._check_hub_scope("list_files", store_id)
+        if self._guarded is not None:
+            response = await self._guarded.list_files(store_id)
+            paths = list(response.paths)
+            if isinstance(filter, FilterPathEqual):
+                paths = [path for path in paths if path == filter.path]
+            elif isinstance(filter, FilterPathContains):
+                paths = [path for path in paths if filter.fragment in path]
+            elif isinstance(filter, FilterPathIn):
+                allowed = set(filter.paths)
+                paths = [path for path in paths if path in allowed]
+            raw = store_pb2.ListFilesResponse(
+                store_version=response.version or 0,
+                files=paths,
+            )
+            return ListFilesResponse(raw)
+
         path_filter: store_pb2.FileFilter | None = None
         if filter:
             if isinstance(filter, FilterPathEqual):

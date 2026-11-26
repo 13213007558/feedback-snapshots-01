@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import json
 import os
+from collections.abc import Callable
 from typing import Any
 
 import grpc
@@ -53,6 +54,7 @@ class _CerbosHubClientBase:
         credentials: Credentials | None = None,
         api_endpoint: str | None = None,
         timeout_secs: float | None = None,
+        credential_provider: Callable[[], Credentials] | None = None,
     ):
         target = os.getenv("CERBOS_HUB_API_ENDPOINT", "dns:///api.cerbos.cloud")
         if api_endpoint:
@@ -67,10 +69,17 @@ class _CerbosHubClientBase:
         channel = grpc.secure_channel(
             target, credentials=grpc.ssl_channel_credentials(), options=options
         )
-        auth_interceptor = _AuthInterceptor(
-            _AuthClient(channel, self._timeout_secs, credentials)
+        self._auth_client = _AuthClient(
+            channel,
+            self._timeout_secs,
+            credentials,
+            credential_provider=credential_provider,
         )
+        auth_interceptor = _AuthInterceptor(self._auth_client)
         self._channel = grpc.intercept_channel(channel, auth_interceptor)
+
+    def refresh_credentials(self, credentials: Credentials | None = None) -> None:
+        self._auth_client.refresh_credentials(credentials)
 
     def __enter__(self):
         return self

@@ -3,6 +3,7 @@
 
 import asyncio
 import os
+from collections.abc import Callable
 from datetime import datetime, timedelta
 
 import grpc
@@ -33,19 +34,44 @@ class _AsyncAuthClient:
         channel: grpc.aio.Channel,
         timeout_secs: float,
         credentials: Credentials | None = None,
+        credential_provider: Callable[[], Credentials] | None = None,
     ):
-        self._client_id = os.environ["CERBOS_HUB_CLIENT_ID"]
-        self._client_secret = os.environ["CERBOS_HUB_CLIENT_SECRET"]
-        if credentials:
-            if credentials.client_id != "":
-                self._client_id = credentials.client_id
-
-            if credentials.client_secret != "":
-                self._client_secret = credentials.client_secret
+        self._credential_provider = credential_provider
+        self._client_id = os.getenv("CERBOS_HUB_CLIENT_ID", "")
+        self._client_secret = os.getenv("CERBOS_HUB_CLIENT_SECRET", "")
+        self._apply_credentials(credentials)
+        if credential_provider is not None:
+            self._apply_credentials(credential_provider())
 
         self._client = apikey_pb2_grpc.ApiKeyServiceStub(channel)
         self._timeout_secs = timeout_secs
         self._lock = asyncio.Lock()
+
+    def _apply_credentials(self, credentials: Credentials | None) -> None:
+        if credentials is None:
+            return
+        if credentials.client_id != "":
+            self._client_id = credentials.client_id
+
+        if credentials.client_secret != "":
+            self._client_secret = credentials.client_secret
+
+    def refresh_credentials(
+        self, credentials: Credentials | None = None
+    ) -> None:
+        """Rotate this client's credentials and force a new token request."""
+        if credentials is not None:
+            self._apply_credentials(credentials)
+        elif self._credential_provider is not None:
+            self._apply_credentials(self._credential_provider())
+        self._token = None
+        self._expiry = datetime.min
+        self._invalid_credentials = False
+
+    async def refresh(self, credentials: Credentials | None = None) -> str:
+        async with self._lock:
+            self.refresh_credentials(credentials)
+        return await self.authenticate()
 
     async def authenticate(self) -> str:
         async with self._lock:

@@ -10,6 +10,30 @@ from typing import Self
 from google.protobuf import json_format, struct_pb2, timestamp_pb2
 
 from cerbos.cloud.store.v1 import store_pb2
+from cerbos.sdk.hub.capabilities import (
+    ApprovalMismatchError,
+    ApprovalProof,
+    CapabilityDeniedError,
+    ConfirmationLevel,
+    CredentialSource,
+    CredentialVault,
+    GuardedHubClient,
+    AsyncGuardedHubClient,
+    HubAccessPolicy,
+    HubAction,
+    HubCapability,
+    HubRequest,
+    HubResponse,
+    LocalHubTransport,
+    OperationSpec,
+    PublicationResult,
+    PublicationStatus,
+    RecoveryTicket,
+    ReconciliationReport,
+    ReplyInterruptedError,
+    UnconfirmedPublicationError,
+    WriteOutcomeUnknownError,
+)
 
 
 class RpcErrorCause(Enum):
