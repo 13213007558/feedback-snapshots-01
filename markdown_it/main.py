@@ -9,6 +9,12 @@ from .common import normalize_url, utils
 from .parser_block import ParserBlock
 from .parser_core import ParserCore
 from .parser_inline import ParserInline
+from .reference_scopes import (
+    REFERENCE_SCOPE_KEY,
+    merge_shared_references,
+    merged_sources,
+    normalize_sources,
+)
 from .renderer import RendererHTML, RendererProtocol
 from .rules_core.state_core import StateCore
 from .token import Token
@@ -19,6 +25,8 @@ try:
 except ModuleNotFoundError:
     linkify_it = None
 
+
+_MISSING = object()
 
 _PRESETS: dict[str, PresetType] = {
     "default": presets.default.make(),
@@ -288,6 +296,133 @@ class MarkdownIt:
         """
         env = {} if env is None else env
         return self.renderer.render(self.parse(src, env), self.options, env)
+
+    def parse_scoped(
+        self,
+        src: str,
+        scope: str,
+        *,
+        env: EnvType | None = None,
+        shared_references: Mapping[str, Mapping[str, Any]] | None = None,
+    ) -> list[Token]:
+        """Parse one source as a named reference scope.
+
+        Reference definitions in ``src`` are visible only to references in
+        the same scope, plus definitions passed as ``shared_references``.
+        Definitions for other scopes already stored in ``env`` are ignored,
+        so a reference is never resolved against a different source.
+
+        :param src: source string
+        :param scope: non-empty name of this source's reference scope
+        :param env: environment sandbox, to share between several sources
+        :param shared_references: ``{label: {"href": ..., "title": ...}}``
+            definitions approved for use by every scope
+
+        The parsed definitions are recorded in
+        ``env["reference_scopes"][scope]``; the scope may be reused to parse
+        further parts of the same source.
+        """
+        if not isinstance(scope, str):
+            raise TypeError(f"scope should be a str, not {type(scope)}")
+        if not scope:
+            raise ValueError("scope may not be empty")
+
+        env = {} if env is None else env
+        merge_shared_references(env, shared_references)
+
+        previous = env.get(REFERENCE_SCOPE_KEY, _MISSING)
+        env[REFERENCE_SCOPE_KEY] = scope
+        try:
+            return self.parse(src, env)
+        finally:
+            if previous is _MISSING:
+                env.pop(REFERENCE_SCOPE_KEY, None)
+            else:
+                env[REFERENCE_SCOPE_KEY] = previous
+
+    def render_scoped(
+        self,
+        src: str,
+        scope: str,
+        *,
+        env: EnvType | None = None,
+        shared_references: Mapping[str, Mapping[str, Any]] | None = None,
+    ) -> Any:
+        """Render one source as a named reference scope.
+
+        See :meth:`parse_scoped` for the scoping rules.
+        """
+        env = {} if env is None else env
+        tokens = self.parse_scoped(
+            src, scope, env=env, shared_references=shared_references
+        )
+        return self.renderer.render(tokens, self.options, env)
+
+    def parse_sources(
+        self,
+        sources: Mapping[str, str] | Iterable[tuple[str, str]] | Iterable[str],
+        *,
+        shared_references: Mapping[str, Mapping[str, Any]] | None = None,
+        env: EnvType | None = None,
+        separator: str = "\n\n",
+    ) -> tuple[list[Token], EnvType]:
+        """Parse several sources concatenated into one document, without
+        mixing their reference definitions.
+
+        ``sources`` may be a mapping of ``scope -> Markdown``, an iterable of
+        ``(scope, Markdown)`` pairs, or a plain iterable of Markdown strings
+        (scoped ``"source-0"``, ``"source-1"``, ...).  The sources are joined
+        with ``separator``, exactly as if they had been concatenated before
+        parsing, except that each source keeps its own reference namespace.
+
+        A source boundary must fall between blocks: a paragraph or code fence
+        left open at the end of one source continues into the next, and its
+        references belong to the scope where the block started.
+
+        :returns: ``(tokens, env)``.  The environment records the resolved
+            definitions in ``env["reference_scopes"]``.
+        """
+        source_items = normalize_sources(sources)
+        text, source_env = merged_sources(
+            source_items,
+            shared_references=shared_references,
+            separator=separator,
+        )
+        env = source_env if env is None else env
+        if env is not source_env:
+            existing_ranges = env.get("reference_scope_ranges")
+            if (
+                existing_ranges
+                and existing_ranges != source_env["reference_scope_ranges"]
+            ):
+                raise ValueError(
+                    "env already has reference_scope_ranges for different sources"
+                )
+            env["reference_scope_ranges"] = source_env["reference_scope_ranges"]
+            merge_shared_references(env, source_env.get("shared_references"))
+        tokens = self.parse(text, env)
+        return tokens, env
+
+    def render_sources(
+        self,
+        sources: Mapping[str, str] | Iterable[tuple[str, str]] | Iterable[str],
+        *,
+        shared_references: Mapping[str, Mapping[str, Any]] | None = None,
+        env: EnvType | None = None,
+        separator: str = "\n\n",
+    ) -> Any:
+        """Render several sources concatenated into one document.
+
+        See :meth:`parse_sources` for the scoping rules.
+        """
+        env = {} if env is None else env
+        tokens, env = self.parse_sources(
+            sources,
+            shared_references=shared_references,
+            env=env,
+            separator=separator,
+        )
+        return self.renderer.render(tokens, self.options, env)
 
     def parseInline(self, src: str, env: EnvType | None = None) -> list[Token]:
         """The same as [[MarkdownIt.parse]] but skip all block rules.

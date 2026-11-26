@@ -1,6 +1,11 @@
 # Process [link](<to> "stuff")
 
 from ..common.utils import isStrSpace, normalizeReference
+from ..reference_scopes import (
+    has_reference_namespace,
+    record_token_reference,
+    resolve_reference,
+)
 from .state_inline import StateInline
 
 
@@ -8,6 +13,7 @@ def link(state: StateInline, silent: bool) -> bool:
     href = ""
     title = ""
     label = None
+    source = None
     oldPos = state.pos
     maximum = state.posMax
     start = state.pos
@@ -90,7 +96,7 @@ def link(state: StateInline, silent: bool) -> bool:
         #
         # Link reference
         #
-        if "references" not in state.env:
+        if not has_reference_namespace(state.env):
             return False
 
         if pos < maximum and state.src[pos] == "[":
@@ -112,13 +118,14 @@ def link(state: StateInline, silent: bool) -> bool:
 
         label = normalizeReference(label)
 
-        ref = state.env["references"].get(label, None)
-        if not ref:
+        resolved = resolve_reference(state.env, label)
+        if not resolved:
             state.pos = oldPos
             return False
 
+        ref, source = resolved
         href = ref["href"]
-        title = ref["title"]
+        title = ref.get("title", "")
 
     #
     # We found the end of the link, and know for a fact it's a valid link
@@ -137,6 +144,9 @@ def link(state: StateInline, silent: bool) -> bool:
         # note, this is not part of markdown-it JS, but is useful for renderers
         if label and state.md.options.get("store_labels", False):
             token.meta["label"] = label
+
+        if source is not None and label:
+            record_token_reference(token, state.env, label, source)
 
         state.linkLevel += 1
         state.md.inline.tokenize(state)

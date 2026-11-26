@@ -416,6 +416,54 @@ md.add_render_rule("link_open", render_blank_link)
 print(md.render("[a]\n\n[a]: b"))
 ```
 
+(md/reference-scopes)=
+
+### Isolating reference definitions
+
+A document has one namespace for link reference definitions, so definitions
+from two concatenated sources can resolve each other's links. If an
+application combines content from independent origins (for example a template
+and an external submission), use `render_sources` to keep each source's
+definitions to itself:
+
+```{jupyter-execute}
+from markdown_it import MarkdownIt
+
+md = MarkdownIt("commonmark")
+
+internal = "[contact][who]\n\n[who]: https://intranet.example/contact"
+external = "[contact][who]\n\n[who]: https://example.net/contact"
+
+print(md.render_sources({"internal": internal, "external": external}))
+```
+
+Each reference is resolved only against definitions from its own source, even
+though the sources are parsed as one document. Definitions can be shared
+explicitly; a shared definition takes precedence over a definition with the
+same label in any source:
+
+```{jupyter-execute}
+print(
+    md.render_sources(
+        {"internal": internal, "external": external},
+        shared_references={"who": {"href": "https://example.com/contact"}},
+    )
+)
+```
+
+Sources may also be passed as an iterable of `(scope, text)` pairs or of plain
+strings (scoped `source-0`, `source-1`, ...). To parse rather than render, use
+`parse_sources`. To keep parsing later parts of one source instead, use
+`render_scoped(text, scope, env=env)` with the same `env`.
+
+The resolved definitions are recorded in `env["reference_scopes"]` with their
+`source`, and each link or image token that used one carries
+`token.meta["reference_scope"]` and `token.meta["reference_source"]`.
+A source boundary should fall between blocks: a paragraph or code fence left
+open at the end of one source continues into the next, and belongs to the scope
+where the block started. Outside of a scoped parse, reference handling is
+unchanged.
+
 (md/markdown-renderer)=
 
 ### Markdown renderer

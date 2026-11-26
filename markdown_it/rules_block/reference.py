@@ -1,6 +1,7 @@
 import logging
 
 from ..common.utils import charCodeAt, isSpace, normalizeReference
+from ..reference_scopes import scope_for_line, store_scoped_reference
 from .state_block import StateBlock
 
 LOGGER = logging.getLogger(__name__)
@@ -157,8 +158,7 @@ def reference(state: StateBlock, startLine: int, _endLine: int, silent: bool) ->
     if silent:
         return True
 
-    if "references" not in state.env:
-        state.env["references"] = {}
+    scope = scope_for_line(state.env, startLine)
 
     state.line = nextLine
 
@@ -172,6 +172,20 @@ def reference(state: StateBlock, startLine: int, _endLine: int, silent: bool) ->
             "label": string[1:labelEnd],
         }
         token.map = [startLine, state.line]
+        if scope is not None:
+            token.meta["source"] = scope
+
+    if scope is not None:
+        store_scoped_reference(
+            state.env,
+            label,
+            {"title": title, "href": href, "map": [startLine, state.line]},
+            scope,
+        )
+        return True
+
+    if "references" not in state.env:
+        state.env["references"] = {}
 
     if label not in state.env["references"]:
         state.env["references"][label] = {
