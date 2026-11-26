@@ -99,6 +99,53 @@ python -m examples.example1
 
 (replace example1 with one of the filenames in the examples folder)
 
+### Impersonating another Kubernetes identity
+
+Impersonation follows a logical call, not the connection. Every request
+snapshots the identity once, while it is serialized, and the transport replays
+that snapshot for its retry attempts. List pagination and watch restarts
+therefore continue under the identity that was approved when the call started:
+
+```python
+from kubernetes import client, config
+from kubernetes.utils.impersonation import ImpersonationConfig
+
+config.load_kube_config()
+api = client.ApiClient()
+
+# Client-wide default (use a dedicated client for it, not the shared default).
+api.impersonation = ImpersonationConfig(
+    user="auditor",
+    groups=["restricted"],
+)
+
+# Scope a different identity to the current thread, e.g. one approved call.
+claim = api.bind_impersonation(ImpersonationConfig(user="reviewer"))
+for page in pages():                     # each page re-enters the same claim
+    with claim:
+        result = client.CoreV1Api(api).list_namespace(
+            _continue=page, limit=100)
+
+# Ordinary calls from the same client keep the client default;
+# Impersonate-* headers passed through _headers are honoured too.
+```
+
+Rules worth knowing:
+
+- Precedence, most specific first: `_impersonation=` on the call, then
+  `Impersonate-*` request headers, then an active `bind_impersonation()` block,
+  then `ApiClient.impersonation`, then `Configuration.impersonation`.
+- `_impersonation=None` explicitly opts a call out of any default, including
+  during its retries.
+- `Impersonate-Group` and `Impersonate-Extra-*` are sent as repeated header
+  lines; `Impersonate-User` and `Impersonate-Uid` are single-valued and a
+  duplicate is rejected before any request is sent.
+- `bind_impersonation()` is thread-local for the synchronous client and
+  task-local (`ContextVar`) for the async client, so a shared client can run
+  interleaved restricted and ordinary calls without one inheriting the other.
+- Impersonation headers are also forwarded on exec/attach/port-forward
+  WebSocket connections.
+
 ## Documentation
 
 All APIs and Models' documentation can be found at the [Generated client's README file](kubernetes/README.md)

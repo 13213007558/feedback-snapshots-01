@@ -113,8 +113,23 @@ class WsApiClient(ApiClient):
 
         if headers is None:
             headers = {}
-        if 'sec-websocket-protocol' not in headers:
-            headers['sec-websocket-protocol'] = 'v4.channel.k8s.io'
+        # Expand repeated impersonation headers into separate lines; aiohttp
+        # keeps them when it receives an iterable of pairs, and the API server
+        # needs one line per group or extra-info value.
+        if hasattr(headers, 'items') and any(
+                isinstance(value, (list, tuple))
+                for value in headers.values()):
+            expanded = []
+            for name, value in headers.items():
+                if isinstance(value, (list, tuple)):
+                    for entry in value:
+                        expanded.append((name, entry))
+                else:
+                    expanded.append((name, value))
+            headers = expanded
+        if isinstance(headers, dict):
+            if 'sec-websocket-protocol' not in headers:
+                headers['sec-websocket-protocol'] = 'v4.channel.k8s.io'
 
         if query_params:
             url += '?' + urlencode(query_params)

@@ -546,16 +546,28 @@ def get_websocket_url(url, query_params=None):
 def create_websocket(configuration, url, headers=None):
     enableTrace(False)
 
-    # We just need to pass the Authorization, ignore all the other
-    # http headers we get from the generated code
+    # The generated code supplies the Authorization header and any
+    # Impersonate-* headers. Forward both: an exec/port-forward call that was
+    # approved for an impersonated subject must not silently run as the
+    # service account instead.
     header = []
-    if headers and 'authorization' in headers:
-            header.append("authorization: %s" % headers['authorization'])
+    if headers:
+        items = headers.items() if hasattr(headers, 'items') else headers
+        for name, value in items:
+            lowered = name.lower()
+            if lowered == 'authorization' or \
+                    lowered.startswith('impersonate-'):
+                if isinstance(value, (list, tuple)):
+                    for entry in value:
+                        header.append("%s: %s" % (name, entry))
+                else:
+                    header.append("%s: %s" % (name, value))
     if headers and 'sec-websocket-protocol' in headers:
         header.append("sec-websocket-protocol: %s" %
                       headers['sec-websocket-protocol'])
     else:
-        header.append("sec-websocket-protocol: %s,%s" % (V5_CHANNEL_PROTOCOL, V4_CHANNEL_PROTOCOL))
+        header.append("sec-websocket-protocol: %s,%s" % (
+            V5_CHANNEL_PROTOCOL, V4_CHANNEL_PROTOCOL))
 
     if url.startswith('wss://') and configuration.verify_ssl:
         ssl_opts = {

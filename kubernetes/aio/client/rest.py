@@ -210,11 +210,27 @@ class RESTClientObject:
         if 'Content-Type' not in headers:
             headers['Content-Type'] = 'application/json'
 
+        # aiohttp turns a mapping of name->value into one header line per name.
+        # Impersonation cares about repeated names (one line per group and per
+        # extra-info value), so pass those to aiohttp as (name, value) pairs.
+        # The working ``headers`` dict stays a mapping because later branches
+        # read and rewrite Content-Type.
+        if any(isinstance(value, (list, tuple))
+               for value in headers.values()):
+            wire_headers = []
+            for name, value in headers.items():
+                if isinstance(value, (list, tuple)):
+                    wire_headers.extend((name, entry) for entry in value)
+                else:
+                    wire_headers.append((name, value))
+        else:
+            wire_headers = headers
+
         args = {
             "method": method,
             "url": url,
             "timeout": timeout,
-            "headers": headers
+            "headers": wire_headers
         }
 
         if self.configuration.tls_server_name:

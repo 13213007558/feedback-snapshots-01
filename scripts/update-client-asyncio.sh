@@ -61,6 +61,9 @@ mv "${CLIENT_ROOT}/swagger.json" "${SCRIPT_ROOT}/swagger.json"
 echo ">>> restoring Kubernetes client-go retry integration..."
 git apply "${SCRIPT_ROOT}/client_go_retry_asyncio_patch.diff"
 
+echo ">>> restoring Kubernetes impersonation identity binding..."
+git apply "${SCRIPT_ROOT}/impersonation_asyncio_patch.diff"
+
 echo ">>> updating version information..."
 sed -i'' "s/^CLIENT_VERSION = .*/CLIENT_VERSION = \\\"${CLIENT_VERSION}\\\"/" "${SCRIPT_ROOT}/../setup-asyncio.py"
 sed -i'' "s/^__version__ = .*/__version__ = \\\"${CLIENT_VERSION}\\\"/" "${CLIENT_ROOT}/__init__.py"

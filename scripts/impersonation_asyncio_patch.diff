@@ -1,0 +1,327 @@
+diff --git a/kubernetes/aio/client/api_client.py b/kubernetes/aio/client/api_client.py
+index 3595abd6b..be6da83e7 100644
+--- a/kubernetes/aio/client/api_client.py
++++ b/kubernetes/aio/client/api_client.py
+@@ -21,6 +21,7 @@ import os
+ import re
+ import tempfile
+ import uuid
++from contextvars import ContextVar
+ 
+ from urllib.parse import quote
+ from typing import Tuple, Optional, List, Dict, Union, Any
+@@ -30,6 +31,14 @@ from kubernetes.aio.client.configuration import Configuration
+ from kubernetes.aio.client.api_response import ApiResponse, T as ApiResponseT
+ import kubernetes.aio.client.models
+ from kubernetes.aio.client import rest
++from kubernetes.aio.utils.impersonation import (
++    ImpersonationConfig,
++    ImpersonationError,
++    ImpersonationRequest,
++    config_from_snapshot,
++    from_headers,
++    resolve,
++)
+ from kubernetes.aio.client.exceptions import (
+     ApiValueError,
+     ApiException,
+@@ -71,7 +80,63 @@ def _get_openapi_to_dict(value: Any) -> Any:
+     return openapi_to_dict
+ 
+ 
+-RequestSerialized = Tuple[str, str, Dict[str, str], Optional[str], List[str]]
++RequestSerialized = Tuple[str, str, Any, Optional[str], List[str]]
++
++_UNSET_SENTINEL = object()
++
++# Async requests from one event loop share a thread, so thread-local state
++# cannot separate two concurrent logical calls. A ContextVar follows the task
++# instead: a binding entered by one coroutine never leaks into another one.
++_active_impersonation: ContextVar[Optional[tuple]] = ContextVar(
++    "kubernetes_aio_impersonation", default=None)
++
++
++class _ActiveImpersonation:
++    """Reusable scope that activates one frozen impersonation snapshot.
++
++    The snapshot is fixed when the scope is created so every page of a list or
++    restart of a watch repeats the identity that was originally approved. The
++    active value lives in a :class:`ContextVar`, so two tasks on the same event
++    loop keep independent identities even when they share the claim object.
++    """
++
++    def __init__(self, snapshot):
++        self._snapshot = snapshot
++
++    @property
++    def snapshot(self) -> ImpersonationRequest:
++        return self._snapshot
++
++    def _current(self):
++        return _active_impersonation.get() or ()
++
++    def _check(self):
++        current = self._current()
++        if current and current[-1].headers != self._snapshot.headers:
++            raise ImpersonationError(
++                "entering a different impersonation scope while another "
++                "identity is active would misattribute this request")
++
++    def __enter__(self):
++        self._check()
++        _active_impersonation.set(self._current() + (self._snapshot,))
++        return self
++
++    def __exit__(self, exc_type, exc_value, traceback):
++        current = self._current()
++        if current and current[-1].headers == self._snapshot.headers:
++            _active_impersonation.set(current[:-1])
++        return False
++
++    async def __aenter__(self):
++        return self.__enter__()
++
++    async def __aexit__(self, exc_type, exc_value, traceback):
++        return self.__exit__(exc_type, exc_value, traceback)
++
++    def __repr__(self):
++        return "<impersonation %r>" % (self._snapshot,)
++
+ 
+ class ApiClient:
+     """Generic API client for OpenAPI client library builds.
+@@ -121,10 +186,110 @@ class ApiClient:
+         if header_name is not None:
+             self.default_headers[header_name] = header_value
+         self.cookie = cookie
++        # Identity used by an approved logical call; see the synchronous
++        # client for the rationale. Requests snapshot it at serialization time
++        # and the transport replays that snapshot for retries and paging.
++        self._impersonation_config: Optional[ImpersonationConfig] = None
+         # Set default User-Agent.
+         self.user_agent = 'OpenAPI-Generator/37.0.0+snapshot/python'
+         self.client_side_validation = configuration.client_side_validation
+ 
++    # -- impersonation ----------------------------------------------------
++
++    @property
++    def impersonation(self) -> Optional[ImpersonationConfig]:
++        return self._impersonation_config
++
++    @impersonation.setter
++    def impersonation(self, value) -> None:
++        if value is None or isinstance(value, ImpersonationConfig):
++            self._impersonation_config = value
++        elif isinstance(value, ImpersonationRequest):
++            self._impersonation_config = config_from_snapshot(value)
++        elif isinstance(value, dict):
++            self._impersonation_config = config_from_snapshot(resolve(value))
++        else:
++            raise TypeError(
++                "impersonation must be an ImpersonationConfig, a mapping or "
++                "None")
++
++    def bind_impersonation(self, config):
++        """Scope an impersonation config to the current asyncio task.
++
++        Returns a context manager (usable as ``with``/``async with``) that
++        snapshots ``config`` once. Concurrent tasks keep their own binding, so
++        a shared async client can run a restricted call and an ordinary call
++        interleaved without either inheriting the other's identity.
++        """
++        return _ActiveImpersonation(resolve(config))
++
++    def _binding_snapshot(self) -> Optional[ImpersonationRequest]:
++        current = _active_impersonation.get() or ()
++        return current[-1] if current else None
++
++    def _resolve_impersonation_for_request(self, overrides, header_params,
++                                           config) -> Optional[
++            ImpersonationRequest]:
++        """Decide the identity for one logical request.
++
++        Precedence, most specific first:
++
++        1. ``_impersonation`` passed to the call (``None`` opts out).
++        2. ``Impersonate-*`` headers supplied by the caller through
++           ``_headers``.
++        3. A :meth:`bind_impersonation` block active in this task.
++        4. The client's ``impersonation`` default.
++        5. The configuration's ``impersonation`` default.
++
++        The result is frozen before the request is sent, so a later change to
++        any of those sources cannot change an in-flight call.
++        """
++        if overrides is not _UNSET_SENTINEL:
++            return resolve(overrides)
++        from_headers_snapshot = from_headers(header_params)
++        if from_headers_snapshot:
++            return from_headers_snapshot
++        snapshot = self._binding_snapshot()
++        if snapshot is not None:
++            return snapshot
++        if self._impersonation_config is not None:
++            return self._impersonation_config.snapshot()
++        config_impersonation = getattr(config, 'impersonation', None)
++        if config_impersonation is not None:
++            return resolve(config_impersonation)
++        return None
++
++    def _watch_impersonation(self) -> Optional[ImpersonationRequest]:
++        """Identity a watch must repeat on every restart.
++
++        A watch has no per-call override, so only the active binding, then the
++        client default, then the configuration default apply. Resolving here
++        (once, when the stream starts) keeps every resumed connection on the
++        identity that was approved for the first one.
++        """
++        snapshot = self._binding_snapshot()
++        if snapshot is not None:
++            return snapshot
++        if self._impersonation_config is not None:
++            return self._impersonation_config.snapshot()
++        config_impersonation = getattr(
++            self.configuration, 'impersonation', None)
++        if config_impersonation is not None:
++            return resolve(config_impersonation)
++        return None
++
++    def _active_impersonation(self, overrides=_UNSET_SENTINEL) -> Optional[
++            ImpersonationRequest]:
++        """Resolve the identity a single request or watch must use."""
++        if overrides is not _UNSET_SENTINEL:
++            return resolve(overrides)
++        snapshot = self._binding_snapshot()
++        if snapshot is not None:
++            return snapshot
++        if self._impersonation_config is None:
++            return None
++        return self._impersonation_config.snapshot()
++
+     async def __aenter__(self):
+         return self
+ 
+@@ -182,7 +347,8 @@ class ApiClient:
+         files=None, auth_settings=None,
+         collection_formats=None,
+         _host=None,
+-        _request_auth=None
++        _request_auth=None,
++        _impersonation=_UNSET_SENTINEL
+     ) -> RequestSerialized:
+ 
+         """Builds the HTTP request params needed by the request.
+@@ -203,6 +369,9 @@ class ApiClient:
+         :param _request_auth: set to override the auth_settings for an a single
+                               request; this effectively ignores the authentication
+                               in the spec for a single request.
++        :param _impersonation: impersonate the given identity for this single
++            logical request; ``None`` explicitly sends no impersonation even
++            if a client or configuration default exists.
+         :return: tuple of form (path, http_method, query_params, header_params,
+             body, post_params, files)
+         """
+@@ -214,10 +383,18 @@ class ApiClient:
+         header_params.update(self.default_headers)
+         if self.cookie:
+             header_params['Cookie'] = self.cookie
++
++        # Freeze the identity before any transport work; see the synchronous
++        # client for why this must happen here rather than in the transport.
++        snapshot = self._resolve_impersonation_for_request(
++            _impersonation, header_params, config)
++        if snapshot is not None:
++            header_params = snapshot.apply(header_params)
++
+         if header_params:
+             header_params = self.sanitize_for_serialization(header_params)
+             header_params = dict(
+-                self.parameters_to_tuples(header_params,collection_formats)
++                self.parameters_to_tuples(header_params, collection_formats)
+             )
+ 
+         # path parameters
+@@ -287,6 +464,7 @@ class ApiClient:
+         post_params=None,
+         _request_timeout=None,
+         _preload_content=True,
++        _impersonation=_UNSET_SENTINEL,
+     ) -> rest.RESTResponse:
+         """Makes the HTTP request (synchronous)
+         :param method: Method to call.
+@@ -297,9 +475,19 @@ class ApiClient:
+         :param post_params dict: Request post form parameters,
+             for `application/x-www-form-urlencoded`, `multipart/form-data`.
+         :param _request_timeout: timeout setting for this request.
++        :param _impersonation: impersonation identity for a direct ``call_api``
++            caller; the same snapshot is used by every transport retry.
+         :return: RESTResponse
+         """
+ 
++        header_params = header_params or {}
++        if _impersonation is not _UNSET_SENTINEL:
++            # Generated methods already serialize the identity through
++            # param_serialize; here only an explicit direct-call override is
++            # applied, so ``_impersonation=None`` keeps an opted-out call
++            # opted out.
++            header_params = resolve(_impersonation).apply(header_params)
++
+         try:
+             # perform request and return response
+             response_data = await self.rest_client.request(
+diff --git a/kubernetes/aio/client/configuration.py b/kubernetes/aio/client/configuration.py
+index 0564e4fc2..8c369e5f7 100644
+--- a/kubernetes/aio/client/configuration.py
++++ b/kubernetes/aio/client/configuration.py
+@@ -397,6 +397,18 @@ conf = client.Configuration(
+         """date format
+         """
+ 
++        self.impersonation = None
++        """Optional default impersonation identity for requests built from
++        this configuration.
++
++        Set it to a :class:`kubernetes.utils.impersonation.ImpersonationConfig`
++        (or an equivalent mapping) to impersonate that subject. Each request
++        snapshots the value while it is serialized, so retries, paging and watch
++        restarts keep the identity they started with, and a later change here
++        never affects a request already in flight. A call can override it, and
++        ``None`` explicitly opts a call out.
++        """
++
+     def __deepcopy__(self, memo:  Dict[int, Any]) -> Self:
+         cls = self.__class__
+         result = cls.__new__(cls)
+diff --git a/kubernetes/aio/client/rest.py b/kubernetes/aio/client/rest.py
+index 4c07faa12..170d9f05e 100644
+--- a/kubernetes/aio/client/rest.py
++++ b/kubernetes/aio/client/rest.py
+@@ -210,11 +210,27 @@ class RESTClientObject:
+         if 'Content-Type' not in headers:
+             headers['Content-Type'] = 'application/json'
+ 
++        # aiohttp turns a mapping of name->value into one header line per name.
++        # Impersonation cares about repeated names (one line per group and per
++        # extra-info value), so pass those to aiohttp as (name, value) pairs.
++        # The working ``headers`` dict stays a mapping because later branches
++        # read and rewrite Content-Type.
++        if any(isinstance(value, (list, tuple))
++               for value in headers.values()):
++            wire_headers = []
++            for name, value in headers.items():
++                if isinstance(value, (list, tuple)):
++                    wire_headers.extend((name, entry) for entry in value)
++                else:
++                    wire_headers.append((name, value))
++        else:
++            wire_headers = headers
++
+         args = {
+             "method": method,
+             "url": url,
+             "timeout": timeout,
+-            "headers": headers
++            "headers": wire_headers
+         }
+ 
+         if self.configuration.tls_server_name:

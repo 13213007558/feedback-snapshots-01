@@ -258,7 +258,11 @@ class DynamicClient:
         if params.get('send_initial_events') is not None:
             query_params.append(('sendInitialEvents', params['send_initial_events']))
 
-        header_params = params.get('header_params', {})
+        # Watch freezes impersonation into headers for the resources it
+        # streams; accept that spelling as well as the documented one.
+        header_params = params.get('header_params')
+        if header_params is None:
+            header_params = params.get('_headers', {})
         form_params = []
         local_var_files = {}
 

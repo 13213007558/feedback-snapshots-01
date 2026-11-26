@@ -397,6 +397,18 @@ conf = client.Configuration(
         """date format
         """
 
+        self.impersonation = None
+        """Optional default impersonation identity for requests built from
+        this configuration.
+
+        Set it to a :class:`kubernetes.utils.impersonation.ImpersonationConfig`
+        (or an equivalent mapping) to impersonate that subject. Each request
+        snapshots the value while it is serialized, so retries, paging and watch
+        restarts keep the identity they started with, and a later change here
+        never affects a request already in flight. A call can override it, and
+        ``None`` explicitly opts a call out.
+        """
+
     def __deepcopy__(self, memo:  Dict[int, Any]) -> Self:
         cls = self.__class__
         result = cls.__new__(cls)

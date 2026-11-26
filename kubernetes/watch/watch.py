@@ -19,6 +19,10 @@ import pydoc
 from typing import Any
 
 from kubernetes import client
+from kubernetes.utils.impersonation import (
+    ImpersonationRequest,
+    from_headers,
+)
 
 PYDOC_RETURN_LABEL = ":rtype:"
 PYDOC_FOLLOW_PARAM = ":param follow:"
@@ -168,6 +172,74 @@ class Watch:
         except json.JSONDecodeError:
             return None
 
+    @staticmethod
+    def _caller_api_client(func):
+        """Return the ApiClient that owns ``func`` without touching mocks.
+
+        Generated API methods are bound methods whose ``__self__`` exposes
+        ``api_client``. Dynamic resources expose either ``api_client`` (their
+        wrapper) or ``client`` (the DynamicClient). Plain callables and test
+        doubles are left alone: an ``api_client`` explicitly attached in their
+        ``__dict__`` is honoured, but attribute probing on a
+        ``unittest.mock.Mock`` must not create one.
+        """
+        instance = getattr(func, '__self__', None)
+        if instance is not None:
+            api_client = getattr(instance, 'api_client', None)
+            if api_client is not None:
+                return api_client
+            dynamic_client = getattr(instance, 'client', None)
+            api_client = getattr(dynamic_client, 'client', None)
+            if api_client is not None:
+                return api_client
+        values = getattr(func, '__dict__', None)
+        if isinstance(values, dict):
+            return values.get('api_client')
+        return None
+
+    @staticmethod
+    def _target_headers_kwarg(func):
+        """Pick the keyword the callable accepts for request headers."""
+        try:
+            parameters = inspect.signature(func).parameters
+        except (TypeError, ValueError):  # pragma: no cover - exotic callables
+            return '_headers'
+        if '_headers' in parameters:
+            return '_headers'
+        if 'header_params' in parameters:
+            return 'header_params'
+        if any(parameter.kind == inspect.Parameter.VAR_KEYWORD
+               for parameter in parameters.values()):
+            return '_headers'
+        return None
+
+    @classmethod
+    def _freeze_impersonation(cls, func, kwargs):
+        snapshot = None
+        api_client = cls._caller_api_client(func)
+        if api_client is not None:
+            try:
+                candidate = api_client._watch_impersonation()
+            except Exception:
+                candidate = None
+            if isinstance(candidate, ImpersonationRequest):
+                snapshot = candidate
+        target = cls._target_headers_kwarg(func)
+        if target is None:
+            return
+        existing = kwargs.get(target)
+        if snapshot is None and isinstance(existing, (dict, list, tuple)):
+            snapshot = from_headers(existing)
+        if not snapshot:
+            return
+        if existing is None:
+            existing = {}
+        if not hasattr(existing, 'items') and not isinstance(
+                existing, (list, tuple)):
+            return
+        kwargs[target] = snapshot.apply(existing)
+
+
     def stream(self, func, *args, **kwargs):
         """Watch an API resource and stream the result back via a generator.
 
@@ -209,6 +281,12 @@ class Watch:
         kwargs['_preload_content'] = False
         if 'resource_version' in kwargs:
             self.resource_version = kwargs['resource_version']
+
+        # A watch re-issues the request when the connection expires; every
+        # resumed connection must repeat the identity that was approved when
+        # the stream started. Resolve it into concrete headers once here
+        # rather than letting each re-issue read the live client default.
+        self._freeze_impersonation(func, kwargs)
 
         # Do not attempt retries if user specifies a timeout.
         # We want to ensure we are returning within that timeout.

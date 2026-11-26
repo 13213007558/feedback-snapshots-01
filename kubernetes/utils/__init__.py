@@ -26,6 +26,10 @@ from .retry import (Backoff, DEFAULT_BACKOFF, DEFAULT_RETRY,
                     retry_after_max_retries, retry_on_conflict,
                     retry_after_seconds)
 from .keepalive import tcp_keepalive_socket_options
+from .impersonation import (ImpersonationConfig, ImpersonationError,
+                            ImpersonationRequest, config_from_snapshot,
+                            extra_from_headers, from_headers,
+                            resolve_impersonation)
 
 __all__ = [
     "FailToCreateError",
@@ -51,4 +55,11 @@ __all__ = [
     "retry_on_conflict",
     "retry_after_seconds",
     "tcp_keepalive_socket_options",
+    "ImpersonationConfig",
+    "ImpersonationError",
+    "ImpersonationRequest",
+    "config_from_snapshot",
+    "extra_from_headers",
+    "from_headers",
+    "resolve_impersonation",
 ]

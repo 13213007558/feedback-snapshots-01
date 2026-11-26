@@ -9,6 +9,8 @@ comments throughout the code.
 
 - pod_logs.py — basic (blocking) pod log streaming example
 - pod_logs_non_blocking.py — non-blocking streaming of pod logs with graceful shutdown
+- impersonation_identity.py — offline demo of impersonation bound to one logical
+  call across pagination and shared clients (no cluster required)
 
 ## Setup
 

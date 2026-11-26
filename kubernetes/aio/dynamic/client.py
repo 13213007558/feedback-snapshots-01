@@ -270,7 +270,11 @@ class DynamicClient(object):
         if params.get('force_conflicts') is not None:
             query_params.append(('force', params['force_conflicts']))
 
-        header_params = params.get('header_params', {})
+        # Watch freezes impersonation into headers for the resources it
+        # streams; accept that spelling as well as the documented one.
+        header_params = params.get('header_params')
+        if header_params is None:
+            header_params = params.get('_headers', {})
         form_params = []
         local_var_files = {}
 

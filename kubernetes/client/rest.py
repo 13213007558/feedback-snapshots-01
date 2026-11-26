@@ -232,6 +232,21 @@ class RESTClientObject:
         post_params = post_params or {}
         headers = headers or {}
 
+        # urllib3 writes one header line per mapping entry and joins a list
+        # value with commas, which the API server would read as one group.
+        # Expand repeated impersonation headers into separate lines before any
+        # retry loop can clone the request.
+        if any(isinstance(value, (list, tuple))
+               for value in headers.values()):
+            expanded = []
+            for name, value in headers.items():
+                if isinstance(value, (list, tuple)):
+                    for entry in value:
+                        expanded.append((name, entry))
+                else:
+                    expanded.append((name, value))
+            headers = urllib3.HTTPHeaderDict(expanded)
+
         timeout = None
         if _request_timeout:
             if isinstance(_request_timeout, (int, float)):

@@ -24,6 +24,10 @@ from .retry import (Backoff, DEFAULT_BACKOFF, DEFAULT_RETRY,
                     is_conflict, is_retry_after_response,
                     is_too_many_requests, retry_after_backoff,
                     retry_after_max_retries, retry_after_seconds)
+from .impersonation import (ImpersonationConfig, ImpersonationError,
+                            ImpersonationRequest, config_from_snapshot,
+                            extra_from_headers, from_headers,
+                            resolve_impersonation)
 
 __all__ = [
     "FailToCreateError",
@@ -43,4 +47,11 @@ __all__ = [
     "retry_after_backoff",
     "retry_after_max_retries",
     "retry_after_seconds",
+    "ImpersonationConfig",
+    "ImpersonationError",
+    "ImpersonationRequest",
+    "config_from_snapshot",
+    "extra_from_headers",
+    "from_headers",
+    "resolve_impersonation",
 ]
