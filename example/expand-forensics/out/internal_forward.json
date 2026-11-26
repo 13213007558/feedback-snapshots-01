@@ -1,0 +1,127 @@
+{
+  "raw_expand": {
+    "tree": {
+      "root": {
+        "name": "document:deal-memo#viewer",
+        "leaf": null,
+        "difference": null,
+        "union": {
+          "nodes": [
+            {
+              "name": "document:deal-memo#viewer",
+              "leaf": {
+                "users": {
+                  "users": [
+                    "user:alice@internal.example.com",
+                    "user:jordan.li@internal.example.com",
+                    "user:jordan.lee@partner.example.com",
+                    "group:deal-advisors#member"
+                  ]
+                },
+                "computed": null,
+                "tuple_to_userset": null
+              },
+              "difference": null,
+              "union": null,
+              "intersection": null
+            },
+            {
+              "name": "document:deal-memo#editor",
+              "leaf": {
+                "users": null,
+                "computed": {
+                  "userset": "document:deal-memo#editor"
+                },
+                "tuple_to_userset": null
+              },
+              "difference": null,
+              "union": null,
+              "intersection": null
+            },
+            {
+              "name": "document:deal-memo#temp_contractor",
+              "leaf": {
+                "users": {
+                  "users": [
+                    "user:carol.temp@internal.example.com"
+                  ]
+                },
+                "computed": null,
+                "tuple_to_userset": null
+              },
+              "difference": null,
+              "union": null,
+              "intersection": null
+            },
+            {
+              "name": "document:deal-memo#editor-branch",
+              "leaf": null,
+              "difference": null,
+              "union": {
+                "nodes": [
+                  {
+                    "name": "document:deal-memo#editor",
+                    "leaf": {
+                      "users": {
+                        "users": [
+                          "user:alice@internal.example.com",
+                          "user:bob@internal.example.com"
+                        ]
+                      },
+                      "computed": null,
+                      "tuple_to_userset": null
+                    },
+                    "difference": null,
+                    "union": null,
+                    "intersection": null
+                  }
+                ]
+              },
+              "intersection": null
+            }
+          ]
+        },
+        "intersection": null
+      }
+    }
+  },
+  "raw_evidence": [
+    {
+      "user": "user:bob@internal.example.com",
+      "relation": "editor",
+      "object": "document:deal-memo"
+    },
+    {
+      "user": "group:deal-advisors#member",
+      "relation": "viewer",
+      "object": "document:deal-memo"
+    },
+    {
+      "user": "user:alice@internal.example.com",
+      "relation": "editor",
+      "object": "document:deal-memo"
+    },
+    {
+      "user": "user:jordan.lee@partner.example.com",
+      "relation": "viewer",
+      "object": "document:deal-memo"
+    },
+    {
+      "user": "user:alice@internal.example.com",
+      "relation": "viewer",
+      "object": "document:deal-memo"
+    },
+    {
+      "user": "user:jordan.li@internal.example.com",
+      "relation": "viewer",
+      "object": "document:deal-memo"
+    }
+  ],
+  "subject_mapping": {
+    "user:alice@internal.example.com": "subj_237cf175ef",
+    "user:jordan.li@internal.example.com": "subj_0a9f39f665",
+    "user:jordan.lee@partner.example.com": "subj_483cae6573",
+    "user:bob@internal.example.com": "subj_4414cdd43b",
+    "user:carol.temp@internal.example.com": "subj_5d274a27c7"
+  }
+}

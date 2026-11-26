@@ -1,0 +1,301 @@
+{
+  "schema_version": "forensics.expand/v1",
+  "report_id": "rpt_a205a06111319456",
+  "generated_at": "2026-11-26T09:00:00+00:00",
+  "request": {
+    "store_id": null,
+    "tuple_key": {
+      "relation": "viewer",
+      "object": "document:deal-memo"
+    },
+    "authorization_model_id": "01HMODELDEALMEMO000000000001",
+    "consistency": null
+  },
+  "authorization_model": {
+    "id": "01HMODELDEALMEMO000000000001",
+    "schema_version": "1.1",
+    "type_definitions": [],
+    "conditions": null
+  },
+  "relations_read": [
+    {
+      "object": "document:deal-memo",
+      "relations": [
+        "editor",
+        "viewer"
+      ],
+      "read_count": 1,
+      "tuple_count": 6
+    }
+  ],
+  "tree": {
+    "root": {
+      "userset": "document:deal-memo#viewer",
+      "path": [
+        "document:deal-memo#viewer"
+      ],
+      "operator": "union",
+      "children": [
+        {
+          "userset": "document:deal-memo#viewer",
+          "path": [
+            "document:deal-memo#viewer",
+            "document:deal-memo#viewer"
+          ],
+          "leaf": {
+            "kind": "users",
+            "status": "confirmed",
+            "members": [
+              {
+                "public_user": "group:deal-advisors#member",
+                "evidence_ids": [
+                  "ev_12f2efd164"
+                ],
+                "status": "confirmed"
+              },
+              {
+                "public_user": "subj_0a9f39f665",
+                "evidence_ids": [
+                  "ev_eacac9e914"
+                ],
+                "status": "confirmed"
+              },
+              {
+                "public_user": "subj_237cf175ef",
+                "evidence_ids": [
+                  "ev_a7964a15d2"
+                ],
+                "status": "confirmed"
+              },
+              {
+                "public_user": "subj_483cae6573",
+                "evidence_ids": [
+                  "ev_56e7169d77"
+                ],
+                "status": "confirmed"
+              }
+            ]
+          },
+          "node_id": "node_16781c5366c8"
+        },
+        {
+          "userset": "document:deal-memo#editor-branch",
+          "path": [
+            "document:deal-memo#viewer",
+            "document:deal-memo#editor-branch"
+          ],
+          "operator": "union",
+          "children": [
+            {
+              "userset": "document:deal-memo#editor",
+              "path": [
+                "document:deal-memo#viewer",
+                "document:deal-memo#editor-branch",
+                "document:deal-memo#editor"
+              ],
+              "leaf": {
+                "kind": "users",
+                "status": "confirmed",
+                "members": [
+                  {
+                    "public_user": "subj_237cf175ef",
+                    "evidence_ids": [
+                      "ev_4fbf4ee32e"
+                    ],
+                    "status": "confirmed"
+                  },
+                  {
+                    "public_user": "subj_4414cdd43b",
+                    "evidence_ids": [
+                      "ev_1220c30e3c"
+                    ],
+                    "status": "confirmed"
+                  }
+                ]
+              },
+              "node_id": "node_e890ce688920"
+            }
+          ],
+          "node_id": "node_32cc7bb9e120"
+        },
+        {
+          "userset": "document:deal-memo#editor",
+          "path": [
+            "document:deal-memo#viewer",
+            "document:deal-memo#editor"
+          ],
+          "leaf": {
+            "kind": "computed",
+            "target_userset": "document:deal-memo#editor",
+            "evidence_ids": [
+              "ev_1220c30e3c",
+              "ev_4fbf4ee32e"
+            ],
+            "status": "confirmed"
+          },
+          "node_id": "node_8fbed22385ad"
+        },
+        {
+          "userset": "document:deal-memo#temp_contractor",
+          "path": [
+            "document:deal-memo#viewer",
+            "document:deal-memo#temp_contractor"
+          ],
+          "leaf": {
+            "kind": "users",
+            "status": "unconfirmed",
+            "members": [
+              {
+                "public_user": "subj_5d274a27c7",
+                "evidence_ids": [],
+                "status": "unconfirmed"
+              }
+            ]
+          },
+          "node_id": "node_dc22097c8514"
+        }
+      ],
+      "node_id": "node_19cf5764630b"
+    }
+  },
+  "evidence": [
+    {
+      "evidence_id": "ev_1220c30e3c",
+      "public_tuple": {
+        "user": "subj_4414cdd43b",
+        "relation": "editor",
+        "object": "document:deal-memo"
+      },
+      "observed_at": "2026-11-20T00:00:00+00:00",
+      "status": "observed"
+    },
+    {
+      "evidence_id": "ev_12f2efd164",
+      "public_tuple": {
+        "user": "group:deal-advisors#member",
+        "relation": "viewer",
+        "object": "document:deal-memo"
+      },
+      "observed_at": "2026-11-20T00:00:00+00:00",
+      "status": "observed"
+    },
+    {
+      "evidence_id": "ev_4fbf4ee32e",
+      "public_tuple": {
+        "user": "subj_237cf175ef",
+        "relation": "editor",
+        "object": "document:deal-memo"
+      },
+      "observed_at": "2026-11-20T00:00:00+00:00",
+      "status": "observed"
+    },
+    {
+      "evidence_id": "ev_56e7169d77",
+      "public_tuple": {
+        "user": "subj_483cae6573",
+        "relation": "viewer",
+        "object": "document:deal-memo"
+      },
+      "observed_at": "2026-11-20T00:00:00+00:00",
+      "status": "observed"
+    },
+    {
+      "evidence_id": "ev_a7964a15d2",
+      "public_tuple": {
+        "user": "subj_237cf175ef",
+        "relation": "viewer",
+        "object": "document:deal-memo"
+      },
+      "observed_at": "2026-11-20T00:00:00+00:00",
+      "status": "observed"
+    },
+    {
+      "evidence_id": "ev_eacac9e914",
+      "public_tuple": {
+        "user": "subj_0a9f39f665",
+        "relation": "viewer",
+        "object": "document:deal-memo"
+      },
+      "observed_at": "2026-11-20T00:00:00+00:00",
+      "status": "observed"
+    }
+  ],
+  "subjects": [
+    {
+      "public_subject_id": "subj_0a9f39f665",
+      "object_type": "user",
+      "display_names": [
+        "Jordan Lee"
+      ]
+    },
+    {
+      "public_subject_id": "subj_237cf175ef",
+      "object_type": "user",
+      "display_names": [
+        "Alice Zhang"
+      ]
+    },
+    {
+      "public_subject_id": "subj_4414cdd43b",
+      "object_type": "user",
+      "display_names": [
+        "Bob Martin"
+      ]
+    },
+    {
+      "public_subject_id": "subj_483cae6573",
+      "object_type": "user",
+      "display_names": [
+        "Jordan Lee"
+      ]
+    },
+    {
+      "public_subject_id": "subj_5d274a27c7",
+      "object_type": "user",
+      "display_names": [
+        "Carol Temp"
+      ]
+    }
+  ],
+  "unconfirmed_branches": [
+    {
+      "path": [
+        "document:deal-memo#viewer",
+        "document:deal-memo#temp_contractor"
+      ],
+      "reason": "missing_relationship_evidence",
+      "userset": "document:deal-memo#temp_contractor",
+      "expected_relation": {
+        "object": "document:deal-memo",
+        "relation": "temp_contractor",
+        "users": [
+          "subj_5d274a27c7"
+        ]
+      }
+    }
+  ],
+  "display_name_collisions": [
+    {
+      "display_name": "Jordan Lee",
+      "public_subject_ids": [
+        "subj_0a9f39f665",
+        "subj_483cae6573"
+      ]
+    }
+  ],
+  "redaction": {
+    "internal_types": [
+      "user",
+      "employee"
+    ],
+    "rule": "internal object references are replaced by stable public subject ids; identity is keyed on '<type>:<id>', never on display name",
+    "public_id_algorithm": "sha256(salt + object_ref) truncated to 10 hex"
+  },
+  "summary": {
+    "evidence_records": 6,
+    "confirmed_evidence_records": 6,
+    "subject_count": 5,
+    "unconfirmed_branch_count": 1,
+    "display_name_collision_count": 1
+  }
+}
