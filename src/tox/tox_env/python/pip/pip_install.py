@@ -14,6 +14,7 @@ __lazy_modules__ = [
     "tox.config.types",
     "tox.execute.request",
     "tox.tox_env.errors",
+    "tox.tox_env.python.approvals",
     "tox.tox_env.python.package",
     "tox.tox_env.python.pylock",
     "urllib.error",
@@ -44,6 +45,15 @@ from tox.execute.request import StdinSource
 from tox.tox_env.errors import Fail, Recreate
 from tox.tox_env.installer import InstallArguments, Installer
 from tox.tox_env.python.api import Python
+from tox.tox_env.python.approvals import (
+    ApprovalEvidence,
+    ApprovalGate,
+    ArtifactRef,
+    artifacts_from_pylock,
+    artifacts_from_python_deps,
+    artifact_from_local_wheel,
+    render_evidence_failure,
+)
 from tox.tox_env.python.package import EditableLegacyPackage, EditablePackage, SdistPackage, WheelPackage
 from tox.tox_env.python.pylock import Pylock
 from tox.util.typing_compat import override
@@ -144,6 +154,79 @@ class Pip(PythonInstallerListDependencies):
             default=False,
             desc="Use the exact versions of installed deps as constraints, otherwise use the listed deps.",
         )
+        self._env.conf.add_config(
+            keys=["artifact_approvals", "approvals_file", "approvals"],
+            of_type=Path | None,
+            default=None,
+            desc="JSON/TOML policy approving the exact dependency artifacts and sources allowed to install",
+        )
+
+    def approval_gate(self) -> ApprovalGate:
+        """Build the current artifact approval gate from configuration and environment.
+
+        :returns: the approval gate
+        """
+        configured = self._env.conf.get_optional("artifact_approvals", Path)
+        return ApprovalGate(configured, root=self._env.core["toxinidir"])
+
+    def review_approvals(self, arguments: InstallArguments, context: str) -> ApprovalEvidence | None:
+        """Resolve approval evidence for an install request without trusting a cached pass.
+
+        :param arguments: the install arguments about to reach pip
+        :param context: stable cache/run context
+        :returns: approval evidence when a policy is active, otherwise ``None``
+        """
+        gate = self.approval_gate()
+        if not gate.enabled:
+            return None
+        marker_environment = None
+        target_environment = getattr(self._env, "_target_marker_environment", None)
+        if callable(target_environment):
+            try:
+                marker_environment = target_environment()
+            except Fail:
+                marker_environment = None
+        if isinstance(arguments, PythonDeps):
+            artifacts = artifacts_from_python_deps(arguments, self.constraints, marker_environment)
+        elif isinstance(arguments, Pylock):
+            artifacts = artifacts_from_pylock(arguments)
+        else:
+            artifacts = self._artifacts_from_sequence(arguments)
+        evidence = gate.review(artifacts, context, raise_on_deny=False)
+        self._write_approval_evidence(evidence, context)
+        if not evidence.approved:
+            raise Fail(render_evidence_failure(evidence))
+        logging.info("artifact approval evidence for %s: %s", context, evidence.digest)
+        return evidence
+
+    def _artifacts_from_sequence(self, arguments: Sequence[Requirement | Package]) -> list[ArtifactRef]:
+        artifacts: list[ArtifactRef] = []
+        for argument in arguments:
+            if isinstance(argument, (WheelPackage, SdistPackage, EditablePackage, EditableLegacyPackage)):
+                path = Path(argument.path)
+                if path.suffix.lower() == ".whl":
+                    artifacts.append(artifact_from_local_wheel(path))
+                else:
+                    name = getattr(argument, "project_name", None) or path.name.split("-", 1)[0]
+                    artifacts.append(ArtifactRef(name, getattr(argument, "version", None), str(path)))
+            elif isinstance(argument, Requirement):
+                artifacts.append(
+                    ArtifactRef(
+                        argument.name,
+                        _single_requirement_version(argument),
+                        "unresolved:requirement",
+                        issues=("artifact approval for raw requirements must use PythonDeps resolution",),
+                    )
+                )
+        return artifacts
+
+    def _write_approval_evidence(self, evidence: ApprovalEvidence, context: str) -> None:
+        if not evidence.enabled:
+            return
+        safe_context = context.replace("/", "_").replace("\\", "_")
+        directory = Path(self._env.env_dir) / "approvals"
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / f"{safe_context}.json").write_text(json.dumps(evidence.as_dict(), indent=2, sort_keys=True))
 
     def default_install_command(  # override signature
         self,
@@ -219,6 +302,7 @@ class Pip(PythonInstallerListDependencies):
             raise Fail(msg) from None
         new_constraints.extend(new_reqs)
 
+        approval: Final = self.review_approvals(arguments, f"{section}.{of_type}")
         constraint_options: Final[dict[str, bool]] = {
             "constrain_package_deps": self.constrain_package_deps,
             "use_frozen_constraints": self.use_frozen_constraints,
@@ -232,6 +316,8 @@ class Pip(PythonInstallerListDependencies):
             "constraint_options": constraint_options,
             "env": self._install_env_vars(),
         }
+        if approval is not None:
+            new["artifact_approvals"] = approval.cache_value()
         # if option or constraint change in any way recreate, if the requirements change only if some are removed
         with self._env.cache.compare(new, section, of_type) as (eq, old):
             if not eq:  # pragma: no branch  # other outcome untested
@@ -251,7 +337,7 @@ class Pip(PythonInstallerListDependencies):
                         raise Recreate(msg)
                 if args := arguments.as_root_args:  # pragma: no branch  # other outcome untested
                     args.extend(self.constraints.as_root_args)
-                    self._execute_installer(args, of_type)
+                    self._execute_installer(args, of_type, approval)
                     self._write_combined_constraints(arguments)
 
     @property
@@ -294,7 +380,14 @@ class Pip(PythonInstallerListDependencies):
         msg = f"changed {of_type}{removed}{added}"
         raise Recreate(msg)
 
-    def _execute_installer(self, deps: Sequence[str], of_type: str) -> None:
+    def _execute_installer(
+        self,
+        deps: Sequence[str],
+        of_type: str,
+        approval: ApprovalEvidence | None = None,
+    ) -> None:
+        if approval is not None and approval.enabled:
+            logging.info("presenting artifact approval evidence %s to installer %s", approval.digest, of_type)
         if of_type == "package_deps" and self.constrain_package_deps and not self._has_constraints:
             constraints_file = self.constraints_file()
             if constraints_file.exists():
@@ -372,6 +465,7 @@ class Pip(PythonInstallerListDependencies):
 
     def _install_pylock(self, pylock: Pylock, section: str, of_type: str) -> None:
         new_reqs = sorted(pylock.install_lines())
+        approval: Final = self.review_approvals(pylock, f"{section}.{of_type}")
         environment = self._env.environment_variables
         if sys.platform == "win32":
             # pip sees Windows environment variable names without case distinctions.
@@ -387,6 +481,8 @@ class Pip(PythonInstallerListDependencies):
                 msg = f"pylock environment variable {name} contains whitespace or control characters"
                 raise Fail(msg)
         cache_value: Final[dict[str, JsonValue]] = {"req": new_reqs, "env": self._install_env_vars()}
+        if approval is not None:
+            cache_value["artifact_approvals"] = approval.cache_value()
         if referenced:
             cache_value["referenced_env"] = hashlib.sha256(json.dumps(referenced, sort_keys=True).encode()).hexdigest()
         with self._env.cache.compare(cache_value, section, of_type) as (eq, old):
@@ -398,7 +494,7 @@ class Pip(PythonInstallerListDependencies):
                 if new_deps := sorted(set(new_reqs) - set(old_req)) or new_reqs:
                     req_file = Path(self._env.env_dir) / "pylock.txt"
                     req_file.write_text("\n".join(new_deps))
-                    self._execute_installer(["--no-deps", "-r", str(req_file)], of_type)
+                    self._execute_installer(["--no-deps", "-r", str(req_file)], of_type, approval)
 
     def _install_list_of_deps(
         self,
@@ -407,15 +503,18 @@ class Pip(PythonInstallerListDependencies):
         of_type: str,
     ) -> None:
         groups, config_settings = self._group_arguments(arguments)
+        approval: Final = self.review_approvals(arguments, f"{section}.{of_type}")
         req_of_type = f"{of_type}_deps" if groups["pkg"] or groups["dev_pkg"] else of_type
         for value in groups.values():
             value.sort()
         cache_value = {"req": groups["req"], "env": self._install_env_vars()}
+        if approval is not None:
+            cache_value["artifact_approvals"] = approval.cache_value()
         with self._env.cache.compare(cache_value, section, req_of_type) as (eq, old):
             if not eq:  # pragma: no branch  # other outcome untested
                 old_req: list[str] = old["req"] if isinstance(old, dict) else (old or [])
-                self._install_new_deps(groups["req"], old_req, req_of_type)
-        self._install_packages(groups, config_settings, of_type)
+                self._install_new_deps(groups["req"], old_req, req_of_type, approval)
+        self._install_packages(groups, config_settings, of_type, approval)
 
     def _group_arguments(
         self, arguments: Sequence[Requirement | Package]
@@ -444,7 +543,13 @@ class Pip(PythonInstallerListDependencies):
         }
         return [str(forced.get(canonicalize_name(dep.name), dep)) for dep in deps]
 
-    def _install_new_deps(self, req: list[str], old_req: list[str], req_of_type: str) -> None:
+    def _install_new_deps(
+        self,
+        req: list[str],
+        old_req: list[str],
+        req_of_type: str,
+        approval: ApprovalEvidence | None = None,
+    ) -> None:
         if miss := sorted(
             set(old_req) - set(req)
         ):  # no way yet to know what to uninstall here (transitive dependencies?)
@@ -453,24 +558,35 @@ class Pip(PythonInstallerListDependencies):
         # other outcome untested
         if new_deps := sorted(set(req) - set(old_req)) or list(req):  # pragma: no branch
             new_deps.extend(self.constraints.as_root_args)
-            self._execute_installer(new_deps, req_of_type)
+            self._execute_installer(new_deps, req_of_type, approval)
 
-    def _install_packages(self, groups: dict[str, list[str]], config_settings: dict[str, str], of_type: str) -> None:
+    def _install_packages(
+        self,
+        groups: dict[str, list[str]],
+        config_settings: dict[str, str],
+        of_type: str,
+        approval: ApprovalEvidence | None = None,
+    ) -> None:
         cs_args = [f"--config-settings={k}={v}" for k, v in config_settings.items()]
         install_args = ["--force-reinstall", "--no-deps"]
         if groups["pkg"]:
             # we intentionally ignore constraints when installing the package itself
             # https://github.com/tox-dev/tox/issues/3550
-            self._execute_installer(install_args + cs_args + groups["pkg"], of_type)
+            self._execute_installer(install_args + cs_args + groups["pkg"], of_type, approval)
         if groups["dev_pkg"]:
             for entry in groups["dev_pkg"]:
                 install_args.extend(("-e", str(entry)))
             # we intentionally ignore constraints when installing the package itself
             # https://github.com/tox-dev/tox/issues/3550
-            self._execute_installer(install_args, of_type)
+            self._execute_installer(install_args, of_type, approval)
 
 
 __all__ = [
     "Pip",
     "PythonInstallerListDependencies",
 ]
+
+
+def _single_requirement_version(requirement: Requirement) -> str | None:
+    exact = [spec.version for spec in requirement.specifier if spec.operator in {"==", "==="} and spec.version]
+    return exact[0] if len(exact) == 1 else None

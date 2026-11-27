@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from tox.session.cmd.approvals import approvals_command
 from tox.session.cmd.depends import depends
 from tox.session.cmd.devenv import devenv
 from tox.session.cmd.exec_ import exec_
@@ -45,4 +46,5 @@ def core_handlers() -> dict[str, Callable[[State], int]]:
         "e": exec_,
         "exec": exec_,
         "man": setup_man,
+        "approvals": approvals_command,
     }

@@ -155,6 +155,7 @@ class Plugin:
     def _register_plugins(self, inline: ModuleType | None) -> None:
         from tox.session import state  # ruff:ignore[import-outside-top-level]  # avoids an import cycle
         from tox.session.cmd import (  # ruff:ignore[import-outside-top-level]  # avoids an import cycle
+            approvals,
             depends,
             devenv,
             exec_,
@@ -179,6 +180,7 @@ class Plugin:
             pyproject,
             cmd_builder,
             legacy,
+            approvals,
             version_flag,
             exec_,
             quickstart,

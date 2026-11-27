@@ -96,6 +96,7 @@ Learn more about tox from maintainer presentations:
 
     how-to/install
     how-to/usage
+    how-to/artifact-approvals
 
 .. toctree::
     :hidden:

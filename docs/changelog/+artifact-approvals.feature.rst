@@ -1,0 +1,1 @@
+Added artifact approval evidence for dependency installs, including layered requirements and Pylock sources. Policies can pin exact local paths/URLs and digests, are rechecked on cached environments, and can be queried with ``tox approvals``.

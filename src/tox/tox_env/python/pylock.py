@@ -7,8 +7,9 @@ __lazy_modules__ = [
 ]
 
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final
 
 from packaging.pylock import Package, PylockValidationError
 from packaging.pylock import Pylock as PackagingPylock
@@ -16,10 +17,19 @@ from packaging.pylock import Pylock as PackagingPylock
 from tox.tox_env.errors import Fail
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
     from pathlib import Path
 
     from packaging.pylock import PackageArchive, PackageVcs
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class LockedArtifact:
+    """A source-bearing artifact selected from a lock file."""
+
+    name: str
+    version: str | None
+    location: str
+    hashes: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -63,6 +73,95 @@ class Pylock:
             # a hash, otherwise fall back to unverified installs (directory/VCS sources cannot be hashed)
             return [f"{line} {' '.join(f'--hash={h}' for h in hashes)}" for line, hashes in entries]
         return [line for line, _ in entries]
+
+    def selected_artifacts(self) -> list[LockedArtifact]:
+        """Return source-bearing artifacts for the packages selected by this target environment.
+
+        :returns: locked artifact references
+        :raises Fail: when the lock file cannot be parsed
+        """
+        try:
+            parsed: Final[PackagingPylock] = PackagingPylock.from_dict(
+                tomllib.loads(self.path.read_text(encoding="utf-8-sig"))
+            )
+        except (UnicodeDecodeError, tomllib.TOMLDecodeError, PylockValidationError) as exc:
+            msg = f"invalid pylock file {self.path}: {exc}"
+            raise Fail(msg) from exc
+        groups: Final[frozenset[str]] = self.groups or frozenset(parsed.default_groups or ())
+        result: list[LockedArtifact] = []
+        for pkg in parsed.packages:
+            if not self._is_active(pkg, groups):
+                continue
+            result.extend(self._package_artifacts(pkg))
+        return result
+
+    def _package_artifacts(self, pkg: Package) -> list[LockedArtifact]:
+        def hash_tuple(values: object) -> tuple[tuple[str, str], ...]:
+            if not isinstance(values, Mapping):
+                return ()
+            return tuple(sorted((str(key).lower(), str(value)) for key, value in values.items()))
+
+        version = str(pkg.version) if pkg.version is not None else None
+        if pkg.archive is not None:
+            return [
+                LockedArtifact(
+                    name=str(pkg.name),
+                    version=version,
+                    location=self._to_archive_url(pkg.archive),
+                    hashes=hash_tuple(pkg.archive.hashes),
+                )
+            ]
+        if pkg.wheels:
+            wheel = self._select_wheel(pkg)
+            wheel_location = wheel.path or wheel.filename or str(pkg.name)
+            location = wheel.url if wheel.url is not None else self._to_uri(wheel_location)
+            return [
+                LockedArtifact(
+                    name=str(pkg.name),
+                    version=version,
+                    location=location,
+                    hashes=hash_tuple(wheel.hashes),
+                )
+            ]
+        if pkg.sdist is not None:
+            source = pkg.sdist
+            location = getattr(source, "url", None)
+            source_path = getattr(source, "path", None)
+            if location is None and source_path:
+                location = self._to_uri(source_path)
+            if location is None:
+                location = str(pkg.name)
+            return [
+                LockedArtifact(
+                    name=str(pkg.name),
+                    version=version,
+                    location=location,
+                    hashes=hash_tuple(getattr(source, "hashes", None)),
+                )
+            ]
+        if pkg.directory is not None:
+            return [
+                LockedArtifact(
+                    name=str(pkg.name),
+                    version=version,
+                    location=self._to_uri(pkg.directory.path, pkg.directory.subdirectory),
+                )
+            ]
+        if pkg.vcs is not None:
+            return [LockedArtifact(name=str(pkg.name), version=version, location=self._to_vcs_url(pkg.vcs))]
+        return [LockedArtifact(name=str(pkg.name), version=version, location=str(pkg.name))]
+
+    def _select_wheel(self, pkg: Package) -> Any:
+        wheels = pkg.wheels or ()
+        if len(wheels) == 1:
+            return wheels[0]
+        # Pylock callers that need deterministic cross-host wheel selection use Pylock.select. The install path
+        # has the host tags available through pip; for approval evidence prefer an architecture-independent wheel.
+        for wheel in wheels:
+            filename = wheel.filename
+            if "-none-any.whl" in filename:
+                return wheel
+        return wheels[0]
 
     def _to_entry(self, pkg: Package) -> tuple[str, list[str]]:
         if pkg.directory is not None:
@@ -140,5 +239,6 @@ class Pylock:
 
 
 __all__ = [
+    "LockedArtifact",
     "Pylock",
 ]

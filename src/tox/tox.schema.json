@@ -286,6 +286,20 @@
           "type": "boolean",
           "description": "Use the exact versions of installed deps as constraints, otherwise use the listed deps."
         },
+        "artifact_approvals": {
+          "type": "string",
+          "description": "JSON/TOML policy approving the exact dependency artifacts and sources allowed to install"
+        },
+        "approvals_file": {
+          "$ref": "#/properties/env_run_base/properties/artifact_approvals",
+          "description": "Deprecated: use 'artifact_approvals' instead",
+          "deprecated": true
+        },
+        "approvals": {
+          "$ref": "#/properties/env_run_base/properties/artifact_approvals",
+          "description": "Deprecated: use 'artifact_approvals' instead",
+          "deprecated": true
+        },
         "commands_pre": {
           "type": "array",
           "items": {
