@@ -440,6 +440,36 @@ Previously, it only retrieved tokens from URL parameters or the Authorization he
 Passing `get_token(handler, in_cookie=False)` preserves this behavior.
 :::
 
+### Approved authentication targets
+
+Requests that identify a user send identity material (tokens and OAuth client
+secrets) to the Hub API.  `HubAuth` only sends these requests to targets in an
+explicit allow-list, `HubAuth.approved_api_urls`, which defaults to the origin
+of `HubAuth.api_url`.
+
+A service may also configure `HubAuth.candidate_api_urls` (or
+`HubAuth.health_check_api_urls`) with additional candidate origins.  Candidates
+that are not approved are **health-check only**: they are skipped when
+selecting a target for an authenticated request and never receive credentials.
+`HubAuth.probe_health_targets` can probe them with a credential-free request.
+
+Target selection is revalidated against the current allow-list every time a
+request is sent:
+
+- the target used for the first connection is chosen from the approved list;
+- a cached target is only reused while it is still approved, and identity
+  responses are cleared when the trust configuration changes;
+- if an approved target fails at the transport level, a retry rotates to the
+  next approved candidate, never to an unapproved one.
+
+`HubAuth` distinguishes a network failure (HTTP 503,
+`jupyterhub.services.targets.TargetUnavailable`) from insufficient approval
+(HTTP 403, `jupyterhub.services.targets.TargetNotApproved`).
+Every attempt is appended to `HubAuth.auth_records` with its category
+(`user-token`, `service-token`, `oauth-client` or `health-check`), target,
+approval status and outcome, which makes it possible to audit exactly which
+target received which identity material.
+
 ### Flask Example
 
 For example, you have a Flask service that returns information about a user.

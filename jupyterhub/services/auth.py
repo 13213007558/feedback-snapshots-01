@@ -45,12 +45,14 @@ from tornado.httputil import url_concat
 from tornado.log import app_log
 from tornado.web import HTTPError, RequestHandler
 from tornado.websocket import WebSocketHandler
+from aiohttp import ClientConnectionError
 from traitlets import (
     Any,
     Bool,
     Dict,
     Instance,
     Integer,
+    List,
     Set,
     Unicode,
     default,
@@ -68,7 +70,27 @@ from .._xsrf_utils import (
 )
 from ..httpclient import fetch
 from ..scopes import _intersect_expanded_scopes
-from ..utils import _bool_env, get_browser_protocol, make_ssl_context, url_path_join
+from ..utils import (
+    _bool_env,
+    get_browser_protocol,
+    make_ssl_context,
+    url_path_join,
+)
+from .targets import (
+    AuthCallRecord,
+    TargetNotApproved,
+    TargetPolicy,
+    TargetUnavailable,
+    normalize_target,
+    origin_list,
+    replace_origin,
+)
+
+#: authentication categories recorded for every target interaction
+AUTH_CATEGORY_SERVICE = "service-token"
+AUTH_CATEGORY_USER = "user-token"
+AUTH_CATEGORY_OAUTH = "oauth-client"
+AUTH_CATEGORY_HEALTH = "health-check"
 
 
 def check_scopes(required_scopes, scopes):
@@ -249,6 +271,10 @@ class HubAuth(SingletonConfigurable):
 
     - api_url: the base URL of the Hub's internal API,
       fetched from JUPYTERHUB_API_URL by default.
+    - approved_api_urls: explicit allow-list of origins that may receive
+      identity material. Defaults to the origin of ``api_url``.
+    - candidate_api_urls: ordered candidate origins. Unapproved candidates are
+      health-check only and never receive tokens.
     - cookie_cache_max_age: the number of seconds responses
       from the Hub should be cached.
     """
@@ -312,6 +338,69 @@ class HubAuth(SingletonConfigurable):
         Will be auto-generated for hub-managed services.
         """,
     ).tag(config=True)
+
+    approved_api_urls = List(
+        Unicode(),
+        help="""Explicit list of Hub API origins approved to receive identity material.
+
+        Each entry is a proto://host[:port] origin.  Authentication requests are
+        only ever sent to an approved origin.  Candidates that are configured
+        for connectivity checks but are not listed here never receive tokens.
+
+        Defaults to the origin of ``api_url`` unless other target lists are set.
+        """,
+    ).tag(config=True)
+
+    candidate_api_urls = List(
+        Unicode(),
+        help="""Ordered candidate Hub API origins.
+
+        Candidates are tried in order.  Unapproved candidates are health-check
+        only and are skipped when selecting a target for an authenticated
+        request.  Defaults to ``approved_api_urls``.
+        """,
+    ).tag(config=True)
+
+    health_check_api_urls = List(
+        Unicode(),
+        help="""Origins used only for health checks.
+
+        These origins are never approved and never receive identity material;
+        they are useful for probing candidates that are not (yet) trusted.
+        """,
+    ).tag(config=True)
+
+    @default("approved_api_urls")
+    def _default_approved_api_urls(self):
+        try:
+            return [normalize_target(self.api_url)]
+        except ValueError:
+            return []
+
+    # ``candidate_api_urls`` is explicit configuration only (default empty).
+    # The effective candidate order is derived in ``_effective_target_config``
+    # so it always reflects the current approval list.
+
+    def _effective_target_config(self):
+        """Resolve the approval and candidate lists actually in force.
+
+        * ``approved_api_urls`` is the allow-list (defaults to ``api_url``).
+        * ``candidate_api_urls`` is an optional explicit ordering to try first.
+        * ``health_check_api_urls`` entries are candidates but never approved.
+
+        Approved origins are appended to the candidate list if they are not
+        already present, so a trust change is reflected immediately.  An
+        explicitly empty approval set means nothing may receive identity.
+        """
+        approved = origin_list(self.approved_api_urls)
+        if self.candidate_api_urls or self.health_check_api_urls:
+            candidates = origin_list(
+                list(self.candidate_api_urls) + list(self.health_check_api_urls)
+            )
+        else:
+            # no explicit ordering: use the approved list in order
+            candidates = list(approved)
+        return approved, candidates
 
     @default("api_token")
     def _default_api_token(self):
@@ -551,6 +640,162 @@ class HubAuth(SingletonConfigurable):
         else:
             return self._synchronize(async_f, *args, **kwargs)
 
+    # target approval / recording transport
+
+    _target_policy = Instance(TargetPolicy, allow_none=True)
+
+    @default("_target_policy")
+    def _default_target_policy(self):
+        policy = TargetPolicy(parent=self)
+        approved, candidates = self._effective_target_config()
+        policy.set_config(approved, candidates)
+        return policy
+
+    transport = Any(
+        allow_none=True,
+        help="""Callable used to perform authentication HTTP requests.
+
+        Defaults to :func:`jupyterhub.httpclient.fetch`.  Override with a
+        recording transport to audit which target received which identity
+        material.  It must have the same signature as ``fetch``.
+        """,
+    )
+
+    auth_records = List(
+        help="""Audit log of authentication target interactions.
+
+        Each entry is an :class:`~.targets.AuthCallRecord` describing the
+        requested category, the selected target, whether the target was
+        approved and the outcome.  Records are appended for every attempt,
+        including attempts that are refused before any request is sent.
+        """,
+    )
+
+    def _sync_target_policy(self):
+        """Reapply the configured trust lists, clearing caches on change.
+
+        Returning True means the approval set or candidate order changed, so
+        cached identity responses must not be reused: they were produced by a
+        connection to a target that may no longer be trusted.
+        """
+        approved, candidates = self._effective_target_config()
+        policy = self._target_policy
+        approvals_changed = list(approved) != list(policy.approved)
+        changed = policy.set_config(approved, candidates)
+        if changed:
+            if approvals_changed:
+                app_log.warning(
+                    "Authentication target approvals changed; "
+                    "clearing cached identity responses"
+                )
+            self.cache.clear()
+        return changed
+
+    @observe(
+        "approved_api_urls",
+        "candidate_api_urls",
+        "health_check_api_urls",
+        "api_url",
+    )
+    def _approved_urls_changed(self, change):
+        # Re-derive the policy and invalidate cached identity responses, but
+        # only once the policy exists (not while traits are set during init).
+        if self._trait_values.get("_target_policy") is not None:
+            self._sync_target_policy()
+
+    def _record_auth_call(
+        self,
+        category,
+        target,
+        outcome,
+        *,
+        method="GET",
+        url="",
+        status=None,
+        approval="approved",
+    ):
+        record = AuthCallRecord(
+            category=category,
+            target=target,
+            outcome=outcome,
+            method=method,
+            url=url,
+            status=status,
+            approval=approval,
+        )
+        self.auth_records.append(record)
+        app_log.debug(
+            "auth target %s category=%s approval=%s outcome=%s status=%s",
+            target,
+            category,
+            approval,
+            outcome,
+            status,
+        )
+        return record
+
+    def check_target_health(self):
+        """Return the configured candidate targets, split by approval.
+
+        Unapproved candidates are reported here so they can be monitored
+        without ever receiving identity material.
+        """
+        policy = self._target_policy
+        return {
+            "approved": list(policy.approved),
+            "health_check_only": policy.health_check_targets(),
+        }
+
+    def _health_url(self, target):
+        """Build the credential-free health URL for *target*."""
+        parsed = urlparse(self.api_url)
+        path = parsed.path.rstrip("/")
+        if path.endswith("/api"):
+            path = path[: -len("/api")]
+        path = path + "/health"
+        return target.rstrip("/") + path
+
+    async def probe_health_targets(self):
+        """Probe health-check-only candidates without sending credentials.
+
+        Only unapproved candidates are probed, and no ``Authorization`` header
+        is attached.  Each probe is recorded with the ``health-check`` category
+        so health checks can be told apart from identity exchanges.
+
+        Returns a mapping of target to outcome (``success``/``network-error``).
+        """
+        policy = self._target_policy
+        transport = self.transport or fetch
+        results = {}
+        for target in policy.health_check_targets():
+            if not policy.health_check_only_origin(target):
+                continue
+            url = self._health_url(target)
+            try:
+                response = await transport(
+                    url, method="GET", raise_for_status=False
+                )
+            except (ClientConnectionError, OSError, asyncio.TimeoutError) as e:
+                app_log.debug("Health check for %s failed: %s", target, e)
+                outcome = "network-error"
+            else:
+                outcome = "success" if response.status < 500 else "http-error"
+            results[target] = outcome
+            status = (
+                getattr(response, "status", None)
+                if outcome != "network-error"
+                else None
+            )
+            self._record_auth_call(
+                AUTH_CATEGORY_HEALTH,
+                target,
+                outcome,
+                url=url,
+                approval="unapproved",
+                status=status,
+            )
+        return results
+
     async def _check_hub_authorization(
         self, url, api_token, cache_key=None, use_cache=True
     ):
@@ -567,6 +812,9 @@ class HubAuth(SingletonConfigurable):
 
         Raises an HTTPError if the request failed for a reason other than no such user.
         """
+        # apply trust configuration changes before consulting the cache, so a
+        # cached identity response from a since-removed target is not reused
+        self._sync_target_policy()
         if use_cache:
             if cache_key is None:
                 raise ValueError("cache_key is required when using cache")
@@ -579,6 +827,7 @@ class HubAuth(SingletonConfigurable):
         data = await self._api_request(
             'GET',
             url,
+            category=AUTH_CATEGORY_USER,
             headers={"Authorization": "token " + api_token},
             allow_403=True,
         )
@@ -591,75 +840,173 @@ class HubAuth(SingletonConfigurable):
             self.cache[cache_key] = data
         return data
 
-    async def _api_request(self, method, url, /, **kwargs):
-        """Make an API request"""
+    @default("transport")
+    def _default_transport(self):
+        return fetch
+
+    async def _api_request(self, method, url, /, category=None, **kwargs):
+        """Make an authentication API request to an approved target.
+
+        The target is selected from the explicit allow-list before any request
+        is sent.  Unapproved candidates are recorded and skipped, so identity
+        material is never sent to them.  If an approved target fails at the
+        transport level, another approved target is tried; the failed target is
+        demoted so a retry rotates through the candidate order.
+        """
         allow_403 = kwargs.pop('allow_403', False)
         headers = kwargs.setdefault("headers", {})
-        headers.setdefault('Authorization', f'token {self.api_token}')
+        explicit_auth = headers.get('Authorization')
+        if explicit_auth is None:
+            headers['Authorization'] = f'token {self.api_token}'
+        if category is None:
+            submitted = headers.get("Authorization", "")
+            if submitted == f"token {self.api_token}":
+                category = AUTH_CATEGORY_SERVICE
+            else:
+                category = AUTH_CATEGORY_USER
+
+        self._sync_target_policy()
+        policy = self._target_policy
+        transport = self.transport or fetch
+
         # translate requests args to tornado's
         if self.certfile or self.keyfile:
             kwargs["ssl"] = make_ssl_context(
                 self.keyfile, self.certfile, cafile=self.client_ca
             )
 
-        try:
-            r = await fetch(url, method=method, raise_for_status=False, **kwargs)
-        except Exception as e:
-            app_log.error("Error connecting to %s: %s", self.api_url, e)
-            msg = f"Failed to connect to Hub API at {self.api_url!r}."
-            msg += f"  Is the Hub accessible at this URL (from host: {socket.gethostname()})?"
-            if '127.0.0.1' in self.api_url:
-                msg += (
-                    "  Make sure to set c.JupyterHub.hub_ip to an IP accessible to"
-                    + " single-user servers if the servers are not on the same host as the Hub."
+        tried = []
+        errors = {}
+        recorded_skipped = set()
+        response = None
+        target = None
+        request_url = None
+
+        def record_skipped():
+            for skipped in policy.last_skipped:
+                if skipped not in recorded_skipped:
+                    recorded_skipped.add(skipped)
+                    self._record_auth_call(
+                        category,
+                        skipped,
+                        "not-approved",
+                        method=method,
+                        approval="unapproved",
+                    )
+
+        while True:
+            try:
+                target = policy.select(exclude=tried)
+            except TargetNotApproved as e:
+                record_skipped()
+                if tried:
+                    # approved targets exist but every one failed at the
+                    # transport layer: this is a network failure, not a
+                    # missing approval
+                    raise TargetUnavailable(tried, errors) from e
+                raise
+            record_skipped()
+
+            # Revalidate immediately before sending: the cached selection must
+            # still be approved under the current trust configuration.
+            if not policy.is_approved(target):
+                policy.invalidate()
+                tried.append(target)
+                if tried and len(tried) >= len(policy.approved):
+                    raise TargetUnavailable(tried, errors)
+                continue
+
+            request_url = replace_origin(url, target)
+            tried.append(target)
+            try:
+                response = await transport(
+                    request_url, method=method, raise_for_status=False, **kwargs
                 )
-            raise HTTPError(500, msg)
+            except (ClientConnectionError, OSError, asyncio.TimeoutError) as e:
+                app_log.warning(
+                    "Error connecting to approved Hub target %s: %s", target, e
+                )
+                errors[target] = e
+                self._record_auth_call(
+                    category,
+                    target,
+                    "network-error",
+                    method=method,
+                    url=request_url,
+                )
+                # rotate candidates so the next attempt tries a different
+                # approved target rather than the failed one
+                policy.demote(target)
+                continue
+            break
 
-        response_text = await r.text()
-
-        data = None
+        response_text = await response.text()
+        status_value = response.status
         try:
-            status = HTTPStatus(r.status)
+            status = HTTPStatus(status_value)
         except ValueError:
             app_log.error(
-                f"Unknown error checking authorization with JupyterHub: {r.code}"
+                "Unknown error checking authorization with JupyterHub: %s",
+                status_value,
             )
             app_log.error(response_text)
+            status = None
 
-        if status.value == 403 and allow_403:
+        status_code = status.value if status is not None else status_value
+        if 200 <= status_code < 400:
+            self._record_auth_call(
+                category,
+                target,
+                "success",
+                method=method,
+                url=request_url,
+                status=status_code,
+            )
+        else:
+            self._record_auth_call(
+                category,
+                target,
+                "http-error",
+                method=method,
+                url=request_url,
+                status=status_code,
+            )
+
+        data = None
+        if status_code == 403 and allow_403:
             pass
-        elif status.value == 403:
+        elif status_code == 403:
             app_log.error(
                 "I don't have permission to check authorization with JupyterHub, my auth token may have expired: [%i] %s",
-                status.value,
-                status.description,
+                status_code,
+                status.description if status is not None else "",
             )
             app_log.error(response_text)
             raise HTTPError(
                 500, "Permission failure checking authorization, I may need a new token"
             )
-        elif status.value >= 500:
+        elif status_code >= 500:
             app_log.error(
                 "Upstream failure verifying auth token: [%i] %s",
-                status.value,
-                status.description,
+                status_code,
+                status.description if status is not None else "",
             )
             app_log.error(response_text)
             raise HTTPError(502, "Failed to check authorization (upstream problem)")
-        elif status.value >= 400:
+        elif status_code >= 400:
             app_log.warning(
                 "Failed to check authorization: [%i] %s",
-                status.value,
-                status.description,
+                status_code,
+                status.description if status is not None else "",
             )
             app_log.warning(response_text)
             msg = "Failed to check authorization"
             # pass on error from oauth failure
             try:
-                response = json.loads(response_text)
+                error_payload = json.loads(response_text)
                 # prefer more specific 'error_description', fallback to 'error'
-                description = response.get(
-                    "error_description", response.get("error", "Unknown error")
+                description = error_payload.get(
+                    "error_description", error_payload.get("error", "Unknown error")
                 )
             except Exception:
                 pass
@@ -1127,6 +1474,7 @@ class HubOAuth(HubAuth):
         token_reply = await self._api_request(
             'POST',
             self.oauth_token_url,
+            category=AUTH_CATEGORY_OAUTH,
             data=urlencode(params).encode('utf8'),
             headers={'Content-Type': 'application/x-www-form-urlencoded'},
         )

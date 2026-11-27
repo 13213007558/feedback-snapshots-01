@@ -20,6 +20,10 @@ Contributors to major version bumps in JupyterHub include:
 
 ## [Unreleased]
 
+### New features added
+
+- `HubAuth` now sends authentication requests only to explicitly approved targets (`HubAuth.approved_api_urls`). Unapproved candidates are health-check only, target selection is revalidated for cached connections and retries, and `HubAuth.auth_records` records which target received which category of identity material. Network failures (503) are distinguished from insufficient approval (403).
+
 ## 6.2
 
 ### 6.2.0 - 2026-11-05
