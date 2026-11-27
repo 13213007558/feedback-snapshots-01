@@ -1,0 +1,9 @@
+service: api-gateway
+z_token: keep-me-first
+a_placeholder: REVIEW_PLACEHOLDER
+m_token: middle-value
+b_placeholder: REVIEW_PLACEHOLDER_LATER
+nested:
+  zeta: leaf-z
+  alpha: REVIEW_PLACEHOLDER_NESTED
+tail: done
