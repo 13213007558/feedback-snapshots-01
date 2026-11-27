@@ -1,6 +1,7 @@
 import re
 import time
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 from celery.events import Event
 from kombu import uuid
@@ -289,8 +290,10 @@ class PrometheusTests(AsyncHTTPTestCase):
             state.event(event)
         self._app.events.state = state
         metrics = self.get('/metrics').body.decode('utf-8')
-        line = next(l for l in metrics.splitlines()
-                    if l.startswith(f'flower_worker_prefetched_tasks{{task="{task_name}",worker="worker1"}}'))
+        line = next(entry for entry in metrics.splitlines()
+                    if entry.startswith(
+                        f'flower_worker_prefetched_tasks{{task="{task_name}",'
+                        f'worker="worker1"}}'))
         return float(line.split()[-1])
 
     def test_received_task_counts_as_prefetched(self):
@@ -317,3 +320,170 @@ class HealthcheckTests(AsyncHTTPTestCase):
     def test_healthcheck_route(self):
         response = self.get('/healthcheck').body.decode('utf-8')
         self.assertEqual(response, 'OK')
+
+
+class PublicMetricsTests(AsyncHTTPTestCase):
+    def setUp(self):
+        super().setUp()
+        # Public series are derived from the process-wide internal metrics,
+        # so start every case from an empty collector.
+        collector = self._app.events.state.metrics.public
+        with collector._lock:  # pylint: disable=protected-access
+            collector._policy = None
+            collector._active = {}
+            collector._retired = {}
+            collector._retired_total = 0
+
+    def seed(self, state, *task_names, worker='celery@team-a'):
+        state.get_or_create_worker(worker)
+        state.event(Event('worker-online', hostname=worker, clock=0,
+                          local_received=time.time()))
+        for index, task_name in enumerate(task_names):
+            for i, event in enumerate(task_succeeded_events(
+                    worker=worker, name=task_name,
+                    id=f'{task_name}-{index}')):
+                event['clock'] = i
+                event['local_received'] = time.time()
+                state.event(event)
+
+    def scrape(self, state):
+        self._app.events.state = state
+        return self.get('/metrics/public').body.decode('utf-8')
+
+    @staticmethod
+    def value(metrics, prefix):
+        lines = [line for line in metrics.splitlines()
+                 if line.startswith(prefix + ' ')]
+        return float(lines[0].split()[-1]) if lines else None
+
+    def test_public_view_merges_task_categories_and_hides_names(self):
+        category = 'category-' + uuid()
+        task_names = ('tasks.' + uuid(), 'tasks.' + uuid())
+        worker = 'celery@' + uuid()
+        state = EventsState()
+        self.seed(state, *task_names, worker=worker)
+
+        with self.mock_option('public_metrics_task_categories',
+                              {task_names[0]: category,
+                               task_names[1]: category}):
+            metrics = self.scrape(state)
+
+        succeeded = ('flower_public_events_total'
+                     f'{{task_category="{category}",type="task-succeeded"}}')
+        self.assertEqual(2.0, self.value(metrics, succeeded))
+        self.assertEqual(
+            2.0, self.value(metrics, 'flower_public_task_runtime_seconds_count'))
+        for task_name in task_names:
+            self.assertNotIn(task_name, metrics)
+        self.assertNotIn('flower_events_total', metrics)
+        self.assertNotIn(worker, metrics)
+
+    def test_public_view_excludes_unmapped_tasks(self):
+        category = 'category-' + uuid()
+        task_name = 'tasks.' + uuid()
+        state = EventsState()
+        self.seed(state, task_name)
+
+        with self.mock_option('public_metrics_task_categories',
+                              {task_name: category}):
+            metrics = self.scrape(state)
+
+        self.assertIn(f'task_category="{category}"', metrics)
+        self.assertNotIn(task_name, metrics)
+
+    def test_online_count_follows_worker_offline(self):
+        category = 'category-' + uuid()
+        task_a, task_b = 'tasks.' + uuid(), 'tasks.' + uuid()
+        worker_a, worker_b = 'celery@' + uuid(), 'celery@' + uuid()
+        state = EventsState()
+        self.seed(state, task_a, worker=worker_a)
+        self.seed(state, task_b, worker=worker_b)
+        mapping = {task_a: category, task_b: category}
+
+        with self.mock_option('public_metrics_task_categories', mapping), \
+                self.mock_option('public_metrics_retire_seconds', 0.0):
+            online = self.value(self.scrape(state),
+                                'flower_public_workers_online')
+            state.event(Event('worker-offline', hostname=worker_b,
+                              clock=99, local_received=time.time()))
+            offline_metrics = self.scrape(state)
+            offline = self.value(offline_metrics,
+                                 'flower_public_workers_online')
+
+        self.assertEqual(online - 1, offline)
+        # The two task names stay merged even after one worker leaves
+        succeeded = ('flower_public_events_total'
+                     f'{{task_category="{category}",type="task-succeeded"}}')
+        self.assertEqual(2.0, self.value(offline_metrics, succeeded))
+        self.assertNotIn(worker_b, offline_metrics)
+
+    def test_withdrawn_category_leaves_public_view(self):
+        category = 'category-' + uuid()
+        state = EventsState()
+        self.seed(state, 'tasks.alpha', 'tasks.beta')
+
+        with self.mock_option('public_metrics_task_categories',
+                              {'tasks.alpha': category,
+                               'tasks.beta': category}), \
+                self.mock_option('public_metrics_retire_seconds', 0.0):
+            before = state.metrics.public.render().decode('utf-8')
+            self.assertIn(f'task_category="{category}"', before)
+            retired_before = self.value(
+                before, 'flower_public_series_retired_total')
+            with self.mock_option('public_metrics_task_categories',
+                                  {'tasks.private': 'internal'}):
+                after = state.metrics.public.render().decode('utf-8')
+                following = state.metrics.public.render().decode('utf-8')
+
+        self.assertNotIn(f'task_category="{category}"', after)
+        self.assertNotIn(f'task_category="{category}"', following)
+        self.assertEqual(
+            retired_before + 5,
+            self.value(after, 'flower_public_series_retired_total'))
+        self.assertEqual(
+            retired_before + 5,
+            self.value(following, 'flower_public_series_retired_total'))
+
+    def test_retired_category_survives_grace_period_then_disappears(self):
+        category = 'category-' + uuid()
+        state = EventsState()
+        self.seed(state, 'tasks.alpha')
+
+        with self.mock_option('public_metrics_task_categories',
+                              {'tasks.alpha': category}), \
+                self.mock_option('public_metrics_retire_seconds', 60.0):
+            started = time.monotonic()
+            self.assertIn(
+                f'task_category="{category}"',
+                state.metrics.public.render().decode('utf-8'))
+            with self.mock_option('public_metrics_task_categories',
+                                  {'tasks.private': 'internal'}), \
+                    patch('flower.public_metrics.time.monotonic',
+                          return_value=started + 10):
+                during = state.metrics.public.render().decode('utf-8')
+            with self.mock_option('public_metrics_task_categories',
+                                  {'tasks.private': 'internal'}), \
+                    patch('flower.public_metrics.time.monotonic',
+                          return_value=started + 120):
+                expired = state.metrics.public.render().decode('utf-8')
+
+        self.assertIn(f'task_category="{category}"', during)
+        self.assertNotIn(f'task_category="{category}"', expired)
+
+    def test_internal_metrics_keep_full_labels(self):
+        category = 'category-' + uuid()
+        task_name = 'tasks.' + uuid()
+        worker = 'celery@' + uuid()
+        state = EventsState()
+        self.seed(state, task_name, worker=worker)
+
+        with self.mock_option('public_metrics_task_categories',
+                              {task_name: category}):
+            self.scrape(state)
+            internal = self.get('/metrics').body.decode('utf-8')
+
+        self.assertIn(
+            f'flower_events_total{{task="{task_name}",type="task-succeeded",'
+            f'worker="{worker}"}} 1.0', internal)
+        self.assertIn(
+            f'flower_worker_online{{worker="{worker}"}} 1.0', internal)

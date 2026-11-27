@@ -7,6 +7,18 @@ from tornado.options import define, options
 DEFAULT_CONFIG_FILE = 'flowerconfig.py'
 
 
+class _TaskCategoriesMeta(type):
+    def __instancecheck__(cls, instance):
+        return isinstance(instance, (str, dict))
+
+
+class TaskCategoriesOption(metaclass=_TaskCategoriesMeta):
+    "Option type accepting a task=category string or a mapping"
+
+    def __new__(cls, value):
+        return value
+
+
 define("port", default=5555,
        help="run on the given port", type=int)
 define("address", default='',
@@ -67,6 +79,10 @@ define("auth_provider", default=None, type=str, help="auth handler class")
 define("url_prefix", type=str, help="base url prefix")
 define("task_runtime_metric_buckets", type=float, default=list(Histogram.DEFAULT_BUCKETS),
        multiple=True, help="histogram latency bucket value")
+define("public_metrics_task_categories", default=None, type=TaskCategoriesOption,
+       help="task name to public category mapping, e.g. tasks.add=batch,tasks.mul=batch")
+define("public_metrics_retire_seconds", default=0.0, type=float,
+       help="time (in seconds) a retired public series stays visible before it disappears")
 define("read_only", type=bool, default=False,
        help="enable read only mode, disabling all operations")
 

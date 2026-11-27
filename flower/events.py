@@ -16,6 +16,7 @@ from prometheus_client import Gauge, Histogram
 from tornado.ioloop import PeriodicCallback
 
 from .options import options
+from .public_metrics import PublicMetricsCollector
 from .utils.search import TaskSearchEngine
 
 logger = logging.getLogger(__name__)
@@ -57,6 +58,7 @@ class PrometheusMetrics:
             "Number of tasks currently executing at a worker",
             ['worker']
         )
+        self.public = PublicMetricsCollector(self)
 
     def observe_task(self, worker, event, task):
         event_type = event['type']

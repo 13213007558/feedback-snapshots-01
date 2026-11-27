@@ -490,6 +490,42 @@ To enable authentication and specify an authentication provider, set the `auth_p
 Custom handlers can be specified by their fully qualified import path. See
 :ref:`custom-authentication` for an example.
 
+.. _public_metrics_task_categories:
+
+public_metrics_task_categories
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Default: None
+
+Maps task names to the task categories shared through the public metrics view.
+The mapping is accepted as a comma-separated list of ``task=category`` pairs on the command
+line or in an environment variable, or as a dictionary in the configuration file::
+
+    $ celery flower --public-metrics-task-categories='tasks.add=batch,tasks.multiply=batch'
+
+.. code-block:: python
+
+    # flowerconfig.py
+    public_metrics_task_categories = {
+        'tasks.add': 'batch',
+        'tasks.multiply': 'batch',
+    }
+
+Only mapped tasks appear in the public view. Several task names may map to the same
+category; their counts are merged there. Unmapped tasks stay visible only on ``/metrics``.
+
+.. _public_metrics_retire_seconds:
+
+public_metrics_retire_seconds
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Default: 0.0
+
+Time (in seconds) a public series formed under labels that are no longer approved stays
+visible at its last value before it is removed from the public view. The default removes
+the series immediately. Each series that leaves the public view is counted by
+``flower_public_series_retired_total``.
+
 .. _purge_offline_workers:
 
 purge_offline_workers

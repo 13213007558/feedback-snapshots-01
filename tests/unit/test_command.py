@@ -271,3 +271,33 @@ class TestConfOption(unittest.TestCase):
         self.assertEqual(defined, documented,
                          msg='Every option must have a section in docs/config.rst '
                              'and every section must be an option')
+
+
+class TestPublicMetricsOptions(unittest.TestCase):
+    def mock_option(self, name, value):
+        return patch.object(options.mockable(), name, value)
+
+    def test_task_categories_from_cmd_line(self):
+        with self.mock_option('public_metrics_task_categories', None):
+            apply_options(
+                'flower',
+                argv=['--public-metrics-task-categories=tasks.add=batch,tasks.mul=batch'])
+            self.assertEqual(
+                'tasks.add=batch,tasks.mul=batch',
+                options.public_metrics_task_categories)
+
+    def test_task_categories_from_env(self):
+        with self.mock_option('public_metrics_task_categories', None), \
+                patch.dict(os.environ, {
+                    'FLOWER_PUBLIC_METRICS_TASK_CATEGORIES':
+                        'tasks.add=batch,tasks.mul=batch'}):
+            apply_env_options()
+            self.assertEqual(
+                'tasks.add=batch,tasks.mul=batch',
+                options.public_metrics_task_categories)
+
+    def test_retire_seconds_from_cmd_line(self):
+        with self.mock_option('public_metrics_retire_seconds', 0.0):
+            apply_options(
+                'flower', argv=['--public-metrics-retire-seconds=30'])
+            self.assertEqual(30.0, options.public_metrics_retire_seconds)

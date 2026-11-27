@@ -10,6 +10,7 @@ The following endpoints are exempt from authentication:
 
 - /healthcheck
 - /metrics
+- /metrics/public
 
 .. _basic-authentication:
 

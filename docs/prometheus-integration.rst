@@ -80,6 +80,50 @@ The following labels are available:
   For more info on task event types see: `task events in celery <https://docs.celeryq.dev/en/stable/userguide/monitoring.html#task-events>`_.
 * **worker** - celery worker name, e.g. ``celery@<your computer name>``.
 
+Public Metrics View
+-------------------
+
+``/metrics`` exposes the full labels, including task names and worker names, and stays
+available for the team running the cluster. A shared collector should scrape
+``/metrics/public`` instead; ``/metrics?view=public`` serves the same projection for a
+collector that already points at ``/metrics``. That view is built from the same internal
+metrics but only carries the approved labels:
+
++---------------------------------------------------+----------------------------------------------------------------------+--------------------+-----------------+
+| Name                                              | Description                                                          |  Labels            | Instrument Type |
++===================================================+======================================================================+====================+=================+
+| flower_public_events_total                        | Number of task events grouped by public task category.               | type, task_category| counter         |
++---------------------------------------------------+----------------------------------------------------------------------+--------------------+-----------------+
+| flower_public_task_runtime_seconds                | Task runtime grouped by public task category.                        | task_category      | histogram       |
++---------------------------------------------------+----------------------------------------------------------------------+--------------------+-----------------+
+| flower_public_prefetched_tasks                    | Tasks prefetched at online workers by public task category.          | task_category      | gauge           |
++---------------------------------------------------+----------------------------------------------------------------------+--------------------+-----------------+
+| flower_public_workers_online                      | Number of online workers.                                            | none               | gauge           |
++---------------------------------------------------+----------------------------------------------------------------------+--------------------+-----------------+
+| flower_public_tasks_executing                     | Tasks currently executing at online workers.                         | none               | gauge           |
++---------------------------------------------------+----------------------------------------------------------------------+--------------------+-----------------+
+| flower_public_series_retired_total                | Public series removed after the label policy changed.                | none               | counter         |
++---------------------------------------------------+----------------------------------------------------------------------+--------------------+-----------------+
+
+Task names are never exposed by the public view. Configure the mapping with
+:ref:`public_metrics_task_categories`. Several task names can map to the same category;
+their event counts, runtime buckets and prefetched gauges are merged into one series.
+Only workers that are online contribute to ``flower_public_workers_online`` and
+``flower_public_tasks_executing``, so an offline worker lowers the online count without
+leaving worker names in the output.
+
+When the mapping is tightened, a series formed under the previous labels is retired:
+with :ref:`public_metrics_retire_seconds` it stays at its last value for the grace period
+and then disappears, and ``flower_public_series_retired_total`` records the exit. The
+default retires it on the next scrape. A category that still has another approved task
+mapping keeps its series; withdrawing one task name lowers its contribution instead of
+retiring the category. ``/metrics`` is unaffected and keeps the original series, so
+existing in-team dashboards continue to work.
+
+A local walkthrough is available with ``python -m flower.demo.public_metrics``. It seeds
+two task names under one public category, takes one worker offline, and prints the public
+and internal views before and after the mapping is tightened.
+
 Example Prometheus Alerts
 -------------------------
 

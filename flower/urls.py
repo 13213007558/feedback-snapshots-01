@@ -54,6 +54,7 @@ handlers = [
     (r"/api/task/revoke/(.+)", control.TaskRevoke),
     # Metrics
     (r"/metrics", monitor.Metrics),
+    (r"/metrics/public", monitor.PublicMetrics),
     (r"/healthcheck", monitor.Healthcheck),
     # Static
     (r"/static/(.*)", StaticFileHandler,
