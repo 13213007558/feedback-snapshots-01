@@ -2,6 +2,7 @@ require 'logger'
 require 'devise'
 require 'devise_two_factor/models'
 require 'devise_two_factor/strategies'
+require 'devise_two_factor/two_factor_authentication'
 
 module Devise
   # The length of randomly generated OTP shared secret (in bytes).

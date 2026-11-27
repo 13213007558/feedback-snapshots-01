@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Add per-session two-factor state (`Devise::TwoFactorAuthentication::Session`
+  and `Status`) with `legacy`, `pending` and `confirmed` levels, read-only
+  handling for sessions that predate the requirement, per-session confirmation
+  through OTP or backup codes, and stale sensitive-request detection when the
+  account configuration changes.
+- Record session state from the `two_factor_authenticatable` and
+  `two_factor_backupable` strategies.
+- Add `Devise::Models::TwoFactorConfigurationTracking`, which fingerprints the
+  account's two-factor configuration so older confirmations can be invalidated.
+
 # 6.4.1
 
 - Update gem spec metadata sourcecode URI

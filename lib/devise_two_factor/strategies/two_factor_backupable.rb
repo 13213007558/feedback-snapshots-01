@@ -1,12 +1,17 @@
+require 'devise_two_factor/strategies/session_state_recording'
+
 module Devise
   module Strategies
     class TwoFactorBackupable < Devise::Strategies::DatabaseAuthenticatable
+      include SessionStateRecording
 
       def authenticate!
         resource = mapping.to.find_for_database_authentication(authentication_hash)
 
         if validate(resource) { validate_backup_code(resource) }
           super
+          record_two_factor_session_state(resource,
+                                          two_factor_used: resource.otp_required_for_login)
         end
 
         fail(Devise.paranoid ? :invalid : :not_found_in_database) unless resource
@@ -17,8 +22,11 @@ module Devise
       end
 
       def validate_backup_code(resource)
+        @backup_code_used = false
         return if params[scope].nil? || params[scope]['otp_attempt'].nil?
-        resource.invalidate_otp_backup_code!(params[scope]['otp_attempt'])
+
+        @backup_code_used = !!resource.invalidate_otp_backup_code!(params[scope]['otp_attempt'])
+        @backup_code_used
       end
     end
   end

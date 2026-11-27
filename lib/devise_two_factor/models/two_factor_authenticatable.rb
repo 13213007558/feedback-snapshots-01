@@ -1,4 +1,6 @@
 require 'rotp'
+require 'digest'
+require 'devise_two_factor/models/two_factor_configuration_tracking'
 
 module Devise
   module Models
@@ -7,6 +9,8 @@ module Devise
       include Devise::Models::DatabaseAuthenticatable
 
       included do
+        include Devise::Models::TwoFactorConfigurationTracking
+
         encrypts :otp_secret, **splattable_encrypted_attr_options
         attr_accessor :otp_attempt
       end

@@ -203,6 +203,68 @@ With any authentication solution it is also important to protect your users from
 
 Thank you to Christian Reitter (Radically Open Security) and Chris MacNaughton (Centauri Solutions) for reporting the issue.
 
+## Session-Level Two-Factor State
+
+Devise-Two-Factor records the two-factor status of each session in the Rack
+session, not in the database. This lets an application distinguish sessions
+that predate a two-factor requirement from sessions that confirmed it, and it
+guarantees that a confirmation in one session is never reused by another
+session of the same account.
+
+Include the helpers in your application controller:
+
+```ruby
+class ApplicationController < ActionController::Base
+  include Devise::TwoFactorAuthentication::ControllerHelpers
+end
+```
+
+The session exposes five levels (`Devise::TwoFactorAuthentication::Status`):
+
+* `anonymous` - no authenticated user.
+* `not_required` - signed in, two-factor authentication is disabled.
+* `legacy` - the session was established before the account started requiring
+  two-factor authentication and has not confirmed since.
+* `pending` - two-factor authentication is required and this session has not
+  confirmed it, or its confirmation belongs to an older account
+  configuration.
+* `confirmed` - this session confirmed against the account's current
+  configuration.
+
+`legacy` and `pending` are read-only: the user stays signed in but may not
+perform restricted business actions until they verify again. The status
+object exposes `read_only?`, `restricted?`, `authenticated?`, `verified?`,
+`eligible_for_sensitive_actions?`, `verification_required?`, `stale?` and
+`prompt` (`:authenticate`, `:verify_two_factor` or `:reverify_two_factor`).
+
+Confirm a session with either a TOTP code or a backup code:
+
+```ruby
+accepted = confirm_two_factor_authentication!(params[:otp_attempt])
+```
+
+For sensitive requests that were already entered before the account
+configuration changed again, record the entry and check eligibility at
+submission time. A request entered under a superseded configuration is
+reported as `stale` and the user is asked to verify again:
+
+```ruby
+before_action :begin_sensitive_request!, only: [:edit, :update]
+
+def update
+  unless sensitive_request_submittable?
+    return redirect_to edit_path, alert: 'Please verify two-factor authentication again.'
+  end
+  # ... restricted business action
+end
+```
+
+Account configuration changes that rotate the fingerprint include enabling or
+disabling two-factor authentication, rotating `otp_secret`, and regenerating
+backup codes. Because the fingerprint is account-level while the state is
+session-level, a change made through one session immediately invalidates
+confirmations held by other sessions.
+
 ## Backup Codes
 
 Devise-Two-Factor is designed with extensibility in mind. One such extension, `TwoFactorBackupable`, is included and serves as a good example of how to extend this gem. This plugin allows you to add the ability to generate single-use backup codes for a user, which they may use to bypass two-factor authentication, in the event that they lose access to their device.

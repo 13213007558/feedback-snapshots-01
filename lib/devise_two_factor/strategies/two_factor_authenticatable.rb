@@ -1,6 +1,9 @@
+require 'devise_two_factor/strategies/session_state_recording'
+
 module Devise
   module Strategies
     class TwoFactorAuthenticatable < Devise::Strategies::DatabaseAuthenticatable
+      include SessionStateRecording
 
       def authenticate!
         resource = mapping.to.find_for_database_authentication(authentication_hash)
@@ -12,6 +15,7 @@ module Devise
         # We check the OTP, then defer to DatabaseAuthenticatable
         if validate(resource) { hashed = true; validate_otp(resource) }
           super
+          record_two_factor_session_state(resource, two_factor_used: @otp_used)
         else
           # Paranoid mode: do the expensive hash even when resource is nil,
           # to avoid timing-based user enumeration.
@@ -26,9 +30,12 @@ module Devise
       end
 
       def validate_otp(resource)
+        @otp_used = false
         return true unless resource.otp_required_for_login
         return if params[scope].nil? || params[scope]['otp_attempt'].nil?
-        resource.validate_and_consume_otp!(params[scope]['otp_attempt'])
+
+        @otp_used = !!resource.validate_and_consume_otp!(params[scope]['otp_attempt'])
+        @otp_used
       end
     end
   end
