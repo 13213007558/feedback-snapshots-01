@@ -52,6 +52,7 @@ from falcon.app_helpers import AsyncPreparedMiddlewareResult
 from falcon.app_helpers import AsyncPreparedMiddlewareWsResult
 from falcon.app_helpers import prepare_middleware
 from falcon.app_helpers import prepare_middleware_ws
+from falcon.asgi_spec import AsgiEvent
 from falcon.asgi_spec import AsgiRequestScope
 from falcon.asgi_spec import AsgiSendMsg
 from falcon.asgi_spec import EventType
@@ -154,7 +155,11 @@ class App(falcon.app.App[_ReqT, _RespT]):
                         To halt startup processing and signal to the server that it
                         should terminate, simply raise an exception and the
                         framework will convert it to a "lifespan.startup.failed"
-                        event for the server.
+                        event for the server. When this happens after one or
+                        more middleware components have already started, Falcon
+                        invokes their process_shutdown() handlers in reverse
+                        order first, so that no partially initialized
+                        middleware chain is left holding resources.
 
                         Args:
                             scope (dict): The ASGI scope dictionary for the
@@ -1130,6 +1135,27 @@ class App(falcon.app.App[_ReqT, _RespT]):
             else:
                 loop.run_in_executor(None, cb)
 
+    async def _roll_back_startup(
+        self,
+        started_handlers: list[AsyncMiddleware[_ReqT, _RespT]],
+        scope: AsgiRequestScope,
+        event: AsgiEvent,
+    ) -> str:
+        # NOTE: Tear down every handler that already completed its startup, in
+        #   reverse order, so that a failed startup never leaves a partially
+        #   initialized middleware chain holding resources or serving
+        #   requests. Returns the formatted tracebacks of any errors raised
+        #   while rolling back, or an empty string when cleanup succeeded.
+        rollback_errors: list[str] = []
+        for started in reversed(started_handlers):
+            if hasattr(started, 'process_shutdown'):
+                try:
+                    await started.process_shutdown(scope, event)
+                except Exception:
+                    rollback_errors.append(traceback.format_exc())
+
+        return '\n'.join(rollback_errors)
+
     async def _call_lifespan_handlers(
         self, ver: str, scope: AsgiRequestScope, receive: AsgiReceive, send: AsgiSend
     ) -> None:
@@ -1168,18 +1194,35 @@ class App(falcon.app.App[_ReqT, _RespT]):
                     )
                     return
 
+                started_handlers: list[AsyncMiddleware[_ReqT, _RespT]] = []
                 for handler in self._unprepared_middleware:
                     if hasattr(handler, 'process_startup'):
                         try:
                             await handler.process_startup(scope, event)
                         except Exception:
+                            startup_error = traceback.format_exc()
+                            rollback_error = await self._roll_back_startup(
+                                started_handlers, scope, event
+                            )
+
+                            message = startup_error
+                            if rollback_error:
+                                message = (
+                                    f'{startup_error}\nAdditionally, '
+                                    'rolling back the already-started '
+                                    'handlers raised:\n'
+                                    f'{rollback_error}'
+                                )
+
                             await send(
                                 {
                                     'type': EventType.LIFESPAN_STARTUP_FAILED,
-                                    'message': traceback.format_exc(),
+                                    'message': message,
                                 }
                             )
                             return
+
+                        started_handlers.append(handler)
 
                 await send({'type': EventType.LIFESPAN_STARTUP_COMPLETE})
 

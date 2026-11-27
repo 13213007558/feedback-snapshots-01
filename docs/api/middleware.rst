@@ -119,7 +119,11 @@ defined below.
                     To halt startup processing and signal to the server that it
                     should terminate, simply raise an exception and the
                     framework will convert it to a "lifespan.startup.failed"
-                    event for the server.
+                    event for the server. When this happens after one or more
+                    middleware components have already started, Falcon invokes
+                    their process_shutdown() handlers in reverse order first,
+                    so that no partially initialized middleware chain is left
+                    holding resources.
 
                     Args:
                         scope (dict): The ASGI scope dictionary for the
