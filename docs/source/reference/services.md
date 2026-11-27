@@ -563,6 +563,53 @@ and an example of its configuration is found [here](https://github.com/jupyter/n
 nbviewer can also be run as a Hub-Managed Service as described [nbviewer README][nbviewer example]
 section on securing the notebook viewer.
 
+(service-activity)=
+
+## Service activity
+
+Services can report units of activity to the Hub,
+and operators can read de-duplicated activity statistics.
+
+Reports are idempotent:
+each activity has a stable `activity_id`,
+and re-sending the same activity does not increase the recorded count.
+If reports arrive out of order,
+the newest `last_activity` is retained;
+an older observation never replaces a newer one.
+
+A service may report its own activity:
+
+```python
+r = requests.post(
+    f"{JUPYTERHUB_API_URL}/services/{JUPYTERHUB_SERVICE_NAME}/activity",
+    headers={"Authorization": f"token {JUPYTERHUB_API_TOKEN}"},
+    json={
+        "activity_id": "2026-11-27T12:00:00Z/session-1",
+        "last_activity": "2026-11-27T12:00:00Z",
+    },
+)
+r.raise_for_status()
+```
+
+Batch reports are accepted as `{"activities": [...]}`.
+The `services:activity` scope permits reporting for other services,
+optionally restricted with `!service=<name>`.
+
+Detailed records are available at
+`GET /api/services/<name>/activity`
+to the owning service or to principals with `read:services:activity`
+(optionally filtered by `!service=<name>`).
+
+The aggregate endpoint `GET /api/service-activity`
+can be read by any authenticated principal and reports
+complete `active_services` and `activity_count` totals
+and a de-duplicated `services` count mapping
+over the requested window (default: 30 days).
+The `services` mapping includes only services the caller can
+already list in `GET /api/services`;
+restricted service details are never exposed.
+It never includes activity identifiers or per-activity timestamps.
+
 [requests]: https://requests.readthedocs.io
 [services_auth]: ../api/services.auth.html
 [nbviewer example]: https://github.com/jupyter/nbviewer#securing-the-notebook-viewer

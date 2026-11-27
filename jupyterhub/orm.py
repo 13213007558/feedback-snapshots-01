@@ -522,6 +522,13 @@ class Service(Base):
         "APIToken", back_populates="service", cascade="all, delete-orphan"
     )
 
+    # activity reported by this service
+    activity_records = relationship(
+        "ServiceActivity",
+        back_populates="service",
+        cascade="all, delete-orphan",
+    )
+
     # service-specific interface
     _server_id = Column(Integer, ForeignKey('servers.id', ondelete='SET NULL'))
     server = relationship(
@@ -564,6 +571,44 @@ class Service(Base):
         Returns None if not found.
         """
         return db.query(cls).filter(cls.name == name).first()
+
+
+class ServiceActivity(Base):
+    """Recorded activity reported by a service
+
+    Activity reports are idempotent:
+    a given (service, activity_id) is recorded at most once,
+    with the greatest (newest) last_activity observed.
+
+    Reports that are older than the recorded last_activity
+    do not overwrite it.
+    """
+
+    __tablename__ = 'service_activity'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    service_id = Column(
+        Integer, ForeignKey('services.id', ondelete='CASCADE'), nullable=False
+    )
+    service = relationship("Service", back_populates="activity_records")
+
+    # stable identifier for a single unit of activity
+    activity_id = Column(Unicode(255), nullable=False)
+
+    # the time activity occurred
+    last_activity = Column(DateTime, nullable=False, index=True)
+
+    # when the Hub first learned of this activity
+    recorded_at = Column(DateTime, nullable=False, default=utcnow)
+
+    __table_args__ = (
+        sqlalchemy.UniqueConstraint(
+            'service_id', 'activity_id', name='service_activity_unique'
+        ),
+    )
+
+    def __repr__(self):
+        return f"<ServiceActivity service={self.service_id} activity_id={self.activity_id} last_activity={self.last_activity}>"
 
 
 class Expiring:

@@ -40,6 +40,8 @@ def get_default_roles():
                 'admin:groups',
                 'list:services',
                 'read:services',
+                'read:services:activity',
+                'services:activity',
                 'read:hub',
                 'proxy',
                 'shutdown',

@@ -1353,6 +1353,131 @@ paths:
       security:
         - oauth2:
             - read:services
+
+  /services/{name}/activity:
+    get:
+      operationId: get-service-activity
+      summary: Read detailed activity for a service
+      description: |
+        Detailed activity is restricted to principals with
+        `read:services:activity` (optionally filtered by `!service=`),
+        or to the service itself.
+        Re-sent activity is recorded once;
+        an older observation never replaces a newer one.
+      parameters:
+        - name: name
+          in: path
+          description: service name
+          required: true
+          schema:
+            type: string
+        - name: period
+          in: query
+          required: false
+          description: Window such as 24h, 7d, or 30d
+          schema:
+            type: string
+        - name: since
+          in: query
+          required: false
+          description: ISO8601 timestamp lower bound
+          schema:
+            type: string
+            format: date-time
+        - name: until
+          in: query
+          required: false
+          description: ISO8601 timestamp upper bound
+          schema:
+            type: string
+            format: date-time
+      responses:
+        200:
+          description: The service's activity records
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceActivityList"
+        403:
+          description: Not authorized to read this service's activity
+      security:
+        - oauth2:
+            - read:services:activity
+    post:
+      operationId: post-service-activity
+      summary: Report activity for a service
+      description: |
+        Report one activity or a batch of activities.
+        Reporting is idempotent per `activity_id`;
+        the newest `last_activity` is retained.
+      parameters:
+        - name: name
+          in: path
+          description: service name
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ServiceActivityReport"
+      responses:
+        200:
+          description: Activity recorded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceActivityReportResult"
+        403:
+          description: Not authorized to report for this service
+      security:
+        - oauth2:
+            - services:activity
+  /service-activity:
+    get:
+      operationId: get-service-activity-summary
+      summary: Read aggregate service activity statistics
+      description: |
+        Returns complete totals over all services in the window.
+        Per-service counts are included only for services the caller
+        can already list in GET /api/services; restricted activity
+        details are never exposed.
+      parameters:
+        - name: period
+          in: query
+          required: false
+          description: Window such as 24h, 7d, or 30d
+          schema:
+            type: string
+        - name: window
+          in: query
+          required: false
+          description: Window in seconds or as a duration such as "6h"
+          schema:
+            type: string
+        - name: since
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+        - name: until
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+      responses:
+        200:
+          description: Aggregate activity statistics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceActivitySummary"
+      security:
+        - oauth2: []
   /proxy:
     get:
       operationId: get-proxy
@@ -2026,6 +2151,115 @@ components:
             Additional information a deployment can attach to a service.
             JupyterHub does not use this field.
 
+    ServiceActivityRecord:
+      type: object
+      description: A single de-duplicated service activity
+      properties:
+        activity_id:
+          type: string
+          description: Stable identifier for this activity
+        last_activity:
+          type: string
+          format: date-time
+          description: The newest observed time for this activity
+        recorded_at:
+          type: string
+          format: date-time
+          description: When the Hub first recorded this activity
+
+    ServiceActivityList:
+      type: object
+      properties:
+        kind:
+          type: string
+          enum:
+            - service_activity_list
+        service:
+          type: string
+        count:
+          type: integer
+        last_activity:
+          type:
+            - string
+            - "null"
+          format: date-time
+        activity:
+          type: array
+          items:
+            $ref: "#/components/schemas/ServiceActivityRecord"
+
+    ServiceActivityReport:
+      type: object
+      description: |
+        One activity, or a batch of activities.
+        `activity_id` identifies the activity for idempotent re-sends.
+      properties:
+        activity_id:
+          type: string
+        last_activity:
+          type: string
+          format: date-time
+        activities:
+          type: array
+          items:
+            type: object
+            properties:
+              activity_id:
+                type: string
+              last_activity:
+                type: string
+                format: date-time
+
+    ServiceActivityReportResult:
+      type: object
+      properties:
+        kind:
+          type: string
+        service:
+          type: string
+        activity_id:
+          type: string
+        last_activity:
+          type: string
+          format: date-time
+        created:
+          type: boolean
+        updated:
+          type: boolean
+
+    ServiceActivitySummary:
+      type: object
+      description: |
+        Aggregate statistics.
+        Per-service counts are limited to services the caller may list.
+        No activity identifiers or per-activity timestamps are exposed.
+      properties:
+        kind:
+          type: string
+          enum:
+            - service_activity_summary
+        window_seconds:
+          type: integer
+        since:
+          type: string
+          format: date-time
+        until:
+          type: string
+          format: date-time
+        active_services:
+          type: integer
+          description: Distinct services with recorded activity in the window
+        activity_count:
+          type: integer
+          description: Distinct de-duplicated activities in the window
+        services:
+          type: object
+          additionalProperties:
+            type: integer
+          description: |
+            De-duplicated activity count per service,
+            limited to services the caller may list in GET /api/services.
+
     SharedServer:
       description: Subset of Server model present in Share responses
       type: object
@@ -2303,6 +2537,8 @@ components:
             list:services: List services, including at least their names.
             read:services: Read service models.
             read:services:name: Read service names.
+            read:services:activity: Read detailed service activity records.
+            services:activity: Report service activity.
             read:hub: Read detailed information about the Hub.
             access:servers: Access user servers via API or browser.
             access:services: Access services via API or browser.

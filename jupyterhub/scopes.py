@@ -143,6 +143,12 @@ scope_definitions = {
         'subscopes': ['read:services:name'],
     },
     'read:services:name': {'description': 'Read service names.'},
+    'read:services:activity': {
+        'description': 'Read detailed service activity records.',
+    },
+    'services:activity': {
+        'description': 'Report service activity.',
+    },
     'read:hub': {'description': 'Read detailed information about the Hub.'},
     'access:servers': {
         'description': 'Access user servers via API or browser.',
