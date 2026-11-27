@@ -350,6 +350,9 @@ When persistent mode is enabled, Flower saves its current state and reloads it u
 This ensures that Flower retains its state and configuration across restarts.
 Flower stores its state in a database file specified by the `db`_ option.
 
+Each save publishes an immutable checkpoint generation under ``<db>.checkpoints``.
+A generation is only used after it passes admission; see :ref:`checkpoints`.
+
 .. _port:
 
 port
@@ -372,6 +375,52 @@ Flower state includes information about workers and tasks. The state is saved pe
 
 By default, periodic saving is disabled. Flower will not automatically save its state at regular intervals.
 If you want to enable periodic state saving, set the `state_save_interval` option to a positive integer value representing the interval in milliseconds.
+
+.. _checkpoint_min_format_version:
+
+checkpoint_min_format_version
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Default: 0
+
+Sets the lowest checkpoint format version that startup will admit.
+
+The current format version is 1, so the default of 0 admits it. A legacy
+dbm shelf is format version 0 and is only admitted while this option is 0, so
+an existing data directory keeps working after an upgrade. Raise the value to
+refuse everything older than a version you trust; startup then falls back to
+an older admitted generation or to an empty state, and the reason is written
+to the recovery record.
+See :ref:`checkpoints`.
+
+.. _checkpoint_allow_legacy:
+
+checkpoint_allow_legacy
+~~~~~~~~~~~~~~~~~~~~~~~
+
+Default: True
+
+Controls whether a legacy dbm shelf may be used when no checkpoint generation
+passes admission.
+
+Set this to ``False`` to refuse legacy storage outright. Startup then opens an
+empty state and records the refusal rather than reading the old file. A
+non-zero `checkpoint_min_format_version`_ also refuses legacy storage, because
+it is format version 0.
+See :ref:`checkpoints`.
+
+.. _checkpoint_retention:
+
+checkpoint_retention
+~~~~~~~~~~~~~~~~~~~~
+
+Default: 5
+
+Sets how many complete checkpoint generations are kept.
+
+Older complete generations are removed after a new generation is published;
+the newest one is always kept. Generations that were never completed are kept
+as evidence so the recovery record can point at them.
 
 .. _xheaders:
 

@@ -32,6 +32,12 @@ OPTIONS
   --broker-api                     inspect broker e.g.
                                    http://guest:guest@localhost:15672/api/
   --ca-certs                       path to SSL certificate authority (CA) file
+  --checkpoint-allow-legacy        admit a legacy dbm state file when no
+                                   checkpoint generation passes (default *True*)
+  --checkpoint-min-format-version  minimum admitted event checkpoint format
+                                   version (default *0*)
+  --checkpoint-retention           number of complete event checkpoint
+                                   generations to keep (default *5*)
   --certfile                       path to SSL certificate file
   --conf                           flower configuration file path (default *flowerconfig.py*)
   --cookie-secret                  secure cookie secret

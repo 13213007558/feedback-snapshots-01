@@ -1,8 +1,5 @@
 import collections
-import glob
 import logging
-import os
-import shelve
 import threading
 import time
 from collections import Counter
@@ -15,6 +12,7 @@ from prometheus_client import Counter as PrometheusCounter
 from prometheus_client import Gauge, Histogram
 from tornado.ioloop import PeriodicCallback
 
+from .checkpoints import CheckpointStore, write_recovery_record
 from .options import options
 from .utils.search import TaskSearchEngine
 
@@ -116,6 +114,12 @@ class EventsState(State):
         self.search_engine = TaskSearchEngine()
         self.search_engine.rebuild(self.tasks.items())
 
+    def set_max_tasks(self, limit):
+        # The counter and the search index must describe the same task map
+        self.max_tasks_in_memory = self.tasks.limit = limit
+        self.tasks.update()
+        self.search_engine.rebuild(self.tasks.items())
+
     def _clear_tasks(self, ready=True):
         super()._clear_tasks(ready)
         self.search_engine.rebuild(self.tasks.items())
@@ -155,7 +159,10 @@ class Events(threading.Thread):
     # pylint: disable=too-many-arguments
     def __init__(self, capp, io_loop, db=None, persistent=False,
                  enable_events=True, state_save_interval=0,
-                 *, max_tasks_in_memory, **kwargs):
+                 *, max_tasks_in_memory, max_workers_in_memory=5000,
+                 checkpoint_min_format_version=0,
+                 checkpoint_allow_legacy=True, checkpoint_retention=5,
+                 **kwargs):
         threading.Thread.__init__(self)
         self.daemon = True
 
@@ -168,14 +175,19 @@ class Events(threading.Thread):
         self.state = None
         self.state_save_timer = None
         self.state_save_interval = state_save_interval
+        self.recovery = None
+        self.checkpoints = None
 
         if self.persistent:
+            self.checkpoints = CheckpointStore(
+                db,
+                min_format_version=checkpoint_min_format_version,
+                allow_legacy=checkpoint_allow_legacy,
+                retention=checkpoint_retention,
+                max_workers_in_memory=max_workers_in_memory,
+                max_tasks_in_memory=max_tasks_in_memory,
+            )
             self.state = self.load_state()
-            if self.state:
-                # A restored state keeps the limit it was saved with
-                self.state.max_tasks_in_memory = self.state.tasks.limit = max_tasks_in_memory
-                self.state.tasks.update()
-
             if state_save_interval:
                 self.state_save_timer = PeriodicCallback(self.save_state,
                                                          state_save_interval)
@@ -232,34 +244,60 @@ class Events(threading.Thread):
                 time.sleep(try_interval)
 
     def load_state(self):
-        logger.debug("Loading state from '%s'...", self.db)
+        logger.debug("Recovering event checkpoint state from '%s'...", self.db)
+        recovery = self.checkpoints.recover()
+        selected = recovery.selected
+        rejected = [candidate for candidate in recovery.report['candidates']
+                    if candidate['status'] == 'rejected']
+        if selected.source == 'fresh' and rejected:
+            logger.warning(
+                "No event checkpoint under '%s' passed admission (%d candidate(s) "
+                "rejected); event retrieval starts from an empty state",
+                self.db, len(rejected))
+        elif selected.source == 'fresh':
+            logger.debug(
+                "No event checkpoint under '%s'; event retrieval starts from an "
+                "empty state", self.db)
+        elif selected.source == 'legacy':
+            logger.warning(
+                "Admitted legacy event storage at '%s' (%d task(s)); the next "
+                "save will publish a versioned checkpoint",
+                self.db, recovery.report['retrieval']['task_count'])
+        else:
+            logger.info(
+                "Admitted event checkpoint generation %s at '%s' "
+                "(%d task(s), %d counter(s), %d rejected candidate(s))",
+                selected.generation, selected.path,
+                recovery.report['retrieval']['task_count'],
+                recovery.report['retrieval']['counter_total'],
+                len(rejected))
+        if rejected:
+            logger.debug("Rejected checkpoint candidates: %s", rejected)
+
         try:
-            with shelve.open(self.db) as state:
-                if not state:
-                    return None
-                events = state['events']
-                events.counter.update(state.get('counter', {}))
-                return events
-        except Exception as e:
-            logger.error("Failed to load state from '%s', moving it aside "
-                         "and starting fresh: %s", self.db, e)
-            # dbm backends may add suffixes like .db or .dat to the actual files
-            for suffix in ('', '.db', '.dat', '.dir', '.bak'):
-                name = self.db + suffix
-                if os.path.exists(name):
-                    os.replace(name, f'{name}.corrupt')
-            return None
+            recovery.report_path = write_recovery_record(
+                self.checkpoints.recovery_dir, recovery.report)
+        except OSError as exc:
+            logger.error("Could not write the event recovery record under '%s': %s",
+                         self.checkpoints.recovery_dir, exc)
+
+        self.recovery = recovery
+        # Nothing below this point is reachable from the query handlers until
+        # the constructor stores the admitted state in ``self.state``.
+        return recovery.state
 
     def save_state(self):
         logger.debug("Saving state to '%s'...", self.db)
+        if not self.checkpoints:
+            return
         started = time.monotonic()
-        tmp = f'{self.db}.tmp'
-        with shelve.open(tmp, flag='n') as state:
-            state['events'] = self.state
-            state['counter'] = dict(self.state.counter)
-        # dbm backends may add suffixes like .db or .dat to the actual files
-        for name in glob.glob(glob.escape(tmp) + '*'):
-            os.replace(name, self.db + name[len(tmp):])
+        try:
+            manifest = self.checkpoints.save(self.state)
+        except Exception:
+            logger.exception("Failed to save event checkpoint to '%s'", self.db)
+            raise
+        logger.debug("Saved event checkpoint generation %s (%d task(s))",
+                     manifest['generation'], manifest['task_count'])
 
         elapsed = time.monotonic() - started
         interval_seconds = self.state_save_interval / 1000

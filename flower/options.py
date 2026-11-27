@@ -37,6 +37,13 @@ define("persistent", type=bool, default=False,
        help="enable persistent mode")
 define("state_save_interval", type=int, default=0,
        help="state save interval (in milliseconds)")
+define("checkpoint_min_format_version", type=int, default=0,
+       help="minimum admitted event checkpoint format version "
+            "(0 also admits legacy storage)")
+define("checkpoint_allow_legacy", type=bool, default=True,
+       help="admit a legacy dbm state file when no checkpoint generation passes")
+define("checkpoint_retention", type=int, default=5,
+       help="number of complete event checkpoint generations to keep")
 define("broker_api", type=str, default=None,
        help="inspect broker e.g. http://guest:guest@localhost:15672/api/")
 define("ca_certs", type=str, default=None,

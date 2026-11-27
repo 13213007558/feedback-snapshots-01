@@ -15,6 +15,7 @@ Contents
    features
    install
    config
+   checkpoints
    tasks_filter
    auth
    reverse-proxy
