@@ -53,6 +53,11 @@ module Grape
       # @param vendor [String, nil] vendor segment for the +:header+
       #   strategy (+application/vnd.<vendor>-<version>+); required when
       #   +using: :header+.
+      # @param vary [Boolean] list the request headers the strategy negotiates
+      #   on (+Accept+ for +:header+, +Accept-Version+ for
+      #   +:accept_version_header+) in the +Vary+ of every response, including
+      #   negotiation errors, so shared caches key stored responses on them.
+      #   Defaults to +false+.
       # @yield optional block to scope routes under this version.
       # @return [String, nil] the most recently declared version.
       # @raise [Grape::Exceptions::MissingVendorOption] when +using: :header+
@@ -60,11 +65,11 @@ module Grape
       # @raise [ArgumentError] when no version is given, or one is not a
       #   non-empty String, Symbol or Integer, such as options given as a
       #   positional Hash rather than as keyword arguments.
-      def version(*args, using: :path, cascade: true, parameter: 'apiver', strict: false, vendor: nil, &block)
+      def version(*args, using: :path, cascade: true, parameter: 'apiver', strict: false, vendor: nil, vary: false, &block)
         return @versions&.last if args.empty?
 
         requested_versions = version_names(args)
-        options = build_version_options(using:, cascade:, parameter:, strict:, vendor:)
+        options = build_version_options(using:, cascade:, parameter:, strict:, vendor:, vary:)
 
         @versions = versions | requested_versions
 

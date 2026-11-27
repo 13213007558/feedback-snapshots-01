@@ -232,6 +232,62 @@ describe Grape::Middleware::Versioner::Header do
     expect(env[Grape::Env::API_VENDOR]).to be_nil
   end
 
+  context 'when :vary is set' do
+    before do
+      options[:versions] = ['v1']
+      options[:version_options] = options[:version_options].with(vary: true)
+    end
+
+    it 'lists Accept on the Vary of a response the media type table answers' do
+      _, headers, = subject.call('HTTP_ACCEPT' => 'application/vnd.vendor-v1+json')
+      expect(headers['vary']).to eq('Accept')
+    end
+
+    it 'lists Accept on the Vary of a response negotiated at request time' do
+      _, headers, = subject.call('HTTP_ACCEPT' => 'application/vnd.vendor-v1+json;q=0.9')
+      expect(headers['vary']).to eq('Accept')
+    end
+
+    it 'keeps the Vary names an app set' do
+      app = ->(_env) { [200, { 'vary' => 'X-Custom' }, ['']] }
+      _, headers, = described_class.new(app, **options).call('HTTP_ACCEPT' => '*/*')
+      expect(headers['vary']).to eq('X-Custom, Accept')
+    end
+
+    it 'leaves a Vary: * an app set alone' do
+      app = ->(_env) { [200, { 'vary' => '*' }, ['']] }
+      _, headers, = described_class.new(app, **options).call('HTTP_ACCEPT' => '*/*')
+      expect(headers['vary']).to eq('*')
+    end
+
+    it 'does not repeat a name an app already listed' do
+      app = ->(_env) { [200, { 'vary' => 'accept' }, ['']] }
+      _, headers, = described_class.new(app, **options).call('HTTP_ACCEPT' => '*/*')
+      expect(headers['vary']).to eq('accept')
+    end
+
+    it 'leaves other headers an app set alone' do
+      app = ->(_env) { [200, { 'cache-control' => 'private, no-store' }, ['']] }
+      _, headers, = described_class.new(app, **options).call('HTTP_ACCEPT' => '*/*')
+      expect(headers['cache-control']).to eq('private, no-store')
+      expect(headers['vary']).to eq('Accept')
+    end
+
+    it 'lists Accept on the Vary of a negotiation error' do
+      expect { subject.call('HTTP_ACCEPT' => 'application/vnd.vendor-v3+json') }.to raise_exception do |exception|
+        expect(exception).to be_a(Grape::Exceptions::InvalidVersionHeader)
+        expect(exception.headers).to eql('x-cascade' => 'pass', 'vary' => 'Accept')
+        expect(exception.status).to be 406
+      end
+    end
+
+    it 'does not set a Vary without the option' do
+      options[:version_options] = options[:version_options].with(vary: false)
+      _, headers, = subject.call('HTTP_ACCEPT' => 'application/vnd.vendor-v1+json')
+      expect(headers).not_to have_key('vary')
+    end
+  end
+
   context 'when :strict is set' do
     before do
       options[:versions] = ['v1']

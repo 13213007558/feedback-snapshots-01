@@ -488,6 +488,14 @@ Grape will evaluate the relative quality preference included in Accept headers a
 
     curl -H "Accept: text/xml;q=0.8, application/json;q=0.9" localhost:1234/resource
 
+#### Vary
+
+```ruby
+version 'v1', using: :header, vendor: 'twitter', vary: true
+```
+
+Responses of an API negotiated on request headers should say so, or a shared cache may serve a stored response to a request whose headers negotiated something else. With the `:vary` option, every response of the versioned routes — the representations, negotiation errors, and the fallback another version answers when routes cascade — lists the strategy's negotiation inputs in its `Vary` header: `Accept` for `:header`, `Accept-Version` for `:accept_version_header`. Names an app set on `Vary` itself are kept, as is a `Cache-Control` keeping a response out of shared caches. Defaults to `false`.
+
 #### Accept-Version Header
 
 ```ruby

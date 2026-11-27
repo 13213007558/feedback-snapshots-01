@@ -48,19 +48,8 @@ module Grape
 
     def call(env)
       request_method = env[Rack::REQUEST_METHOD]
-      with_optimization do
-        input = Grape::Util::PathNormalizer.call(env[Rack::PATH_INFO])
-        if @utf8_patterns && !input.ascii_only?
-          input = utf8_path(input)
-          next unless input
-        end
-
-        # Published on the env so the middleware the matched route runs -- the
-        # path versioner above all -- reads the path this routed on instead of
-        # normalizing PATH_INFO a second time.
-        env[Grape::Env::GRAPE_NORMALIZED_PATH] = input
-        dispatch(input, request_method, env)
-      end
+      compile!
+      route(env, request_method) || default_response(env)
     end
 
     def recognize_path(input)
@@ -93,6 +82,22 @@ module Grape
     def utf8_path(path)
       utf8 = String.new(path, encoding: Encoding::UTF_8)
       utf8 if utf8.valid_encoding?
+    end
+
+    # The dispatch half of #call, answering nil when nothing answered so #call
+    # can stand its own 404 in for the declines.
+    def route(env, request_method)
+      input = Grape::Util::PathNormalizer.call(env[Rack::PATH_INFO])
+      if @utf8_patterns && !input.ascii_only?
+        input = utf8_path(input)
+        return unless input
+      end
+
+      # Published on the env so the middleware the matched route runs -- the
+      # path versioner above all -- reads the path this routed on instead of
+      # normalizing PATH_INFO a second time.
+      env[Grape::Env::GRAPE_NORMALIZED_PATH] = input
+      dispatch(input, request_method, env)
     end
 
     # Resolve +input+ against the compiled routes, in priority order:
@@ -150,7 +155,7 @@ module Grape
     def settle(input, method, env, response, exact_route)
       return after_miss(input, method, env) unless response
 
-      final_response(response) || after_cascade(input, method, env, exact_route)
+      final_response(response, env) || after_cascade(input, method, env, exact_route)
     end
 
     # No route for +method+ matched, so the path may still answer another method.
@@ -162,7 +167,7 @@ module Grape
 
       star_route = star_route_for(input)
       # An ANY route that declined still matched, so no 405 follows it.
-      return final_response(process_route(star_route, input, env)) if star_route
+      return final_response(process_route(star_route, input, env), env) if star_route
 
       process_allowed_methods_route(allowed_methods_route, input, env) if allowed_methods_route
     end
@@ -176,7 +181,7 @@ module Grape
       return answer if answer
 
       star_route = star_route_for(input)
-      final_response(process_route(star_route, input, env)) if star_route
+      final_response(process_route(star_route, input, env), env) if star_route
     end
 
     # The routes registered for +method+ other than +exact_route+, tried in
@@ -188,19 +193,36 @@ module Grape
         next if exact_route == route
         next unless route.match?(input)
 
-        answer = final_response(process_route(route, input, env))
+        answer = final_response(process_route(route, input, env), env)
         break if answer
       end
       answer
     end
 
     # +response+, or nil once it has cascaded: the route has declined, so its
-    # body is closed and whatever answers next stands in for it.
-    def final_response(response)
+    # body is closed and whatever answers next stands in for it. Its +Vary+
+    # stays on the env first: when nothing answers, the 404 that stands in
+    # for the declines lists the inputs they negotiated on (see
+    # #default_response).
+    def final_response(response, env)
       return response unless cascade?(response)
 
+      record_vary(env, response[1])
       close_body(response)
       nil
+    end
+
+    # The +Vary+ names of a discarded response, remembered on the env for the
+    # 404 that may stand in for it. Names already recorded are not repeated.
+    def record_vary(env, headers)
+      vary = headers['vary'] || headers['Vary']
+      return unless vary
+
+      recorded = env[Grape::Env::GRAPE_VARY] ||= []
+      vary.split(',').each do |name|
+        name = name.strip
+        recorded << name unless recorded.any? { |seen| seen.casecmp?(name) }
+      end
     end
 
     # Releases a response the router has decided not to return. Rack requires
@@ -318,10 +340,16 @@ module Grape
       yield || default_response
     end
 
-    # The 404 answered when nothing matched. The Rack::Head the API wraps
-    # around the router strips its body from a HEAD request.
-    def default_response
-      [404, DEFAULT_RESPONSE_HEADERS.dup, DEFAULT_RESPONSE_BODY.dup]
+    # The 404 answered when nothing matched. It lists the +Vary+ names of the
+    # responses discarded on the way (see #record_vary): those declines were
+    # negotiated, and a shared cache keys a stored response on its +Vary+, so
+    # the 404 standing in for them names the same inputs. The Rack::Head the
+    # API wraps around the router strips its body from a HEAD request.
+    def default_response(env = nil)
+      headers = DEFAULT_RESPONSE_HEADERS.dup
+      vary = env&.[](Grape::Env::GRAPE_VARY)
+      headers['vary'] = vary.join(', ') if vary && !vary.empty?
+      [404, headers, DEFAULT_RESPONSE_BODY.dup]
     end
 
     def star_route_for(input)

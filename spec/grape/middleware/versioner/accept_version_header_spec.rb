@@ -56,6 +56,31 @@ describe Grape::Middleware::Versioner::AcceptVersionHeader do
     expect(subject.call({}).first).to eq(200)
   end
 
+  context 'when :vary is set' do
+    before do
+      options[:versions] = ['v1']
+      options[:version_options] = options[:version_options].with(vary: true)
+    end
+
+    it 'lists Accept-Version on the Vary of a response' do
+      _, headers, = subject.call('HTTP_ACCEPT_VERSION' => 'v1')
+      expect(headers['vary']).to eq('Accept-Version')
+    end
+
+    it 'keeps the Vary names an app set' do
+      app = ->(_env) { [200, { 'vary' => 'X-Custom' }, ['']] }
+      _, headers, = described_class.new(app, **options).call('HTTP_ACCEPT_VERSION' => 'v1')
+      expect(headers['vary']).to eq('X-Custom, Accept-Version')
+    end
+
+    it 'lists Accept-Version on the Vary of a negotiation error' do
+      payload = catch(:error) { subject.call('HTTP_ACCEPT_VERSION' => 'v2').last }
+      expect(payload).to be_a(Grape::Exceptions::ErrorResponse)
+      expect(payload.status).to eq(406)
+      expect(payload.headers).to eq('x-cascade' => 'pass', 'vary' => 'Accept-Version')
+    end
+  end
+
   context 'when :strict is set' do
     before do
       options[:versions] = ['v1']

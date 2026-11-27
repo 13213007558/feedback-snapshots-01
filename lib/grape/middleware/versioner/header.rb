@@ -27,6 +27,8 @@ module Grape
         # otherwise, and no Accept header at all.
         COMMON_ACCEPT_HEADERS = ['*/*', nil].freeze
 
+        VARY_HEADER_NAMES = ['Accept'].freeze
+
         # +MediaType.best_quality+ answers from the header and
         # +available_media_types+ alone, and the latter is fixed once the
         # middleware is built. Most requests send one of a handful of headers --
@@ -68,7 +70,9 @@ module Grape
           return super unless media_type
 
           record_media_type(env, media_type)
-          app.call(env).to_a
+          response = app.call(env).to_a
+          merge_vary(response[1])
+          response
         end
 
         def before

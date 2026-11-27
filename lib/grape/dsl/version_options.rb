@@ -14,8 +14,8 @@ module Grape
     # DSL signature shows what a user sees in the IDE, and the Data object
     # has working defaults when constructed directly (spec fixtures, a
     # middleware built by hand). The two must stay in lockstep.
-    VersionOptions = Data.define(:using, :cascade, :parameter, :strict, :vendor) do
-      def initialize(using: :path, cascade: true, parameter: 'apiver', strict: false, vendor: nil)
+    VersionOptions = Data.define(:using, :cascade, :parameter, :strict, :vendor, :vary) do
+      def initialize(using: :path, cascade: true, parameter: 'apiver', strict: false, vendor: nil, vary: false)
         super
       end
     end

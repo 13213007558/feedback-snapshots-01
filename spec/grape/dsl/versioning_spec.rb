@@ -17,6 +17,16 @@ describe Grape::DSL::Versioning do
       expect(subject.inheritable_setting.version).to eq([version])
       expect(subject.inheritable_setting.version_options).to eq(Grape::DSL::VersionOptions.new)
     end
+
+    it 'keeps the vary option on the version options' do
+      subject.version 'v1', vary: true
+      expect(subject.inheritable_setting.version_options.vary).to be(true)
+    end
+
+    it 'defaults the vary option to false' do
+      subject.version 'v1'
+      expect(subject.inheritable_setting.version_options.vary).to be(false)
+    end
   end
 
   describe '.versions' do
