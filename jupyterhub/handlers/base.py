@@ -52,6 +52,7 @@ from ..spawner import LocalProcessSpawner, SpawnException
 from ..user import User
 from ..utils import (
     AnyTimeoutError,
+    exponential_backoff,
     get_accepted_mimetype,
     get_browser_protocol,
     maybe_future,
@@ -1207,7 +1208,27 @@ class BaseHandler(RequestHandler):
             proxy_add_start_time = time.perf_counter()
             spawner._proxy_pending = True
             try:
-                await self.proxy.add_user(user, server_name)
+
+                async def _try_add_to_proxy():
+                    # adding to the proxy can fail, e.g. if the proxy
+                    # is briefly unavailable or being restarted.
+                    # It is safe to retry until the route is committed;
+                    # the server is not considered ready before then.
+                    try:
+                        await self.proxy.add_user(user, server_name)
+                    except Exception:
+                        self.log.exception(
+                            "Failed to add %s to proxy! Will retry.",
+                            user_server_name,
+                        )
+                        return False
+                    return True
+
+                await exponential_backoff(
+                    _try_add_to_proxy,
+                    f"Couldn't add {user_server_name} to the proxy",
+                    timeout=self.slow_spawn_timeout or 10,
+                )
 
                 PROXY_ADD_DURATION_SECONDS.labels(status='success').observe(
                     time.perf_counter() - proxy_add_start_time
@@ -1223,7 +1244,7 @@ class BaseHandler(RequestHandler):
                     time.perf_counter() - proxy_add_start_time
                 )
             else:
-                spawner.add_poll_callback(self.user_stopped, user, server_name)
+                spawner.add_poll_callback(self.user_stopped, user, server_name, spawner)
             finally:
                 spawner._proxy_pending = False
 
@@ -1370,9 +1391,21 @@ class BaseHandler(RequestHandler):
                     self.slow_spawn_timeout,
                 )
 
-    async def user_stopped(self, user, server_name):
+    async def user_stopped(self, user, server_name, spawner):
         """Callback that fires when the spawner has stopped"""
-        spawner = user.spawners[server_name]
+        if user.spawners.get(server_name) is not spawner:
+            # This stop event comes from a previous incarnation of the server,
+            # which has already been replaced by a new one.
+            # Only clean up this server's own proxy record, if any is left,
+            # and leave the current server and its route alone.
+            self.log.warning(
+                "Server %s stopped, but it has already been replaced."
+                " Only cleaning up its own proxy route, if any.",
+                spawner._log_name,
+            )
+            if spawner.server is not None:
+                await self.proxy.delete_user(user, server_name, spawner=spawner)
+            return
 
         poll_start_time = time.perf_counter()
         status = await spawner.poll()
@@ -1388,7 +1421,7 @@ class BaseHandler(RequestHandler):
         )
         proxy_deletion_start_time = time.perf_counter()
         try:
-            await self.proxy.delete_user(user, server_name)
+            await self.proxy.delete_user(user, server_name, spawner=spawner)
             PROXY_DELETE_DURATION_SECONDS.labels(
                 status=ProxyDeleteStatus.success
             ).observe(time.perf_counter() - proxy_deletion_start_time)
@@ -1435,7 +1468,7 @@ class BaseHandler(RequestHandler):
             """
             tic = time.perf_counter()
             try:
-                await self.proxy.delete_user(user, server_name)
+                await self.proxy.delete_user(user, server_name, spawner=spawner)
                 PROXY_DELETE_DURATION_SECONDS.labels(
                     status=ProxyDeleteStatus.success
                 ).observe(time.perf_counter() - tic)

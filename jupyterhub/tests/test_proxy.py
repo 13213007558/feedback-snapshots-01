@@ -1,17 +1,20 @@
 """Test a proxy being started before the Hub"""
 
+import asyncio
 import json
 import os
 import socket
 from contextlib import contextmanager
 from subprocess import Popen
+from types import SimpleNamespace
 from urllib.parse import quote, urlparse
 
 import pytest
 from traitlets import TraitError
 from traitlets.config import Config
 
-from ..proxy import ConfigurableHTTPProxy
+from .. import orm
+from ..proxy import ConfigurableHTTPProxy, Proxy
 from ..utils import random_port, wait_for_http_server
 from ..utils import url_path_join as ujoin
 from .mocking import MockHub
@@ -365,3 +368,186 @@ async def test_proxy_bind_ip(request, app, tmp_path):
     await wait_for_http_server(public_url.replace("0.0.0.0", public_ip))
     await wait_for_http_server(api_url.replace("0.0.0.0", "127.0.0.1"))
     await wait_for_http_server(api_url.replace("0.0.0.0", public_ip))
+
+
+class RecordingProxy(Proxy):
+    """In-memory proxy stand-in for testing route add/delete behavior.
+
+    - records every add/delete in `calls`
+    - can be told to fail the next add_route attempts
+    - can block a failing add_route so tests can inspect
+      the state while a route commit is in flight
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.routes = {}
+        self.calls = []
+        self.fail_next_adds = 0
+        self.add_route_blocker = None
+        self.first_add_attempt = asyncio.Event()
+
+    async def get_all_routes(self):
+        return {
+            routespec: dict(route, routespec=routespec)
+            for routespec, route in self.routes.items()
+        }
+
+    async def add_route(self, routespec, target, data):
+        self.first_add_attempt.set()
+        self.calls.append(('add', routespec, target))
+        if self.fail_next_adds:
+            self.fail_next_adds -= 1
+            if self.add_route_blocker is not None:
+                # wait for the test to inspect the in-flight state
+                await self.add_route_blocker.wait()
+            raise RuntimeError("add_route failed, as requested by the test")
+        self.routes[routespec] = {'target': target, 'data': data}
+
+    async def delete_route(self, routespec):
+        self.calls.append(('delete', routespec))
+        self.routes.pop(routespec, None)
+
+
+async def test_late_stop_report_from_replaced_server(app, disable_check_routes):
+    """A late stop report must not take down the replacement server
+
+    Timeline:
+    1. the old server runs, the route points at it
+    2. the old server stops, but its stop report (poll callback)
+       has not been delivered yet
+    3. a new server with the same name starts; the first proxy write
+       fails and is retried; the healthy new server is not serviceable
+       until its route is actually committed
+    4. the old server's delayed stop report arrives:
+       it may only clean up its own record, the new route must survive
+    """
+    proxy = RecordingProxy(app=app, hub=app.hub, log=app.log)
+    real_proxy = app.proxy
+    app.proxy = proxy
+    app.tornado_settings['proxy'] = proxy
+    try:
+        name = 'latestop'
+        user = add_user(app.db, app, name=name)
+        routespec = user.proxy_spec
+
+        # 1. start the old server
+        r = await api_request(
+            app, 'users', name, 'server', method='post', bypass_proxy=True
+        )
+        assert r.code == 201
+        old_spawner = user.spawners['']
+        old_target = old_spawner.server.host
+        old_token = old_spawner.api_token
+        assert proxy.routes[routespec]['target'] == old_target
+        # the spawn authorized an API token for the old server
+        assert orm.APIToken.find(app.db, old_token) is not None
+
+        # 2. stop the old server; its stop report is still in flight
+        r = await api_request(
+            app, 'users', name, 'server', method='delete', bypass_proxy=True
+        )
+        assert r.code == 204
+        assert routespec not in proxy.routes
+        # the old server's authorization was revoked
+        assert orm.APIToken.find(app.db, old_token) is None
+        assert '' not in user.spawners
+
+        # 3. start the replacement server; the first proxy write fails
+        proxy.first_add_attempt.clear()
+        proxy.fail_next_adds = 1
+        proxy.add_route_blocker = asyncio.Event()
+        spawn = asyncio.ensure_future(
+            api_request(app, 'users', name, 'server', method='post', bypass_proxy=True)
+        )
+        # wait until the first (doomed) write is in flight
+        await asyncio.wait_for(proxy.first_add_attempt.wait(), 10)
+
+        # the new server is up and healthy, but not serviceable yet:
+        # its route has not been committed to the proxy
+        new_spawner = user.spawners['']
+        assert new_spawner is not old_spawner
+        assert new_spawner.server is not None
+        assert await new_spawner.poll() is None
+        assert new_spawner._proxy_pending
+        assert not new_spawner.ready
+        assert routespec not in proxy.routes
+
+        # let the first write fail; the retried write commits the route
+        proxy.add_route_blocker.set()
+        r = await spawn
+        assert r.code == 201
+        new_target = new_spawner.server.host
+        assert new_target != old_target
+        assert proxy.routes[routespec]['target'] == new_target
+        assert new_spawner.ready
+        # the new spawn authorized a new API token
+        new_token = new_spawner.api_token
+        assert new_token != old_token
+        assert orm.APIToken.find(app.db, new_token) is not None
+
+        # the route was committed exactly once, after one failed attempt
+        assert proxy.calls == [
+            ('add', routespec, old_target),
+            ('delete', routespec),
+            ('add', routespec, new_target),
+            ('add', routespec, new_target),
+        ]
+
+        # 4. the old server's delayed stop report arrives
+        await old_spawner.poll_and_notify()
+        # make sure the report was actually delivered, not still pending
+        assert not old_spawner._callbacks
+
+        # it only cleaned up after itself: nothing else was deleted,
+        # and the new route, server, and authorization all survive
+        assert proxy.calls.count(('delete', routespec)) == 1
+        assert proxy.routes[routespec]['target'] == new_target
+        assert user.spawners[''] is new_spawner
+        assert new_spawner.ready
+        assert await new_spawner.poll() is None
+        assert orm.APIToken.find(app.db, new_token) is not None
+    finally:
+        app.proxy = real_proxy
+        app.tornado_settings['proxy'] = real_proxy
+
+
+async def test_delete_user_only_removes_own_route(app):
+    """Proxy.delete_user only removes a route owned by the stopping server"""
+    proxy = RecordingProxy(app=app, hub=app.hub, log=app.log)
+    user = add_user(app.db, app, name='routecheck')
+    routespec = user.proxy_spec
+    target = 'http://127.0.0.1:12345'
+    route = {'target': target, 'data': {'user': user.name, 'server_name': ''}}
+    proxy.routes[routespec] = route
+
+    # a stop report for a previous incarnation whose server doesn't match
+    # the current route target must not remove the route
+    stale = SimpleNamespace(
+        server=SimpleNamespace(host='http://127.0.0.1:11111'),
+        _log_name=f'{user.name} (previous)',
+    )
+    await proxy.delete_user(user, '', spawner=stale)
+    assert proxy.routes[routespec] == route
+    assert proxy.calls == []
+
+    # a stop report for a server that is already gone cleans up nothing
+    gone = SimpleNamespace(server=None, _log_name=f'{user.name} (gone)')
+    await proxy.delete_user(user, '', spawner=gone)
+    assert proxy.routes[routespec] == route
+    assert proxy.calls == []
+
+    # a stop report whose server matches the route removes its own record
+    own = SimpleNamespace(
+        server=SimpleNamespace(host=target), _log_name=f'{user.name} (own)'
+    )
+    await proxy.delete_user(user, '', spawner=own)
+    assert routespec not in proxy.routes
+    assert proxy.calls == [('delete', routespec)]
+
+    # without any spawner information, the route is removed (legacy cleanup)
+    proxy.routes[routespec] = route
+    proxy.calls.clear()
+    await proxy.delete_user(user, '')
+    assert routespec not in proxy.routes
+    assert proxy.calls == [('delete', routespec)]

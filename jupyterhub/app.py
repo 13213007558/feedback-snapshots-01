@@ -3121,13 +3121,24 @@ class JupyterHub(Application):
                     parts.append(f'{user.name}:{name} running at {spawner.server}')
             return ' '.join(parts)
 
-        async def user_stopped(user, server_name):
-            spawner = user.spawners[server_name]
+        async def user_stopped(user, server_name, spawner):
+            if user.spawners.get(server_name) is not spawner:
+                # stop event from a previous incarnation of this server,
+                # which has already been replaced.
+                # Only clean up its own proxy route, if any is left.
+                self.log.warning(
+                    "Server %s stopped, but it has already been replaced."
+                    " Only cleaning up its own proxy route, if any.",
+                    spawner._log_name,
+                )
+                if spawner.server is not None:
+                    await self.proxy.delete_user(user, server_name, spawner=spawner)
+                return
             status = await spawner.poll()
             self.log.warning(
                 "User %s server stopped with exit code: %s", user.name, status
             )
-            await self.proxy.delete_user(user, server_name)
+            await self.proxy.delete_user(user, server_name, spawner=spawner)
             await user.stop(server_name)
 
         async def check_spawner(user, name, spawner):
@@ -3192,7 +3203,7 @@ class JupyterHub(Application):
 
             if status is None:
                 self.log.info("%s still running", user.name)
-                spawner.add_poll_callback(user_stopped, user, name)
+                spawner.add_poll_callback(user_stopped, user, name, spawner)
                 spawner.start_polling()
             else:
                 # user not running. This is expected if server is None,

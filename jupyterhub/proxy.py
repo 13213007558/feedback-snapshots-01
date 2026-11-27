@@ -350,13 +350,45 @@ class Proxy(LoggingConfigurable):
             {'user': user.name, 'server_name': server_name},
         )
 
-    async def delete_user(self, user, server_name=''):
-        """Remove a user's server from the proxy table."""
+    async def delete_user(self, user, server_name='', spawner=None):
+        """Remove a user's server from the proxy table.
+
+        Only removes the route if it still belongs to the server being
+        stopped. A stop event for a previous incarnation of a server may
+        arrive after a new server with the same name has been added, in
+        which case the route now belongs to the new server and must be
+        left alone.
+        """
         routespec = user.proxy_spec
         if server_name:
             routespec = url_path_join(
                 user.proxy_spec, url_escape_path(server_name), '/'
             )
+        if spawner is None:
+            spawner = user.spawners.get(server_name)
+        if spawner is not None:
+            if spawner.server is None:
+                # the server is already gone, its route was removed
+                # when it stopped. Whatever route may remain is not ours.
+                self.log.debug(
+                    "Not removing user %s from proxy (%s): %s has no server",
+                    user.name,
+                    routespec,
+                    spawner._log_name,
+                )
+                return
+            route = await self.get_route(routespec)
+            if route is not None and route['target'] != spawner.server.host:
+                self.log.warning(
+                    "Not removing user %s from proxy (%s):"
+                    " current target %s does not belong to %s (%s)",
+                    user.name,
+                    routespec,
+                    route['target'],
+                    spawner._log_name,
+                    spawner.server.host,
+                )
+                return
         self.log.info("Removing user %s from proxy (%s)", user.name, routespec)
         await self.delete_route(routespec)
 
