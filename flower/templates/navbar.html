@@ -16,6 +16,7 @@
             href="{{ reverse_url('workers') }}"
             {% if active_tab == 'workers' %}aria-current="page"{% end %}>Workers</a>
         </li>
+        {% if handler.can_view_worker_details() %}
         <li class="nav-item">
           <a class="nav-link{% if active_tab == 'tasks' %} active{% end %}"
             href="{{ reverse_url('tasks') }}"
@@ -26,6 +27,7 @@
             href="{{ reverse_url('broker') }}"
             {% if active_tab == 'broker' %}aria-current="page"{% end %}>Broker</a>
         </li>
+        {% end %}
       </ul>
 
       <ul class="app-nav app-nav-secondary navbar-nav ms-lg-auto">

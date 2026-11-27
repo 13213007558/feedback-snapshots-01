@@ -13,6 +13,14 @@ import tornado.auth
 from ..utils import bugreport, strtobool, template
 from ..utils.authentication import authenticate
 from ..utils.broker import Broker
+from ..utils.permissions import (
+    STATUS_ONLY_INSPECT_FIELDS,
+    can_view_worker_details,
+    filter_event_workers,
+    filter_worker_info,
+    filter_workers,
+    log_access_decision,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +160,44 @@ class BaseHandler(tornado.web.RequestHandler):
             if authenticate(self.application.options.auth, user):
                 return user
         return None
+
+    def can_view_worker_details(self):
+        # Read on every request so a config change applies to responses that
+        # were already in flight when the authorization was updated.
+        return can_view_worker_details(
+            self.current_user, self.application.options.worker_details_auth)
+
+    def require_worker_details(self, resource):
+        if self.can_view_worker_details():
+            log_access_decision(self.current_user, True, resource,
+                                'account matches worker_details_auth')
+            return
+        log_access_decision(self.current_user, False, resource,
+                            'account limited to worker online status')
+        raise tornado.web.HTTPError(
+            403, 'Your account may only view worker online status')
+
+    def visible_inspect_fields(self):
+        if self.can_view_worker_details():
+            return None
+        return STATUS_ONLY_INSPECT_FIELDS
+
+    def restrict_worker_info(self, worker):
+        allowed = self.visible_inspect_fields()
+        if allowed is None:
+            return worker
+        return filter_worker_info(worker, allowed)
+
+    def restrict_workers(self, workers):
+        allowed = self.visible_inspect_fields()
+        if allowed is None:
+            return workers
+        return filter_workers(workers, allowed)
+
+    def restrict_event_workers(self, workers):
+        if self.can_view_worker_details():
+            return workers
+        return filter_event_workers(workers)
 
     # pylint: disable=too-many-arguments
     def get_argument(self, name, default=None, strip=True, type=None,

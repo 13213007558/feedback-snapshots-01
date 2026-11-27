@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 class BrokerView(BaseHandler):
     @web.authenticated
     async def get(self):
+        self.require_worker_details('/broker')
         broker = self.get_broker()
         try:
             queues = await broker.queues(self.get_active_queue_names())

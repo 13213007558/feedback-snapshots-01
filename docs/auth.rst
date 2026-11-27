@@ -176,6 +176,20 @@ See `GitLab OAuth2 API`_ and `Group members API`_ documentation for more info.
 .. _Group members API: https://docs.gitlab.com/api/group_members/
 .. _access level: https://docs.gitlab.com/api/access_requests/
 
+Worker status and worker details
+--------------------------------
+
+All authenticated accounts may see whether a worker is online. Queue topology,
+worker configuration and task payloads are treated as a separate view and are
+only exposed to accounts allowed by the :ref:`worker_details_auth` option.
+
+Accounts outside that pattern keep access to the workers list and the
+``/api/workers?status=true`` endpoint, but their responses only contain liveness
+fields. The worker, tasks and broker pages, single-worker detail requests and the
+task and queue APIs return ``403`` instead. The permission is re-evaluated for
+every response, including inspection results that were still in flight when the
+configuration changed, so stale data never bypasses an updated restriction.
+
 Logging out
 -----------
 

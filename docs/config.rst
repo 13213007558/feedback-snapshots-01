@@ -118,6 +118,35 @@ Flower refuses to start with an `Invalid '--auth' option` error when the pattern
 
 For more information and detailed usage examples, refer to the :ref:`Authentication` section of the Flower documentation.
 
+.. _worker_details_auth:
+
+worker_details_auth
+~~~~~~~~~~~~~~~~~~~
+
+Default: '' (empty string)
+
+Restricts worker queue and task details to a subset of authenticated accounts.
+
+By default every account accepted by :ref:`auth` (or :ref:`basic_auth`) sees the full
+Flower data. When `worker_details_auth` is set, accounts whose email matches the
+pattern keep full access, while every other authenticated account is limited to
+worker online status.
+
+A status-only account can still open the workers list and the
+`/api/workers?status=true` endpoint, but the list response is reduced to liveness
+fields and any queue topology, worker configuration or task payload is removed.
+Requests for a single worker's detail data, the worker, tasks and broker pages,
+and the task and queue APIs respond with `403`. Basic-auth sessions carry no email
+identity, so they become status-only once this option is enabled.
+
+The same patterns as :ref:`auth` are accepted, for example::
+
+    worker_details_auth="ops@example.com|oncall@example.com"
+
+Authorization is evaluated when each response is serialized, so an inspection
+result that was already in flight when `worker_details_auth` changed is always
+filtered using the permission that applies when the response reaches the caller.
+
 .. _auto_refresh:
 
 auto_refresh

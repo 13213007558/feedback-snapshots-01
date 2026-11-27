@@ -452,6 +452,7 @@ Return length of all active queues
 :statuscode 401: unauthorized request
 :statuscode 404: broker is not supported
         """
+        self.require_worker_details('/api/queues/length')
         broker = self.get_broker()
         queues = await broker.queues(self.get_active_queue_names())
         self.write({'active_queues': queues})
@@ -553,6 +554,7 @@ List tasks
 :statuscode 400: invalid query parameters
 :statuscode 401: unauthorized request
         """
+        self.require_worker_details('/api/tasks')
         app = self.application
         limit = self.get_argument('limit', None, type=int)
         offset = self.get_argument('offset', default=0, type=int)
@@ -633,6 +635,7 @@ List (seen) task types
 :statuscode 200: no error
 :statuscode 401: unauthorized request
         """
+        self.require_worker_details('/api/task/types')
         seen_task_types = self.application.events.state.task_types()
 
         response = {}
@@ -697,6 +700,7 @@ Get a task info
 :statuscode 401: unauthorized request
 :statuscode 404: unknown task
         """
+        self.require_worker_details(f'/api/task/info/{taskid}')
 
         task = tasks.get_task_by_id(self.application.events, taskid)
         if not task:

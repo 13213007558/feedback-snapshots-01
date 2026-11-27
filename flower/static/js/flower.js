@@ -1,8 +1,14 @@
 /*jslint browser: true */
-/*global $, WebSocket, jQuery, bootstrap */
+/*global $, WebSocket, jQuery, bootstrap, canViewWorkerDetails */
 
 (function () {
     "use strict";
+
+    // Pages without a worker table do not declare the flag; those views are
+    // independently guarded server side. Defaulting to true keeps their links.
+    if (typeof canViewWorkerDetails === 'undefined') {
+        window.canViewWorkerDetails = true;
+    }
 
     var toastContainer = document.getElementById('toast-container');
 
@@ -114,7 +120,7 @@
     function taskCountRenderer(state) {
         return function (data, type, full, meta) {
             var count = data || 0;
-            if (type !== 'display' || !count) {
+            if (type !== 'display' || !count || !canViewWorkerDetails) {
                 return count;
             }
             return '<a href="' + tasksPageUrl({worker: full.hostname, state: state}) + '">' + count.toLocaleString() + '</a>';
@@ -138,6 +144,12 @@
             suffixLength = name.length > 12 ? 12 : 0,
             prefix = htmlEscapeEntities(name.substr(0, name.length - suffixLength)),
             suffix = suffixLength ? htmlEscapeEntities(name.substr(-suffixLength)) : '';
+
+        if (!canViewWorkerDetails) {
+            return '<span class="worker-name-text">' +
+                '<span class="worker-name-prefix">' + prefix + '</span>' +
+                '<span class="worker-name-suffix">' + suffix + '</span></span>';
+        }
 
         return '<a class="worker-name-link" href="' + url_prefix() + '/worker/' +
             encodeURIComponent(name) + '" aria-label="Worker ' + escapedName + '" title="' + escapedName + '">' +
@@ -803,7 +815,7 @@
                 for (const [column, state] of Object.entries(columns)) {
                     var total = api.column(column).data().reduce(sum, 0);
                     var footer = total.toLocaleString();
-                    if (total !== 0) {
+                    if (total !== 0 && canViewWorkerDetails) {
                         footer = '<a href="' + tasksPageUrl({state: state}) + '">' + footer + '</a>';
                     }
                     $(api.column(column).footer()).html(footer);

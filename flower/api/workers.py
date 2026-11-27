@@ -171,13 +171,16 @@ List workers
 
         if self.application.workers and not refresh and\
                 workername in self.application.workers:
-            self.write({workername: self.application.workers[workername]})
+            self.require_worker_details(f'/api/workers?workername={workername}')
+            self.write({workername: self.restrict_worker_info(
+                self.application.workers[workername])})
             return
 
         if workername and not self.is_worker(workername):
             raise web.HTTPError(404, f"Unknown worker '{workername}'")
 
         if workername:
+            self.require_worker_details(f'/api/workers?workername={workername}')
             self.write({workername: self.application.workers[workername]})
         else:
-            self.write(self.application.workers)
+            self.write(self.restrict_workers(self.application.workers))

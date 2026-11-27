@@ -14,6 +14,7 @@ class WorkerView(BaseHandler):
 
     @web.authenticated
     async def get(self, name):
+        self.require_worker_details(f'/worker/{name}')
         try:
             update = self.application.update_workers(workername=name)
             # wait for inspection only when the cache lacks something this page shows
@@ -84,6 +85,8 @@ class WorkersView(BaseHandler):
 
             for name in offline_workers:
                 workers.pop(name)
+
+        workers = self.restrict_event_workers(workers)
 
         if json:
             self.write({"data": list(workers.values())})

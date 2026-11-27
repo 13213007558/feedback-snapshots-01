@@ -19,6 +19,9 @@ define("inspect_timeout", default=1000.0, type=float,
        help="inspect timeout (in milliseconds)")
 define("auth", default='', type=str,
        help="regexp of emails to grant access")
+define("worker_details_auth", default='', type=str,
+       help="regexp of emails allowed to view worker queues and task details; "
+            "other authenticated accounts only see worker online status")
 define("basic_auth", type=str, default=None, multiple=True,
        help="enable http basic authentication")
 define("oauth2_key", type=str, default=None,

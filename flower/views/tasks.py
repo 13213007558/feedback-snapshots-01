@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 class TaskView(BaseHandler):
     @web.authenticated
     def get(self, task_id):
+        self.require_worker_details(f'/task/{task_id}')
         task = get_task_by_id(self.application.events, task_id)
 
         if task is None:
@@ -29,6 +30,7 @@ class TasksDataTable(BaseHandler):
     @web.authenticated
     # pylint: disable=too-many-locals
     def get(self):
+        self.require_worker_details('/tasks/datatable')
         app = self.application
         draw = self.get_argument('draw', type=int, required=True)
         start = self.get_argument('start', type=int, required=True)
@@ -120,6 +122,7 @@ def visible_task_columns(tasks_columns):
 class TasksView(BaseHandler):
     @web.authenticated
     def get(self):
+        self.require_worker_details('/tasks')
         app = self.application
         capp = self.application.capp
 

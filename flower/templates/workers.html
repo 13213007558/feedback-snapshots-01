@@ -84,5 +84,6 @@
 {% block extra_scripts %}
 <script type="text/javascript">
   var autorefresh = {{ autorefresh }};
+  var canViewWorkerDetails = {{ 'true' if handler.can_view_worker_details() else 'false' }};
 </script>
 {% end %}
