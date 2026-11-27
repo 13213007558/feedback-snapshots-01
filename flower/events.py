@@ -115,10 +115,23 @@ class EventsState(State):
         self.metrics = get_prometheus_metrics()
         self.search_engine = TaskSearchEngine()
         self.search_engine.rebuild(self.tasks.items())
+        self.task_owners = {}
+
+    def get_task_owner(self, task_id):
+        return self.task_owners.get(task_id)
+
+    def set_task_owner(self, task_id, owner):
+        if owner is None:
+            self.task_owners.pop(task_id, None)
+        else:
+            self.task_owners[task_id] = owner
 
     def _clear_tasks(self, ready=True):
         super()._clear_tasks(ready)
         self.search_engine.rebuild(self.tasks.items())
+        for task_id in list(self.task_owners):
+            if task_id not in self.tasks:
+                del self.task_owners[task_id]
 
     def _eviction_candidate(self, task_id):
         # Celery discards the least recently used task when a new one
@@ -131,6 +144,7 @@ class EventsState(State):
     def _index_task(self, task, evicted):
         if evicted is not None and evicted not in self.tasks:
             self.search_engine.remove(evicted)
+            self.task_owners.pop(evicted, None)
         self.search_engine.upsert(task)
 
     def event(self, event):
@@ -143,6 +157,9 @@ class EventsState(State):
 
         if is_task:
             task = self.tasks[event['uuid']]
+            owner = event.get('owner')
+            if owner is not None:
+                self.set_task_owner(task.uuid, owner)
             self._index_task(task, evicted)
             self.metrics.observe_task(worker, event, task)
         else:
@@ -175,6 +192,9 @@ class Events(threading.Thread):
                 # A restored state keeps the limit it was saved with
                 self.state.max_tasks_in_memory = self.state.tasks.limit = max_tasks_in_memory
                 self.state.tasks.update()
+                # States saved before task ownership tracking lack the map
+                if not hasattr(self.state, 'task_owners'):
+                    self.state.task_owners = {}
 
             if state_save_interval:
                 self.state_save_timer = PeriodicCallback(self.save_state,

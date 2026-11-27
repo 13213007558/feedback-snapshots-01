@@ -235,3 +235,25 @@ Start Flower with::
         --auth='.*@example.com'
 
 The module must be importable from Flower's Python environment.
+
+.. _task-result-ownership:
+
+Task result ownership
+---------------------
+
+When authentication is enabled, task results and tracebacks are only
+disclosed to the task's owner. Other authenticated users still see the
+task and its state in the task list, task detail, and task result
+endpoints, but the result fields are withheld.
+
+Flower records the authenticated user who submits a task through the
+apply/send API as its owner, and also adopts the ``owner`` field of
+task events when one is present. Ownership can be revised with
+``EventsState.set_task_owner``. Result requests are authorized against
+the current ownership when the response is written, so a request that
+was started before an ownership change does not receive the result
+afterwards, and a result already cached by the result backend is not
+treated as proof of access.
+
+When no authentication is configured, results remain visible to all
+clients as before.

@@ -1,4 +1,6 @@
+import asyncio
 import json
+import threading
 import time
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
@@ -515,3 +517,216 @@ class TaskTests(BaseApiTestCase):
             'Substring search terms must contain at least 3 characters '
             'at position 0.',
             error['error'])
+
+
+class TaskResultDisclosureTests(BaseApiTestCase):
+    USERS = ['alice:pw1', 'bob:pw2']
+
+    def seed_state(self, owner='alice'):
+        state = EventsState()
+        state.get_or_create_worker('worker1')
+        events = [Event('worker-online', hostname='worker1')]
+        events += task_succeeded_events(worker='worker1', name='task1',
+                                        id='task-1', owner=owner,
+                                        result='s3cr3t-token')
+        for i, e in enumerate(events):
+            e['clock'] = i
+            e['local_received'] = time.time()
+            state.event(e)
+        self._app.events.state = state
+        return state
+
+    def mock_backend_result(self):
+        result = Mock()
+        result.id = 'task-1'
+        result.state = states.SUCCESS
+        result.backend.connection_errors = ()
+        result.ready.return_value = True
+        result.result = 's3cr3t-token'
+        return result
+
+    def test_list_discloses_result_only_to_owner(self):
+        with self.mock_option('basic_auth', self.USERS):
+            self.seed_state()
+
+            r = self.get('/api/tasks', auth_username='bob', auth_password='pw2')
+            self.assertEqual(200, r.code)
+            task = json.loads(r.body)['task-1']
+            self.assertEqual(states.SUCCESS, task['state'])
+            self.assertNotIn('result', task)
+
+            r = self.get('/api/tasks', auth_username='alice',
+                         auth_password='pw1')
+            self.assertEqual(200, r.code)
+            task = json.loads(r.body)['task-1']
+            self.assertEqual(states.SUCCESS, task['state'])
+            self.assertEqual('s3cr3t-token', task['result'])
+
+    def test_info_discloses_result_only_to_owner(self):
+        with self.mock_option('basic_auth', self.USERS):
+            self.seed_state()
+
+            r = self.get('/api/task/info/task-1', auth_username='bob',
+                         auth_password='pw2')
+            self.assertEqual(200, r.code)
+            info = json.loads(r.body)
+            self.assertEqual(states.SUCCESS, info['state'])
+            self.assertNotIn('result', info)
+
+            r = self.get('/api/task/info/task-1', auth_username='alice',
+                         auth_password='pw1')
+            self.assertEqual(200, r.code)
+            info = json.loads(r.body)
+            self.assertEqual(states.SUCCESS, info['state'])
+            self.assertEqual('s3cr3t-token', info['result'])
+
+    def test_result_endpoint_discloses_result_only_to_owner(self):
+        with self.mock_option('basic_auth', self.USERS):
+            self.seed_state()
+            result = self.mock_backend_result()
+            with patch('flower.api.tasks.AsyncResult', return_value=result):
+                r = self.get('/api/task/result/task-1', auth_username='bob',
+                             auth_password='pw2')
+                self.assertEqual(200, r.code)
+                body = json.loads(r.body)
+                self.assertEqual(states.SUCCESS, body['state'])
+                self.assertNotIn('result', body)
+
+                r = self.get('/api/task/result/task-1', auth_username='alice',
+                             auth_password='pw1')
+                self.assertEqual(200, r.code)
+                body = json.loads(r.body)
+                self.assertEqual(states.SUCCESS, body['state'])
+                self.assertEqual('s3cr3t-token', body['result'])
+
+    def test_result_withheld_when_task_has_no_owner(self):
+        with self.mock_option('basic_auth', self.USERS):
+            self.seed_state(owner=None)
+
+            r = self.get('/api/task/info/task-1', auth_username='alice',
+                         auth_password='pw1')
+            self.assertEqual(200, r.code)
+            info = json.loads(r.body)
+            self.assertEqual(states.SUCCESS, info['state'])
+            self.assertNotIn('result', info)
+
+    def test_results_stay_visible_without_authentication(self):
+        self.seed_state()
+
+        r = self.get('/api/tasks')
+
+        self.assertEqual(200, r.code)
+        self.assertEqual('s3cr3t-token', json.loads(r.body)['task-1']['result'])
+
+    def test_apply_records_submitter_as_owner(self):
+        with self.mock_option('basic_auth', self.USERS):
+            result = Mock(spec=AsyncResult, task_id='applied-1',
+                          state=states.PENDING,
+                          backend=Mock(connection_errors=()))
+            task = self._app.capp.tasks['foo'] = Mock()
+            task.apply_async.return_value = result
+
+            r = self.post('/api/task/async-apply/foo', body='',
+                          auth_username='alice', auth_password='pw1')
+
+            self.assertEqual(200, r.code)
+            self.assertEqual(
+                'alice', self._app.events.state.get_task_owner('applied-1'))
+
+
+class TaskResultReauthorizationTests(BaseApiTestCase):
+    USERS = ['alice:pw1', 'bob:pw2', 'carol:pw3']
+
+    def test_in_flight_result_request_is_reauthorized_after_ownership_change(
+            self):
+        with self.mock_option('basic_auth', self.USERS):
+            state = EventsState()
+            state.get_or_create_worker('worker1')
+            events = [Event('worker-online', hostname='worker1')]
+            events += task_succeeded_events(worker='worker1', name='task1',
+                                            id='task-1', owner='alice',
+                                            result='s3cr3t-token')
+            for i, e in enumerate(events):
+                e['clock'] = i
+                e['local_received'] = time.time()
+                state.event(e)
+            self._app.events.state = state
+
+            get_started = threading.Event()
+            release_backend = threading.Event()
+
+            backend_result = Mock()
+            backend_result.id = 'task-1'
+            backend_result.state = states.SUCCESS
+            backend_result.backend.connection_errors = ()
+            backend_result.ready.return_value = True
+            backend_result.result = 's3cr3t-token'
+
+            def paused_get(timeout=None, propagate=False):
+                get_started.set()
+                release_backend.wait(10)
+                return 's3cr3t-token'
+
+            backend_result.get.side_effect = paused_get
+
+            with patch('flower.api.tasks.AsyncResult',
+                       return_value=backend_result):
+                async def scenario():
+                    def fetch(path, **kwargs):
+                        return self.http_client.fetch(
+                            self.get_url(path), raise_error=False, **kwargs)
+
+                    # Read-only list: the duty desk sees status, not results
+                    r = await fetch('/api/tasks', auth_username='bob',
+                                    auth_password='pw2')
+                    self.assertEqual(200, r.code)
+                    listed = json.loads(r.body)['task-1']
+                    self.assertEqual(states.SUCCESS, listed['state'])
+                    self.assertNotIn('result', listed)
+
+                    # Authorized detail: the owner sees the result
+                    r = await fetch('/api/task/info/task-1',
+                                    auth_username='alice', auth_password='pw1')
+                    self.assertEqual(200, r.code)
+                    self.assertEqual('s3cr3t-token',
+                                     json.loads(r.body)['result'])
+
+                    # Alice's result request parks on the late backend result
+                    in_flight = fetch('/api/task/result/task-1?timeout=5',
+                                      auth_username='alice',
+                                      auth_password='pw1')
+                    await asyncio.get_running_loop().run_in_executor(
+                        None, get_started.wait, 10)
+                    self.assertTrue(get_started.is_set())
+
+                    # Ownership moves to carol while the request is in flight
+                    state.set_task_owner('task-1', 'carol')
+
+                    # The late result completes the old request: no disclosure
+                    release_backend.set()
+                    r = await in_flight
+                    self.assertEqual(200, r.code)
+                    body = json.loads(r.body)
+                    self.assertEqual(states.SUCCESS, body['state'])
+                    self.assertNotIn('result', body)
+
+                    # A cached backend value is not authorization: alice's
+                    # fresh request still gets no result...
+                    r = await fetch('/api/task/result/task-1',
+                                    auth_username='alice', auth_password='pw1')
+                    self.assertEqual(200, r.code)
+                    self.assertNotIn('result', json.loads(r.body))
+
+                    # ...while the new owner gets it
+                    r = await fetch('/api/task/result/task-1',
+                                    auth_username='carol', auth_password='pw3')
+                    self.assertEqual(200, r.code)
+                    self.assertEqual('s3cr3t-token',
+                                     json.loads(r.body)['result'])
+
+                self.io_loop.run_sync(scenario, timeout=30)
+
+            # The backend was actually read, once, by the waiting request
+            backend_result.get.assert_called_once_with(
+                timeout=5.0, propagate=False)
+            self.assertEqual('carol', state.get_task_owner('task-1'))

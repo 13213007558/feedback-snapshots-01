@@ -18,6 +18,10 @@ class TaskView(BaseHandler):
         if task is None:
             raise web.HTTPError(404, f"Unknown task '{task_id}'")
         task = self.format_task(task)
+        if not self.may_disclose_task_result(task_id):
+            task = copy.copy(task)
+            task.result = None
+            task.traceback = None
         self.render(
             "task.html",
             task=task,
@@ -66,6 +70,7 @@ class TasksDataTable(BaseHandler):
             task_dict = as_dict(self.format_task((task_id, task))[1])
             if task_dict.get('worker'):
                 task_dict['worker'] = task_dict['worker'].hostname
+            self.filter_task_result(task_id, task_dict)
 
             filtered_tasks.append(task_dict)
 

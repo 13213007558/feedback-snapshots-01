@@ -8,10 +8,11 @@ import tempfile
 import time
 from unittest.mock import Mock, patch
 
+from celery.events import Event
 from kombu.exceptions import OperationalError
 from tornado.testing import AsyncTestCase, gen_test
 
-from flower.events import Events
+from flower.events import Events, EventsState
 from tests.unit.utils import task_succeeded_events
 
 
@@ -248,3 +249,67 @@ class EnableEventsTests(AsyncTestCase):
         self.assertEqual(
             'WARNING:flower.events:Failed to enable events: broker is down',
             logs.output[0])
+
+
+class TaskOwnershipTests(AsyncTestCase):
+    def feed(self, state, *events):
+        for i, event in enumerate(events):
+            event['clock'] = i
+            event['local_received'] = time.time()
+            state.event(event)
+
+    def test_event_owner_is_recorded(self):
+        state = EventsState()
+        state.get_or_create_worker('worker1')
+        self.feed(state, *task_succeeded_events(
+            worker='worker1', id='123', owner='alice'))
+
+        self.assertEqual('alice', state.get_task_owner('123'))
+
+    def test_event_without_owner_leaves_ownership_unset(self):
+        state = EventsState()
+        state.get_or_create_worker('worker1')
+        self.feed(state, *task_succeeded_events(worker='worker1', id='123'))
+
+        self.assertIsNone(state.get_task_owner('123'))
+
+    def test_set_task_owner_revises_and_forgets(self):
+        state = EventsState()
+        state.get_or_create_worker('worker1')
+        self.feed(state, *task_succeeded_events(
+            worker='worker1', id='123', owner='alice'))
+
+        state.set_task_owner('123', 'carol')
+        self.assertEqual('carol', state.get_task_owner('123'))
+
+        state.set_task_owner('123', None)
+        self.assertIsNone(state.get_task_owner('123'))
+
+    def test_owner_is_forgotten_when_task_is_evicted(self):
+        state = EventsState(max_tasks_in_memory=1)
+        state.get_or_create_worker('worker1')
+        self.feed(state, *task_succeeded_events(
+            worker='worker1', id='123', owner='alice'))
+        self.feed(state, *task_succeeded_events(
+            worker='worker1', id='456', owner='bob'))
+
+        self.assertNotIn('123', state.tasks)
+        self.assertIsNone(state.get_task_owner('123'))
+        self.assertEqual('bob', state.get_task_owner('456'))
+
+    def test_clear_tasks_forgets_only_removed_owners(self):
+        state = EventsState()
+        state.get_or_create_worker('worker1')
+        self.feed(state, *task_succeeded_events(
+            worker='worker1', id='123', owner='alice'))
+        state.event(Event(
+            'task-received', uuid='456', name='task2', args='()', kwargs={},
+            retries=0, eta=None, hostname='worker1', owner='bob',
+            clock=10, local_received=time.time()))
+
+        state._clear_tasks()
+
+        self.assertNotIn('123', state.tasks)
+        self.assertIsNone(state.get_task_owner('123'))
+        self.assertIn('456', state.tasks)
+        self.assertEqual('bob', state.get_task_owner('456'))

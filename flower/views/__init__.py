@@ -127,6 +127,7 @@ class BaseHandler(tornado.web.RequestHandler):
     def get_current_user(self):
         # Basic Auth
         basic_auth = self.application.options.basic_auth
+        basic_auth_user = None
         if basic_auth:
             auth_header = self.request.headers.get("Authorization", "")
             try:
@@ -141,10 +142,11 @@ class BaseHandler(tornado.web.RequestHandler):
                     raise tornado.web.HTTPError(401)
             except ValueError as exc:
                 raise tornado.web.HTTPError(401) from exc
+            basic_auth_user = credentials.split(':', 1)[0]
 
         # OAuth2
         if not self.application.options.auth:
-            return True
+            return basic_auth_user if basic_auth_user is not None else True
         user = self.get_secure_cookie('user')
         if user:
             if not isinstance(user, str):
@@ -152,6 +154,30 @@ class BaseHandler(tornado.web.RequestHandler):
             if authenticate(self.application.options.auth, user):
                 return user
         return None
+
+    def get_task_owner(self, task_id):
+        return self.application.events.state.get_task_owner(task_id)
+
+    def may_disclose_task_result(self, task_id):
+        # Without authentication there is no identity to check ownership
+        # against, so results stay visible as they always have been.
+        options = self.application.options
+        if not (options.basic_auth or options.auth):
+            return True
+        owner = self.get_task_owner(task_id)
+        if owner is None:
+            return False
+        user = self.current_user
+        return isinstance(user, str) and user == owner
+
+    def filter_task_result(self, task_id, task_dict):
+        # Drops fields that may carry internal result data unless the
+        # current user owns the task. Called as late as possible so an
+        # ownership change lands before the response is written.
+        if not self.may_disclose_task_result(task_id):
+            for field in ('result', 'traceback'):
+                task_dict.pop(field, None)
+        return task_dict
 
     # pylint: disable=too-many-arguments
     def get_argument(self, name, default=None, strip=True, type=None,

@@ -407,3 +407,59 @@ class TaskColumnsTest(AsyncHTTPTestCase):
     def test_default_header(self):
         self.assertEqual(['name', 'uuid', 'state', 'received', 'runtime', 'worker'],
                          self.header_columns())
+
+
+class TaskResultDisclosureTests(AsyncHTTPTestCase):
+    USERS = ['alice:pw1', 'bob:pw2']
+
+    def seed_state(self, owner='alice'):
+        state = EventsState()
+        state.get_or_create_worker('worker1')
+        events = [Event('worker-online', hostname='worker1')]
+        events += task_succeeded_events(worker='worker1', name='task1',
+                                        id='123', owner=owner,
+                                        result='s3cr3t-token')
+        for i, e in enumerate(events):
+            e['clock'] = i
+            e['local_received'] = time.time()
+            state.event(e)
+        self._app.events.state = state
+        return state
+
+    def test_task_page_discloses_result_only_to_owner(self):
+        with self.mock_option('basic_auth', self.USERS):
+            self.seed_state()
+
+            r = self.get('/task/123', auth_username='bob', auth_password='pw2')
+            self.assertEqual(200, r.code)
+            self.assertNotIn('s3cr3t-token', r.body.decode('utf-8'))
+
+            r = self.get('/task/123', auth_username='alice',
+                         auth_password='pw1')
+            self.assertEqual(200, r.code)
+            self.assertIn('s3cr3t-token', r.body.decode('utf-8'))
+
+    def test_datatable_discloses_result_only_to_owner(self):
+        params = {'draw': 1, 'start': 0, 'length': 10}
+        params['search[value]'] = ''
+        params['order[0][column]'] = 0
+        params['columns[0][data]'] = 'name'
+        params['order[0][dir]'] = 'asc'
+        query = urlencode(params)
+
+        with self.mock_option('basic_auth', self.USERS):
+            self.seed_state()
+
+            r = self.get('/tasks/datatable?' + query,
+                         auth_username='bob', auth_password='pw2')
+            self.assertEqual(200, r.code)
+            row = json.loads(r.body)['data'][0]
+            self.assertEqual('SUCCESS', row['state'])
+            self.assertNotIn('result', row)
+
+            r = self.get('/tasks/datatable?' + query,
+                         auth_username='alice', auth_password='pw1')
+            self.assertEqual(200, r.code)
+            row = json.loads(r.body)['data'][0]
+            self.assertEqual('SUCCESS', row['state'])
+            self.assertEqual('s3cr3t-token', row['result'])

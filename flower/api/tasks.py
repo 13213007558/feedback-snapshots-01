@@ -81,6 +81,12 @@ class BaseTaskHandler(BaseApiHandler):
             return repr(result)
         return result
 
+    def record_task_owner(self, task_id):
+        "remembers the authenticated submitter as the task's owner"
+        user = self.current_user
+        if isinstance(user, str):
+            self.application.events.state.set_task_owner(task_id, user)
+
 
 class TaskApply(BaseTaskHandler):
     @web.authenticated
@@ -155,6 +161,7 @@ All other top-level request body properties are passed to ``Task.apply_async``.
         result = await self.run_blocking(
             'task.publish', taskname, task.apply_async,
             args=args, kwargs=kwargs, **options)
+        self.record_task_owner(result.task_id)
         response = {'task-id': result.task_id}
 
         response = await self.run_blocking(
@@ -243,6 +250,7 @@ All other top-level request body properties are passed to ``Task.apply_async``.
         result = await self.run_blocking(
             'task.publish', taskname, task.apply_async,
             args=args, kwargs=kwargs, **options)
+        self.record_task_owner(result.task_id)
         response = {'task-id': result.task_id}
         if self.backend_configured(result):
             state = await self.run_blocking(
@@ -305,6 +313,7 @@ All other top-level request body properties are passed to ``Celery.send_task``.
         result = await self.run_blocking(
             'task.publish', taskname, self.capp.send_task,
             taskname, args=args, kwargs=kwargs, **options)
+        self.record_task_owner(result.task_id)
         response = {'task-id': result.task_id}
         if self.backend_configured(result):
             state = await self.run_blocking(
@@ -348,6 +357,9 @@ Get a task result
 :statuscode 400: invalid timeout
 :statuscode 401: unauthorized request
 :statuscode 503: result backend is not configured
+
+When authentication is enabled, ``result`` and ``traceback`` are only
+included for the task's owner (see :ref:`task-result-ownership`).
         """
         timeout = self.get_argument('timeout', None, type=float)
 
@@ -357,6 +369,11 @@ Get a task result
         response = await self.run_blocking(
             'task.result', taskid, self.read_result, result, timeout,
             connection_errors=self.backend_connection_errors(result))
+        # Authorize against the current ownership, not the ownership seen
+        # when the request started: it may have changed while the backend
+        # read was in flight, and a cached backend value only proves the
+        # result was read, not that this request may see it.
+        self.filter_task_result(taskid, response)
         self.write(response)
 
     def read_result(self, result, timeout):
@@ -552,6 +569,9 @@ List tasks
 :statuscode 200: no error
 :statuscode 400: invalid query parameters
 :statuscode 401: unauthorized request
+
+When authentication is enabled, ``result`` and ``traceback`` are only
+included for each task's owner (see :ref:`task-result-ownership`).
         """
         app = self.application
         limit = self.get_argument('limit', None, type=int)
@@ -589,6 +609,7 @@ List tasks
                 worker = task.pop('worker', None)
                 if worker is not None:
                     task['worker'] = worker.hostname
+                self.filter_task_result(task_id, task)
                 result.append((task_id, task))
         except QuerySyntaxError as exc:
             self.set_status(400)
@@ -696,6 +717,9 @@ Get a task info
 :statuscode 200: no error
 :statuscode 401: unauthorized request
 :statuscode 404: unknown task
+
+When authentication is enabled, ``result`` and ``traceback`` are only
+included for the task's owner (see :ref:`task-result-ownership`).
         """
 
         task = tasks.get_task_by_id(self.application.events, taskid)
@@ -706,4 +730,5 @@ Get a task info
         if task.worker is not None:
             response['worker'] = task.worker.hostname
 
+        self.filter_task_result(taskid, response)
         self.write(response)
