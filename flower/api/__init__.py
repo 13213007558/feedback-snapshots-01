@@ -15,6 +15,17 @@ class BaseApiHandler(BaseHandler):
             **kwargs,
         )
 
+    def operator(self):
+        user = self.current_user
+        if user is True:
+            return None
+        return user
+
+    def entry_origin(self):
+        """Tell page-driven requests apart from direct API clients."""
+        requested_by = self.request.headers.get('X-Flower-Control-Page')
+        return 'page' if requested_by == '1' else 'api'
+
     def prepare(self):
         if not (self.application.options.basic_auth or self.application.options.auth) and not self.unauthenticated_api:
             raise tornado.web.HTTPError(

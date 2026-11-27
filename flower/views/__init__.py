@@ -127,6 +127,7 @@ class BaseHandler(tornado.web.RequestHandler):
     def get_current_user(self):
         # Basic Auth
         basic_auth = self.application.options.basic_auth
+        basic_user = None
         if basic_auth:
             auth_header = self.request.headers.get("Authorization", "")
             try:
@@ -136,6 +137,7 @@ class BaseHandler(tornado.web.RequestHandler):
                     raise tornado.web.HTTPError(401)
                 for stored_credential in basic_auth:
                     if hmac.compare_digest(stored_credential, credentials):
+                        basic_user = credentials.split(':', 1)[0]
                         break
                 else:
                     raise tornado.web.HTTPError(401)
@@ -144,7 +146,7 @@ class BaseHandler(tornado.web.RequestHandler):
 
         # OAuth2
         if not self.application.options.auth:
-            return True
+            return basic_user if basic_user is not None else True
         user = self.get_secure_cookie('user')
         if user:
             if not isinstance(user, str):

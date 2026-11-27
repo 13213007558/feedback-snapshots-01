@@ -57,6 +57,10 @@ OPTIONS
                                    from workers
   --read-only                      enable read only mode, disabling all control
                                    operations (default *False*)
+  --control-groups                 operator groups and their allowed control
+                                   actions, e.g. 'duty=worker.shutdown'
+  --control-operators              operator group membership, e.g.
+                                   'alice=duty' or 'duty=bob,carol'
   --state-save-interval            state save interval (in milliseconds) (default *0*)
   --task-runtime-metric-buckets    task runtime prometheus latency metric buckets (default prometheus latency buckets)
   --tasks-columns                  slugs of columns on /tasks/ page in display order,

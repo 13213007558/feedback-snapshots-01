@@ -2,7 +2,7 @@ import os
 
 from tornado.web import StaticFileHandler, url
 
-from .api import control, tasks, workers
+from .api import approvals, control, tasks, workers
 from .utils import gen_cookie_secret
 from .views import auth, monitor
 from .views.broker import BrokerView
@@ -31,6 +31,11 @@ handlers = [
     url(r"/broker", BrokerView, name='broker'),
     # Worker API
     (r"/api/workers", workers.ListWorkers),
+    (r"/api/worker/registrations", approvals.WorkerRegistrations),
+    (r"/api/worker/registrations/(.+)", approvals.WorkerRegistrations),
+    (r"/api/worker/approve/(.+)", approvals.WorkerApproval),
+    (r"/api/control/responses", approvals.ControlResponses),
+    (r"/api/control/approvals", approvals.PendingApprovals),
     (r"/api/worker/shutdown/(.+)", control.WorkerShutDown),
     (r"/api/worker/pool/restart/(.+)", control.WorkerPoolRestart),
     (r"/api/worker/pool/grow/(.+)", control.WorkerPoolGrow),

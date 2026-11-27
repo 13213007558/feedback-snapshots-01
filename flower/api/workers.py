@@ -171,13 +171,26 @@ List workers
 
         if self.application.workers and not refresh and\
                 workername in self.application.workers:
-            self.write({workername: self.application.workers[workername]})
+            self.write({workername: self._with_registration(
+                workername, self.application.workers[workername])})
             return
 
         if workername and not self.is_worker(workername):
             raise web.HTTPError(404, f"Unknown worker '{workername}'")
 
         if workername:
-            self.write({workername: self.application.workers[workername]})
+            self.write({workername: self._with_registration(
+                workername, self.application.workers[workername])})
         else:
-            self.write(self.application.workers)
+            self.write({
+                name: self._with_registration(name, info)
+                for name, info in self.application.workers.items()
+            })
+
+    def _with_registration(self, workername, info):
+        registration = self.control.registration_for(workername)
+        if registration is None:
+            return info
+        info = dict(info)
+        info['registration'] = registration.as_dict()
+        return info

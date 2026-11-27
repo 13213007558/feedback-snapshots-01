@@ -69,5 +69,10 @@ define("task_runtime_metric_buckets", type=float, default=list(Histogram.DEFAULT
        multiple=True, help="histogram latency bucket value")
 define("read_only", type=bool, default=False,
        help="enable read only mode, disabling all operations")
+define("control_groups", type=str, default=None, multiple=True,
+       help="operator groups and allowed control actions, "
+            "e.g. 'duty=worker.shutdown,worker.pool_restart'")
+define("control_operators", type=str, default=None, multiple=True,
+       help="operator group membership, e.g. 'alice=duty' or 'duty=bob,carol'")
 
 default_options = options

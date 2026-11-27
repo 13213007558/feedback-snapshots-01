@@ -11,6 +11,7 @@ from tornado.httpserver import HTTPServer
 from tornado.netutil import bind_sockets
 from tornado.web import url
 
+from .control.service import ControlService
 from .events import Events
 from .inspector import Inspector
 from .options import default_options
@@ -55,7 +56,10 @@ class Flower(tornado.web.Application):
         self.io_loop.set_default_executor(self.executor)
         self.blocking_runner = BlockingOperationRunner(self.executor)
 
-        self.inspector = Inspector(self.io_loop, self.capp, self.options.inspect_timeout / 1000.0)
+        self.control = ControlService(self.options, self.capp)
+        self.inspector = Inspector(
+            self.io_loop, self.capp, self.options.inspect_timeout / 1000.0,
+            registration_observer=self.control.observe_inspection)
 
         self.events = events or Events(
             self.capp,
@@ -66,6 +70,7 @@ class Flower(tornado.web.Application):
             io_loop=self.io_loop,
             max_workers_in_memory=self.options.max_workers,
             max_tasks_in_memory=self.options.max_tasks)
+        self.events.state.registration_observer = self.control.observe_event
         self.started = False
 
     def start_http_server(self):

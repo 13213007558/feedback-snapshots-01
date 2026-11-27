@@ -86,6 +86,8 @@
     // Send the XSRF token on state-changing requests for the server's CSRF check
     $.ajaxSetup({
         beforeSend: function (xhr, settings) {
+            // Lets the server attribute page-driven control to the page path
+            xhr.setRequestHeader('X-Flower-Control-Page', '1');
             if (!/^(GET|HEAD|OPTIONS)$/i.test(settings.type)) {
                 xhr.setRequestHeader('X-XSRFToken', getCookie('_xsrf'));
             }
@@ -182,26 +184,200 @@
         }
     }
 
+    function workerName() {
+        return $('#workername').text();
+    }
+
+    function controlScope() {
+        var page = document.querySelector('.worker-detail-page');
+        return {
+            required: page && page.dataset.controlApprovals === 'required',
+            operator: page ? page.dataset.controlOperator : '',
+            actions: page && page.dataset.controlActions ?
+                page.dataset.controlActions.split(',') : [],
+            registrationId: $('#worker-registration').attr('data-registration-id') || '',
+            generation: $('#worker-registration').attr('data-generation') || ''
+        };
+    }
+
+    function allowControl(action) {
+        var scope = controlScope();
+        if (!scope.required) {
+            return true;
+        }
+        if (scope.actions.indexOf(action) === -1) {
+            show_alert('Operator "' + (scope.operator || 'anonymous') +
+                '" may not perform ' + action, 'danger');
+            return false;
+        }
+        return true;
+    }
+
+    function runControl(action, scopeData, approvalId) {
+        var workername = workerName(),
+            params = scopeData || {};
+
+        if (approvalId) {
+            postApproved(action, workername, approvalId, params);
+            return;
+        }
+        if (!controlScope().required) {
+            postLegacy(action, workername, params);
+            return;
+        }
+        $.ajax({
+            type: 'POST',
+            url: url_prefix() + '/api/worker/approve/' + workername,
+            dataType: 'json',
+            data: $.extend({
+                action: action,
+                registration_id: controlScope().registrationId
+            }, params),
+            success: function (approval) {
+                postApproved(action, workername, approval.approval_id, params);
+            },
+            error: function (data) {
+                show_alert($(data.responseText).text(), 'danger');
+                refreshApprovals();
+            }
+        });
+    }
+
+    function controlEndpoint(action, workername) {
+        var endpoints = {
+            'worker.shutdown': '/api/worker/shutdown/',
+            'worker.pool_restart': '/api/worker/pool/restart/',
+            'worker.pool_grow': '/api/worker/pool/grow/',
+            'worker.pool_shrink': '/api/worker/pool/shrink/',
+            'worker.pool_autoscale': '/api/worker/pool/autoscale/',
+            'worker.queue_add_consumer': '/api/worker/queue/add-consumer/',
+            'worker.queue_cancel_consumer': '/api/worker/queue/cancel-consumer/'
+        };
+        if (action.indexOf('task.') === 0) {
+            return null;
+        }
+        return url_prefix() + endpoints[action] + workername;
+    }
+
+    function postApproved(action, workername, approvalId, params) {
+        var url = controlEndpoint(action, workername);
+        if (!url) {
+            show_alert('Unsupported control action', 'danger');
+            return;
+        }
+        $.ajax({
+            type: 'POST',
+            url: url,
+            dataType: 'json',
+            data: $.extend({approval: approvalId}, params),
+            success: function (data) {
+                show_alert(data.message, 'success');
+                refreshApprovals();
+                refreshControlResponses();
+            },
+            error: function (data) {
+                show_alert($(data.responseText).text(), 'danger');
+                refreshApprovals();
+                refreshControlResponses();
+            }
+        });
+    }
+
+    function postLegacy(action, workername, params) {
+        var url = controlEndpoint(action, workername);
+        if (!url) {
+            show_alert('Unsupported control action', 'danger');
+            return;
+        }
+        $.ajax({
+            type: 'POST',
+            url: url,
+            dataType: 'json',
+            data: params,
+            success: function (data) {
+                show_alert(data.message, 'success');
+                refreshControlResponses();
+            },
+            error: function (data) {
+                show_alert($(data.responseText).text(), 'danger');
+                refreshControlResponses();
+            }
+        });
+    }
+
+    function refreshApprovals() {
+        if (!controlScope().required) {
+            return;
+        }
+        // A new approval must be bound to the registration this page shows.
+        // Reload so the rendered registration and the approval match.
+        window.setTimeout(function () { location.reload(); }, 800);
+    }
+
+    function refreshControlResponses() {
+        $.getJSON(url_prefix() + '/api/control/responses?limit=5').done(function (data) {
+            var list = document.getElementById('control-responses');
+            if (!list) {
+                return;
+            }
+            list.textContent = '';
+            (data.responses || []).forEach(function (record) {
+                var item = document.createElement('li');
+                item.className = 'control-response';
+                item.textContent = record.action + ' → ' + record.worker +
+                    ' registration ' + record.generation + ' (' +
+                    record.outcome + ', ' + record.message + ')' +
+                    (record.superseded ? ' [superseded]' : '');
+                list.appendChild(item);
+            });
+        });
+    }
+
+    $('.worker-queue-action').on('click', function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+        var action = $(this).data('action'),
+            queue = $(this).data('queue');
+        if (!allowControl(action)) {
+            return;
+        }
+        runControl(action, {queue: queue});
+    });
+
+    $('#pending-approvals').on('click', '.worker-run-approval', function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+        var item = $(this).closest('.pending-approval'),
+            action = item.data('action'),
+            parameters = JSON.parse(item.attr('data-parameters') || '{}'),
+            registrationId = item.attr('data-registration-id');
+        if (!$('#worker-registration').length ||
+                $('#worker-registration').attr('data-registration-id') !== registrationId) {
+            show_alert('This approval is for a previous worker registration; ' +
+                'it cannot be used from this page.', 'danger');
+            return;
+        }
+        runControl(action, parameters, item.attr('data-approval-id'));
+    });
+
     $('#worker-refresh').on('click', function (event) {
         event.preventDefault();
         event.stopPropagation();
         $('.dropdown-toggle').dropdown('hide');
-
-        var workername = $('#workername').text();
 
         $.ajax({
             type: 'GET',
             url: url_prefix() + '/api/workers',
             dataType: 'json',
             data: {
-                workername: unescape(workername),
+                workername: workerName(),
                 refresh: 1
             },
             success: function (data) {
                 show_alert(data.message || 'Successfully refreshed', 'success');
             },
             error: function (data) {
-                show_alert(data.responseText, "danger");
+                show_alert($(data.responseText).text(), 'danger');
             }
         });
     });
@@ -222,7 +398,7 @@
                 show_alert(data.message || 'Refreshed All Workers', 'success');
             },
             error: function (data) {
-                show_alert(data.responseText, "danger");
+                show_alert($(data.responseText).text(), 'danger');
             }
         });
     });
@@ -231,223 +407,136 @@
         event.preventDefault();
         event.stopPropagation();
         $('.dropdown-toggle').dropdown('hide');
-
-        var workername = $('#workername').text();
-
-        $.ajax({
-            type: 'POST',
-            url: url_prefix() + '/api/worker/pool/restart/' + workername,
-            dataType: 'json',
-            data: {
-                workername: workername
-            },
-            success: function (data) {
-                show_alert(data.message, "success");
-            },
-            error: function (data) {
-                show_alert(data.responseText, "danger");
-            }
-        });
+        runControl('worker.pool_restart', {});
     });
 
     $('#worker-shutdown').on('click', function (event) {
         event.preventDefault();
         event.stopPropagation();
         $('.dropdown-toggle').dropdown('hide');
-
-        var workername = $('#workername').text();
-
-        $.ajax({
-            type: 'POST',
-            url: url_prefix() + '/api/worker/shutdown/' + workername,
-            dataType: 'json',
-            data: {
-                workername: workername
-            },
-            success: function (data) {
-                show_alert(data.message, "success");
-            },
-            error: function (data) {
-                show_alert(data.responseText, "danger");
-            }
-        });
+        runControl('worker.shutdown', {});
     });
 
     $('#worker-pool-grow').on('click', function (event) {
         event.preventDefault();
         event.stopPropagation();
-
-        var workername = $('#workername').text(),
-            grow_size = $('#pool-size').val();
-
-        $.ajax({
-            type: 'POST',
-            url: url_prefix() + '/api/worker/pool/grow/' + workername,
-            dataType: 'json',
-            data: {
-                'workername': workername,
-                'n': grow_size,
-            },
-            success: function (data) {
-                show_alert(data.message, "success");
-            },
-            error: function (data) {
-                show_alert(data.responseText, "danger");
-            }
-        });
+        runControl('worker.pool_grow', {n: $('#pool-size').val()});
     });
 
     $('#worker-pool-shrink').on('click', function (event) {
         event.preventDefault();
         event.stopPropagation();
-
-        var workername = $('#workername').text(),
-            shrink_size = $('#pool-size').val();
-
-        $.ajax({
-            type: 'POST',
-            url: url_prefix() + '/api/worker/pool/shrink/' + workername,
-            dataType: 'json',
-            data: {
-                'workername': workername,
-                'n': shrink_size,
-            },
-            success: function (data) {
-                show_alert(data.message, "success");
-            },
-            error: function (data) {
-                show_alert(data.responseText, "danger");
-            }
-        });
+        runControl('worker.pool_shrink', {n: $('#pool-size').val()});
     });
 
     $('#worker-pool-autoscale').on('click', function (event) {
         event.preventDefault();
         event.stopPropagation();
-
-        var workername = $('#workername').text(),
-            min = $('#min-autoscale').val(),
-            max = $('#max-autoscale').val();
-
-        $.ajax({
-            type: 'POST',
-            url: url_prefix() + '/api/worker/pool/autoscale/' + workername,
-            dataType: 'json',
-            data: {
-                'workername': workername,
-                'min': min,
-                'max': max,
-            },
-            success: function (data) {
-                show_alert(data.message, "success");
-            },
-            error: function (data) {
-                show_alert(data.responseText, "danger");
-            }
+        runControl('worker.pool_autoscale', {
+            min: $('#min-autoscale').val(),
+            max: $('#max-autoscale').val()
         });
     });
 
     $('#worker-add-consumer').on('click', function (event) {
         event.preventDefault();
         event.stopPropagation();
-
-        var workername = $('#workername').text(),
-            queue = $('#add-consumer-name').val();
-
-        $.ajax({
-            type: 'POST',
-            url: url_prefix() + '/api/worker/queue/add-consumer/' + workername,
-            dataType: 'json',
-            data: {
-                'workername': workername,
-                'queue': queue,
-            },
-            success: function (data) {
-                show_alert(data.message, "success");
-            },
-            error: function (data) {
-                show_alert(data.responseText, "danger");
-            }
-        });
-    });
-
-    $('#worker-queues').on('click', function (event) {
-        event.preventDefault();
-        event.stopPropagation();
-
-        if (!event.target.id.startsWith("worker-cancel-consumer")) {
+        var queue = $('#add-consumer-name').val();
+        if (!allowControl('worker.queue_add_consumer')) {
             return;
         }
+        runControl('worker.queue_add_consumer', {queue: queue});
+    });
 
-        var workername = $('#workername').text(),
-            queue = $(event.target).closest("tr").children("td:eq(0)").text();
+    $(document).ready(function () {
+        if (document.getElementById('control-responses')) {
+            refreshControlResponses();
+        }
+    });
 
+    function taskControl(action, taskname, scope) {
+        var workername = workerName();
+        if (!controlScope().required) {
+            $.ajax({
+                type: 'POST',
+                url: url_prefix() + (action === 'task.time_limit' ?
+                    '/api/task/timeout/' : '/api/task/rate-limit/') +
+                    encodeURIComponent(taskname),
+                dataType: 'json',
+                data: Object.assign({workername: workername}, scope),
+                success: function (data) {
+                    show_alert(data.message, 'success');
+                    refreshControlResponses();
+                },
+                error: function (data) {
+                    show_alert($(data.responseText).text(), 'danger');
+                    refreshControlResponses();
+                }
+            });
+            return;
+        }
+        if (!allowControl(action)) {
+            return;
+        }
         $.ajax({
             type: 'POST',
-            url: url_prefix() + '/api/worker/queue/cancel-consumer/' + workername,
+            url: url_prefix() + '/api/worker/approve/' + workername,
             dataType: 'json',
-            data: {
-                'workername': workername,
-                'queue': queue,
-            },
-            success: function (data) {
-                show_alert(data.message, "success");
+            data: Object.assign({
+                action: action,
+                registration_id: controlScope().registrationId,
+                taskname: taskname
+            }, scope),
+            success: function (approval) {
+                $.ajax({
+                    type: 'POST',
+                    url: url_prefix() + (action === 'task.time_limit' ?
+                        '/api/task/timeout/' : '/api/task/rate-limit/') +
+                        encodeURIComponent(taskname),
+                    dataType: 'json',
+                    data: Object.assign({
+                        workername: workername,
+                        approval: approval.approval_id
+                    }, scope),
+                    success: function (data) {
+                        show_alert(data.message, 'success');
+                        refreshApprovals();
+                        refreshControlResponses();
+                    },
+                    error: function (data) {
+                        show_alert($(data.responseText).text(), 'danger');
+                        refreshApprovals();
+                        refreshControlResponses();
+                    }
+                });
             },
             error: function (data) {
-                show_alert(data.responseText, "danger");
+                show_alert($(data.responseText).text(), 'danger');
             }
         });
-    });
+    }
 
     $('#limits-table').on('click', function (event) {
         if (event.target.id.startsWith("task-timeout-")) {
             var timeout = parseInt($(event.target).siblings().closest("input").val()),
                 type = $(event.target).text().toLowerCase(),
                 taskname = $(event.target).closest("tr").children("td:eq(0)").text(),
-                post_data = {'workername': $('#workername').text()};
+                scope = {};
 
             taskname = taskname.split(' ')[0]; // removes [rate_limit=xxx]
-            post_data[type] = timeout;
+            scope[type] = timeout;
 
             if (!Number.isInteger(timeout)) {
                 show_alert("Invalid timeout value", "danger");
                 return;
             }
-
-            $.ajax({
-                type: 'POST',
-                url: url_prefix() + '/api/task/timeout/' + taskname,
-                dataType: 'json',
-                data: post_data,
-                success: function (data) {
-                    show_alert(data.message, "success");
-                },
-                error: function (data) {
-                    show_alert($(data.responseText).text(), "danger");
-                }
-            });
+            taskControl('task.time_limit', taskname, scope);
         } else if (event.target.id.startsWith("task-rate-limit-")) {
             var taskname = $(event.target).closest("tr").children("td:eq(0)").text(),
-                workername = $('#workername').text(),
                 ratelimit = parseInt($(event.target).prev().val());
 
             taskname = taskname.split(' ')[0]; // removes [rate_limit=xxx]
-
-            $.ajax({
-                type: 'POST',
-                url: url_prefix() + '/api/task/rate-limit/' + taskname,
-                dataType: 'json',
-                data: {
-                    'workername': workername,
-                    'ratelimit': ratelimit,
-                },
-                success: function (data) {
-                    show_alert(data.message, "success");
-                },
-                error: function (data) {
-                    show_alert(data.responseText, "danger");
-                }
-            });
+            taskControl('task.rate_limit', taskname, {ratelimit: ratelimit});
         }
     });
 

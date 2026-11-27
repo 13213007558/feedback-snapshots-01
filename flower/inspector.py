@@ -16,10 +16,12 @@ class Inspector:
     task_inspect_methods = ('scheduled', 'active', 'reserved', 'revoked')
     max_concurrency = len(inspect_methods)
 
-    def __init__(self, io_loop, capp, timeout, max_concurrency=None):
+    def __init__(self, io_loop, capp, timeout, max_concurrency=None,
+                 registration_observer=None):
         self.io_loop = io_loop
         self.capp = capp
         self.timeout = timeout
+        self.registration_observer = registration_observer
         self.workers = collections.defaultdict(dict)
         self._inspect_tasks = {}
         self._inspect_max_concurrency = (
@@ -74,6 +76,8 @@ class Inspector:
         info = self.workers[workername]
         info[method] = response
         info['timestamp'] = time.time()
+        if self.registration_observer is not None:
+            self.registration_observer(workername, dict(info))
 
     def _inspect(self, method, workername):
         destination = [workername] if workername else None

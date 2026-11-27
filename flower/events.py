@@ -113,6 +113,7 @@ class EventsState(State):
         super().__init__(*args, **kwargs)
         self.counter = collections.defaultdict(Counter)
         self.metrics = get_prometheus_metrics()
+        self.registration_observer = None
         self.search_engine = TaskSearchEngine()
         self.search_engine.rebuild(self.tasks.items())
 
@@ -140,6 +141,8 @@ class EventsState(State):
 
         super().event(event)
         self.counter[worker][event_type] += 1
+        if not is_task and self.registration_observer is not None:
+            self.registration_observer(event_type, worker, event)
 
         if is_task:
             task = self.tasks[event['uuid']]

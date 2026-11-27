@@ -11,12 +11,25 @@
 {% set other = {key: value for key, value in worker['stats'].items() if key not in
 'pool pid prefetch_count autoscaler consumer broker clock total rusage'.split()} %}
 
-<div class="page-section worker-detail-page">
+<div class="page-section worker-detail-page"
+  data-control-approvals="{{ 'required' if approvals_required else 'legacy' }}"
+  data-control-operator="{{ operator or '' }}"
+  data-control-actions="{{ ','.join(allowed_actions) }}">
   <header class="worker-detail-header">
     <div>
       <p class="page-eyebrow">Worker details</p>
       <h1 id="workername">{{ worker['name'] }}</h1>
     </div>
+
+    {% if registration %}
+    <p class="page-eyebrow" id="worker-registration"
+      data-registration-id="{{ registration['registration_id'] }}"
+      data-generation="{{ registration['generation'] }}"
+      data-worker="{{ registration['worker'] }}">
+      Registration {{ registration['generation'] }} ·
+      <span title="{{ registration['registration_id'] }}">{{ registration['registration_id'][:12] }}</span>
+    </p>
+    {% end %}
 
     {% if not read_only %}
     <div class="btn-group" role="group" aria-label="Worker actions">
@@ -202,8 +215,10 @@
                   <td>{{ queue['binding_arguments'] }}</td>
                   <td>{{ queue['auto_delete'] }}</td>
                   {% if not read_only %}
-                    <td><button id="worker-cancel-consumer-{{ queue['name'] }}" class="btn btn-danger text-nowrap">Cancel
-                        Consumer</button></td>
+                    <td><button id="worker-cancel-consumer-{{ queue['name'] }}"
+                        class="btn btn-danger text-nowrap worker-queue-action"
+                        data-action="worker.queue_cancel_consumer"
+                        data-queue="{{ queue['name'] }}">Cancel Consumer</button></td>
                   {% end %}
                 </tr>
                 {% end %}
@@ -214,7 +229,8 @@
               <div class="input-group mb-3">
                 <input id="add-consumer-name" type="text" class="form-control" placeholder="New consumer"
                   aria-label="New consumer" aria-describedby="worker-add-consumer">
-                <button class="btn btn-primary mx-1" type="button" id="worker-add-consumer">Add</button>
+                <button class="btn btn-primary mx-1" type="button" id="worker-add-consumer"
+                  data-action="worker.queue_add_consumer">Add</button>
               </div>
             </div>
             {% end %}
@@ -422,5 +438,28 @@
 
     </div>
   </div>
+
+  {% if pending_approvals %}
+  <section class="worker-panel" aria-labelledby="pending-approvals-heading">
+    <h2 class="worker-panel-title" id="pending-approvals-heading">Approved actions</h2>
+    <ul id="pending-approvals" class="list-unstyled mb-0">
+      {% for approval in pending_approvals %}
+      <li class="pending-approval" data-approval-id="{{ approval['approval_id'] }}"
+        data-action="{{ approval['action'] }}"
+        data-registration-id="{{ approval['registration_id'] }}"
+        data-queue="{{ approval['queue'] or '' }}"
+        data-parameters="{{ json_encode(approval['parameters']) }}">
+        <span>{{ approval['action'] }}</span>
+        <button type="button" class="btn btn-sm btn-primary worker-run-approval">Run</button>
+      </li>
+      {% end %}
+    </ul>
+  </section>
+  {% end %}
+
+  <section class="worker-panel" aria-labelledby="control-responses-heading">
+    <h2 class="worker-panel-title" id="control-responses-heading">Recent control responses</h2>
+    <ul id="control-responses" class="list-unstyled mb-0" aria-live="polite"></ul>
+  </section>
 </div>
 {% end %}

@@ -1,3 +1,4 @@
+import json
 import re
 from datetime import datetime, timedelta
 
@@ -38,6 +39,10 @@ def task_link(url, uuid):
 
 def format_count(value):
     return f'{int(value or 0):,}'
+
+
+def json_encode(value):
+    return xhtml_escape(json.dumps(value, sort_keys=True))
 
 
 def format_value(value):

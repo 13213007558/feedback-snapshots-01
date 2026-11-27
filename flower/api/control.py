@@ -21,6 +21,35 @@ class ControlHandler(BaseApiHandler):
         logger.error("Failed to extract error reason from '%s'", response)
         return 'Unknown reason'
 
+    @property
+    def control(self):
+        return self.application.control
+
+    def check_worker(self, workername):
+        if not self.is_worker(workername) \
+                and self.control.registration_for(workername) is None:
+            raise web.HTTPError(404, f"Unknown worker '{workername}'")
+
+    def approval_argument(self):
+        return self.get_argument('approval', default=None)
+
+    async def execute(self, action, workername, approval_id=None,
+                      queue=None, parameters=None):
+        response, entry = await self.control.execute(
+            self.operator(), action, workername, self.run_blocking,
+            approval_id=approval_id, queue=queue, parameters=parameters,
+            origin=self.entry_origin())
+        return response, entry
+
+    def reply_for(self, workername, response):
+        if response and workername in response[0]:
+            return response[0][workername]
+        return None
+
+    def failed_reply(self, workername, response):
+        reply = self.reply_for(workername, response) or {}
+        return 'error' in reply
+
 
 class WorkerShutDown(ControlHandler):
     @web.authenticated
@@ -48,22 +77,25 @@ Shut down a worker
       "message": "Shutting down!"
   }
 
+The ``approval`` query parameter is required when operator groups are
+configured.  It must name the approval issued for this action and this
+worker registration.
+
 :reqheader Authorization: optional OAuth token to authenticate
 :statuscode 200: no error
 :statuscode 401: unauthorized request
-:statuscode 403: read only mode is enabled
-:statuscode 404: unknown worker
+:statuscode 403: read only mode is enabled or action not approved
+:statuscode 404: unknown worker or unknown approval
+:statuscode 409: worker re-registered or approval already consumed
         """
         if self.application.options.read_only:
             raise web.HTTPError(403, "Read only mode is enabled")
 
-        if not self.is_worker(workername):
-            raise web.HTTPError(404, f"Unknown worker '{workername}'")
+        self.check_worker(workername)
 
         logger.info("Shutting down '%s' worker", workername)
-        await self.run_blocking(
-            'worker.shutdown', workername, self.capp.control.broadcast,
-            'shutdown', destination=[workername])
+        await self.execute('worker.shutdown', workername,
+                           approval_id=self.approval_argument())
         self.write({"message": "Shutting down!"})
 
 
@@ -96,21 +128,20 @@ Restart worker's pool
 :reqheader Authorization: optional OAuth token to authenticate
 :statuscode 200: no error
 :statuscode 401: unauthorized request
-:statuscode 403: pool restart is not enabled (see CELERYD_POOL_RESTARTS) or read only mode is enabled
-:statuscode 404: unknown worker
+:statuscode 403: pool restart is not enabled (see CELERYD_POOL_RESTARTS) or read only mode is enabled or action not approved
+:statuscode 404: unknown worker or unknown approval
+:statuscode 409: worker re-registered or approval already consumed
         """
         if self.application.options.read_only:
             raise web.HTTPError(403, "Read only mode is enabled")
 
-        if not self.is_worker(workername):
-            raise web.HTTPError(404, f"Unknown worker '{workername}'")
+        self.check_worker(workername)
 
         logger.info("Restarting '%s' worker's pool", workername)
-        response = await self.run_blocking(
-            'worker.pool_restart', workername, self.capp.control.broadcast,
-            'pool_restart', arguments={'reload': False},
-            destination=[workername], reply=True)
-        if response and 'ok' in response[0][workername]:
+        response, _ = await self.execute(
+            'worker.pool_restart', workername,
+            approval_id=self.approval_argument())
+        if not self.failed_reply(workername, response):
             self.write({"message": f"Restarting '{workername}' worker's pool"})
         else:
             logger.error(response)
@@ -149,23 +180,23 @@ Grow worker's pool
 :reqheader Authorization: optional OAuth token to authenticate
 :statuscode 200: no error
 :statuscode 401: unauthorized request
-:statuscode 403: failed to grow or read only mode is enabled
-:statuscode 404: unknown worker
+:statuscode 403: failed to grow or read only mode is enabled or action not approved
+:statuscode 404: unknown worker or unknown approval
+:statuscode 409: worker re-registered, pool size differs from the approval, or approval already consumed
         """
-
         if self.application.options.read_only:
             raise web.HTTPError(403, "Read only mode is enabled")
 
-        if not self.is_worker(workername):
-            raise web.HTTPError(404, f"Unknown worker '{workername}'")
+        self.check_worker(workername)
 
         n = self.get_argument('n', default=1, type=int)
 
         logger.info("Growing '%s' worker's pool by '%s'", workername, n)
-        response = await self.run_blocking(
-            'worker.pool_grow', workername, self.capp.control.pool_grow,
-            n=n, reply=True, destination=[workername])
-        if response and 'ok' in response[0][workername]:
+        response, _ = await self.execute(
+            'worker.pool_grow', workername,
+            approval_id=self.approval_argument(),
+            parameters={'n': n})
+        if not self.failed_reply(workername, response):
             self.write({"message": f"Growing '{workername}' worker's pool by {n}"})
         else:
             logger.error(response)
@@ -204,23 +235,23 @@ Shrink worker's pool
 :reqheader Authorization: optional OAuth token to authenticate
 :statuscode 200: no error
 :statuscode 401: unauthorized request
-:statuscode 403: failed to shrink or read only mode is enabled
-:statuscode 404: unknown worker
+:statuscode 403: failed to shrink or read only mode is enabled or action not approved
+:statuscode 404: unknown worker or unknown approval
+:statuscode 409: worker re-registered, pool size differs from the approval, or approval already consumed
         """
-
         if self.application.options.read_only:
             raise web.HTTPError(403, "Read only mode is enabled")
 
-        if not self.is_worker(workername):
-            raise web.HTTPError(404, f"Unknown worker '{workername}'")
+        self.check_worker(workername)
 
         n = self.get_argument('n', default=1, type=int)
 
         logger.info("Shrinking '%s' worker's pool by '%s'", workername, n)
-        response = await self.run_blocking(
-            'worker.pool_shrink', workername, self.capp.control.pool_shrink,
-            n=n, reply=True, destination=[workername])
-        if response and 'ok' in response[0][workername]:
+        response, _ = await self.execute(
+            'worker.pool_shrink', workername,
+            approval_id=self.approval_argument(),
+            parameters={'n': n})
+        if not self.failed_reply(workername, response):
             self.write({"message": f"Shrinking '{workername}' worker's pool by {n}"})
         else:
             logger.error(response)
@@ -261,26 +292,25 @@ Autoscale worker pool
 :reqheader Authorization: optional OAuth token to authenticate
 :statuscode 200: no error
 :statuscode 401: unauthorized request
-:statuscode 403: autoscaling is not enabled (see CELERYD_AUTOSCALER) or read only mode is enabled
-:statuscode 404: unknown worker
+:statuscode 403: autoscaling is not enabled (see CELERYD_AUTOSCALER) or read only mode is enabled or action not approved
+:statuscode 404: unknown worker or unknown approval
+:statuscode 409: worker re-registered, range differs from the approval, or approval already consumed
         """
         if self.application.options.read_only:
             raise web.HTTPError(403, "Read only mode is enabled")
 
-        if not self.is_worker(workername):
-            raise web.HTTPError(404, f"Unknown worker '{workername}'")
+        self.check_worker(workername)
 
         min = self.get_argument('min', type=int, required=True)
         max = self.get_argument('max', type=int, required=True)
 
         logger.info("Autoscaling '%s' worker by '%s'",
                     workername, (min, max))
-        response = await self.run_blocking(
+        response, _ = await self.execute(
             'worker.pool_autoscale', workername,
-            self.capp.control.broadcast,
-            'autoscale', arguments={'min': min, 'max': max},
-            destination=[workername], reply=True)
-        if response and 'ok' in response[0][workername]:
+            approval_id=self.approval_argument(),
+            parameters={'min': min, 'max': max})
+        if not self.failed_reply(workername, response):
             self.write({"message": f"Autoscaling '{workername}' worker "
                                     f"(min={min}, max={max})"})
         else:
@@ -321,26 +351,25 @@ Start consuming from a queue
 :reqheader Authorization: optional OAuth token to authenticate
 :statuscode 200: no error
 :statuscode 401: unauthorized request
-:statuscode 403: failed to add consumer or read only mode is enabled
-:statuscode 404: unknown worker
+:statuscode 403: failed to add consumer or read only mode is enabled or action not approved
+:statuscode 404: unknown worker or unknown approval
+:statuscode 409: worker re-registered, queue differs from the approval, or approval already consumed
         """
         if self.application.options.read_only:
             raise web.HTTPError(403, "Read only mode is enabled")
 
-        if not self.is_worker(workername):
-            raise web.HTTPError(404, f"Unknown worker '{workername}'")
+        self.check_worker(workername)
 
         queue = self.get_argument('queue', required=True)
 
         logger.info("Adding consumer '%s' to worker '%s'",
                     queue, workername)
-        response = await self.run_blocking(
+        response, _ = await self.execute(
             'worker.queue_add_consumer', workername,
-            self.capp.control.broadcast,
-            'add_consumer', arguments={'queue': queue},
-            destination=[workername], reply=True)
-        if response and 'ok' in response[0][workername]:
-            self.write({"message": response[0][workername]['ok']})
+            approval_id=self.approval_argument(), queue=queue)
+        if not self.failed_reply(workername, response):
+            reply = self.reply_for(workername, response) or {}
+            self.write({"message": reply.get('ok') or f"add consumer {queue}"})
         else:
             logger.error(response)
             self.set_status(403)
@@ -379,26 +408,25 @@ Stop consuming from a queue
 :reqheader Authorization: optional OAuth token to authenticate
 :statuscode 200: no error
 :statuscode 401: unauthorized request
-:statuscode 403: failed to cancel consumer or read only mode is enabled
-:statuscode 404: unknown worker
+:statuscode 403: failed to cancel consumer or read only mode is enabled or action not approved
+:statuscode 404: unknown worker or unknown approval
+:statuscode 409: worker re-registered, queue moved, or approval already consumed
         """
         if self.application.options.read_only:
             raise web.HTTPError(403, "Read only mode is enabled")
 
-        if not self.is_worker(workername):
-            raise web.HTTPError(404, f"Unknown worker '{workername}'")
+        self.check_worker(workername)
 
         queue = self.get_argument('queue', required=True)
 
         logger.info("Canceling consumer '%s' from worker '%s'",
                     queue, workername)
-        response = await self.run_blocking(
+        response, _ = await self.execute(
             'worker.queue_cancel_consumer', workername,
-            self.capp.control.broadcast,
-            'cancel_consumer', arguments={'queue': queue},
-            destination=[workername], reply=True)
-        if response and 'ok' in response[0][workername]:
-            self.write({"message": response[0][workername]['ok']})
+            approval_id=self.approval_argument(), queue=queue)
+        if not self.failed_reply(workername, response):
+            reply = self.reply_for(workername, response) or {}
+            self.write({"message": reply.get('ok') or f"no longer consuming from {queue}"})
         else:
             logger.error(response)
             self.set_status(403)
@@ -485,8 +513,9 @@ Change soft and hard time limits for a task
 :reqheader Authorization: optional OAuth token to authenticate
 :statuscode 200: no error
 :statuscode 401: unauthorized request
-:statuscode 403: read only mode is enabled
-:statuscode 404: unknown task/worker
+:statuscode 403: read only mode is enabled or action not approved
+:statuscode 404: unknown task/worker or unknown approval
+:statuscode 409: worker re-registered or approval already consumed
         """
         if self.application.options.read_only:
             raise web.HTTPError(403, "Read only mode is enabled")
@@ -497,19 +526,18 @@ Change soft and hard time limits for a task
 
         if taskname not in self.capp.tasks:
             raise web.HTTPError(404, f"Unknown task '{taskname}'")
-        if workername is not None and not self.is_worker(workername):
-            raise web.HTTPError(404, f"Unknown worker '{workername}'")
+        self.check_worker(workername)
 
         logger.info("Setting timeouts for '%s' task (%s, %s)",
                     taskname, soft, hard)
-        destination = [workername] if workername is not None else None
-        response = await self.run_blocking(
-            'task.time_limit', taskname, self.capp.control.time_limit,
-            taskname, reply=True, hard=hard, soft=soft,
-            destination=destination)
+        parameters = {'taskname': taskname, 'hard': hard, 'soft': soft}
+        response, _ = await self.execute(
+            'task.time_limit', workername,
+            approval_id=self.approval_argument(), parameters=parameters)
 
-        if response and 'ok' in response[0][workername]:
-            self.write({"message": response[0][workername]['ok']})
+        if not self.failed_reply(workername, response):
+            reply = self.reply_for(workername, response) or {}
+            self.write({"message": reply.get('ok') or "time limits set successfully"})
         else:
             logger.error(response)
             self.set_status(403)
@@ -550,8 +578,9 @@ Change rate limit for a task
 :reqheader Authorization: optional OAuth token to authenticate
 :statuscode 200: no error
 :statuscode 401: unauthorized request
-:statuscode 403: read only mode is enabled
-:statuscode 404: unknown task/worker
+:statuscode 403: read only mode is enabled or action not approved
+:statuscode 404: unknown task/worker or unknown approval
+:statuscode 409: worker re-registered or approval already consumed
         """
         if self.application.options.read_only:
             raise web.HTTPError(403, "Read only mode is enabled")
@@ -561,17 +590,17 @@ Change rate limit for a task
 
         if taskname not in self.capp.tasks:
             raise web.HTTPError(404, f"Unknown task '{taskname}'")
-        if workername is not None and not self.is_worker(workername):
-            raise web.HTTPError(404, f"Unknown worker '{workername}'")
+        self.check_worker(workername)
 
         logger.info("Setting '%s' rate limit for '%s' task",
                     ratelimit, taskname)
-        destination = [workername] if workername is not None else None
-        response = await self.run_blocking(
-            'task.rate_limit', taskname, self.capp.control.rate_limit,
-            taskname, ratelimit, reply=True, destination=destination)
-        if response and 'ok' in response[0][workername]:
-            self.write({"message": response[0][workername]['ok']})
+        response, _ = await self.execute(
+            'task.rate_limit', workername,
+            approval_id=self.approval_argument(),
+            parameters={'taskname': taskname, 'ratelimit': ratelimit})
+        if not self.failed_reply(workername, response):
+            reply = self.reply_for(workername, response) or {}
+            self.write({"message": reply.get('ok') or "new rate limit set successfully"})
         else:
             logger.error(response)
             self.set_status(403)

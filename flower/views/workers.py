@@ -31,6 +31,11 @@ class WorkerView(BaseHandler):
         if 'stats' not in worker:
             raise web.HTTPError(404, f"Unable to get stats for '{name}' worker")
 
+        registration = self.application.control.registration_for(name)
+        if registration is None:
+            registration = self.application.control.ensure_registration(
+                name, worker)
+
         worker = dict(worker, name=name)
         # Scheduled and revoked lists can hold thousands of entries, show the head
         limit = self.get_argument('limit', self.list_limit, type=int)
@@ -38,10 +43,33 @@ class WorkerView(BaseHandler):
             if isinstance(value, list):
                 worker[key] = value[:limit]
 
+        control = self.application.control
+        user = self.current_user
+        operator = None if user is True else user
+        if not control.approvals_required:
+            allowed_actions = sorted(control.action_allowlist())
+        elif operator is None:
+            allowed_actions = []
+        else:
+            allowed_actions = sorted(control.policy.actions_for(operator))
+        pending_approvals = []
+        if control.approvals_required and operator is not None:
+            # only worker actions have a page endpoint to execute them from
+            pending_approvals = [
+                approval for approval in
+                control.pending_approvals(operator=operator)
+                if approval['worker'] == name
+                and approval['action'].startswith('worker.')]
+
         self.render(
             "worker.html",
             worker=worker,
             read_only=self.application.options.read_only,
+            registration=registration.as_dict() if registration else None,
+            approvals_required=control.approvals_required,
+            operator=operator,
+            allowed_actions=allowed_actions,
+            pending_approvals=pending_approvals,
         )
 
 

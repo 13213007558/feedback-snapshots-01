@@ -567,3 +567,64 @@ Example::
 
     $ celery flower --read-only
 
+
+.. _control_groups:
+
+control_groups
+~~~~~~~~~~~~~~
+
+Default: None
+
+Declares operator groups and the control actions each group may request.  A
+group entry is a semicolon-separated list of actions::
+
+    $ celery flower \
+        --control-groups='duty=worker.queue_cancel_consumer;worker.queue_add_consumer' \
+        --control-groups='pool=worker.pool_grow;worker.pool_shrink;worker.pool_autoscale'
+
+Tornado splits comma-separated ``multiple`` option values before Flower reads
+them, so a comma-separated action list also works: the fragments without a
+group name continue the previous group.
+
+The action names are ``worker.shutdown``, ``worker.pool_restart``,
+``worker.pool_grow``, ``worker.pool_shrink``, ``worker.pool_autoscale``,
+``worker.queue_add_consumer``, ``worker.queue_cancel_consumer``,
+``task.time_limit`` and ``task.rate_limit``.  Alias spellings such as
+``queue.cancel`` or ``pool_restart`` are normalized.
+
+When at least one group is configured, control actions require an approval
+issued through ``/api/worker/approve/<worker>``.  An approval is bound to the
+worker's current registration id, to the action, and to its scope (queue name,
+pool size or autoscale range).  It is single use.  The page sends the
+registration id it rendered, so clicking a page after the worker name was
+reused by another process is refused instead of sending a command to the new
+worker.
+
+The worker registration id is also listed by ``/api/workers`` under the
+``registration`` key of each worker entry, and by
+``/api/worker/registrations/<worker>``.
+
+.. _control_operators:
+
+control_operators
+~~~~~~~~~~~~~~~~~
+
+Default: None
+
+Maps authenticated users to operator groups.  Both styles are accepted::
+
+    --control-operators='alice=duty'
+    --control-operators='pool=bob;carol'
+
+The user name is the HTTP Basic Auth user or the OAuth session email, matching
+the authenticated identity Flower already uses.  Users without a group may not
+approve or execute any control action.  As with ``control_groups``, comma-split
+fragments continue the previous entry.
+
+Every executed or refused control request is recorded with its operator,
+worker name, registration id, generation, destination and Celery command.
+The records are available from ``/api/control/responses``; the worker page
+shows the most recent ones, including records whose worker registration was
+replaced by a later incarnation.  ``origin`` distinguishes approvals and
+commands issued from the worker page (``page``) from direct API calls
+(``api``).
