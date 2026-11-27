@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Generator, Iterable, Mapping, MutableMapping
 from contextlib import contextmanager
-from typing import Any, Literal, overload
+from typing import Any, Literal, NamedTuple, cast, overload
 
 from . import helpers, presets
 from .common import normalize_url, utils
@@ -10,6 +10,7 @@ from .parser_block import ParserBlock
 from .parser_core import ParserCore
 from .parser_inline import ParserInline
 from .renderer import RendererHTML, RendererProtocol
+from .ruler import Rule
 from .rules_core.state_core import StateCore
 from .token import Token
 from .utils import EnvType, OptionsDict, OptionsType, PresetType
@@ -28,6 +29,21 @@ _PRESETS: dict[str, PresetType] = {
     "gfm-like": presets.gfm_like.make(),
     "gfm-like2": presets.gfm_like2.make(),
 }
+
+
+class _ConfigSnapshot(NamedTuple):
+    """A detached copy of the approved rule and renderer configuration.
+
+    Used to apply plugin updates atomically: if a plugin raises partway
+    through initialisation, the previous configuration is restored in full.
+    """
+
+    core_rules: list[Rule[Any]]
+    block_rules: list[Rule[Any]]
+    inline_rules: list[Rule[Any]]
+    inline2_rules: list[Rule[Any]]
+    render_rules: dict[str, Callable[..., Any]] | None
+    options: OptionsDict
 
 
 class MarkdownIt:
@@ -220,6 +236,28 @@ class MarkdownIt:
                 self[chain].ruler.enableOnly(rules)
         self.inline.ruler2.enableOnly(chain_rules["inline2"])
 
+    def _snapshot_config(self) -> _ConfigSnapshot:
+        """Copy the current rule and renderer configuration, for later rollback."""
+        render_rules = getattr(self.renderer, "rules", None)
+        return _ConfigSnapshot(
+            core_rules=self.core.ruler.snapshot(),
+            block_rules=self.block.ruler.snapshot(),
+            inline_rules=self.inline.ruler.snapshot(),
+            inline2_rules=self.inline.ruler2.snapshot(),
+            render_rules=None if render_rules is None else dict(render_rules),
+            options=OptionsDict(cast(OptionsType, dict(self.options))),
+        )
+
+    def _restore_config(self, snapshot: _ConfigSnapshot) -> None:
+        """Restore a configuration copied by :meth:`_snapshot_config`."""
+        self.core.ruler.restore(snapshot.core_rules)
+        self.block.ruler.restore(snapshot.block_rules)
+        self.inline.ruler.restore(snapshot.inline_rules)
+        self.inline.ruler2.restore(snapshot.inline2_rules)
+        if snapshot.render_rules is not None:
+            self.renderer.rules = snapshot.render_rules  # type: ignore[attr-defined]
+        self.options = snapshot.options
+
     def add_render_rule(
         self, name: str, function: Callable[..., Any], fmt: str = "html"
     ) -> None:
@@ -227,13 +265,19 @@ class MarkdownIt:
 
         Only applied when ``renderer.__output__ == fmt``
 
+        The rules mapping is replaced rather than mutated in place, so a
+        document that already started keeps rendering with the render rules
+        that were approved when it started.
+
         :param name: must equal the ``type`` of the token(s) this should render
             (e.g. ``"heading_open"``, ``"fence"``); it is not an arbitrary label.
             If it does not match any token type actually produced by the active
             rules, ``function`` will silently never be called.
         """
         if self.renderer.__output__ == fmt:
-            self.renderer.rules[name] = function.__get__(self.renderer)  # type: ignore
+            rules = dict(self.renderer.rules)  # type: ignore[attr-defined]
+            rules[name] = function.__get__(self.renderer)
+            self.renderer.rules = rules  # type: ignore[attr-defined]
 
     def use(
         self, plugin: Callable[..., None], *params: Any, **options: Any
@@ -242,6 +286,11 @@ class MarkdownIt:
 
         It's just a sugar to call `plugin(md, params)` with curring.
 
+        The update is atomic: parse rules, render rules and options are
+        approved together. If the plugin raises partway through
+        initialisation, every change it made is rolled back and the
+        previously approved configuration keeps serving unchanged.
+
         Example::
 
             def func(tokens, idx):
@@ -249,7 +298,12 @@ class MarkdownIt:
             md = MarkdownIt().use(plugin, 'foo_replace', 'text', func)
 
         """
-        plugin(self, *params, **options)
+        snapshot = self._snapshot_config()
+        try:
+            plugin(self, *params, **options)
+        except Exception:
+            self._restore_config(snapshot)
+            raise
         return self
 
     def parse(self, src: str, env: EnvType | None = None) -> list[Token]:
@@ -285,9 +339,26 @@ class MarkdownIt:
         `env` can be used to inject additional metadata (`{}` by default).
         But you will not need it with high probability. See also comment
         in [[MarkdownIt.parse]].
+
+        The render rules and options approved when the document starts are
+        pinned for its whole lifetime: a plugin update committed while the
+        document is being processed only affects later documents.
         """
         env = {} if env is None else env
-        return self.renderer.render(self.parse(src, env), self.options, env)
+        renderer: Any = self.renderer
+        render_rules = getattr(renderer, "rules", None)
+        options = self.options
+        tokens = self.parse(src, env)
+        if render_rules is None or renderer.rules is render_rules:
+            return renderer.render(tokens, options, env)
+        # A plugin update was approved while this document was being parsed:
+        # finish it with the render rules approved when it started.
+        live_rules = renderer.rules
+        renderer.rules = render_rules
+        try:
+            return renderer.render(tokens, options, env)
+        finally:
+            renderer.rules = live_rules
 
     def parseInline(self, src: str, env: EnvType | None = None) -> list[Token]:
         """The same as [[MarkdownIt.parse]] but skip all block rules.
@@ -319,7 +390,20 @@ class MarkdownIt:
         will NOT be wrapped into `<p>` tags.
         """
         env = {} if env is None else env
-        return self.renderer.render(self.parseInline(src, env), self.options, env)
+        renderer: Any = self.renderer
+        render_rules = getattr(renderer, "rules", None)
+        options = self.options
+        tokens = self.parseInline(src, env)
+        if render_rules is None or renderer.rules is render_rules:
+            return renderer.render(tokens, options, env)
+        # A plugin update was approved while this document was being parsed:
+        # finish it with the render rules approved when it started.
+        live_rules = renderer.rules
+        renderer.rules = render_rules
+        try:
+            return renderer.render(tokens, options, env)
+        finally:
+            renderer.rules = live_rules
 
     # link methods
 

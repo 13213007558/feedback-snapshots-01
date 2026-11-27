@@ -55,6 +55,20 @@ md = MarkdownIt().use(plugin1, keyword=value).use(plugin2, keyword=value)
 html_string = md.render("some *Markdown*")
 ```
 
+## Updating plugins on a shared instance
+
+`md.use()` approves a plugin's changes atomically: the parse rules, render
+rules and options it installs take effect together. If the plugin raises
+partway through initialisation, every change it made is rolled back and the
+previously approved configuration keeps serving unchanged — a partially
+initialised plugin never participates in any output.
+
+Likewise, a document processed with `md.render()` uses the render rules and
+options approved when it started, from parsing through to the final output.
+If a new plugin configuration is approved while that document is still being
+processed, the in-flight document finishes with its own approved
+configuration, and only later documents switch to the new one.
+
 (md/third-party)=
 
 ## Third-party renderers and plugins

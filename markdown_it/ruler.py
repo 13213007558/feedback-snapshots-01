@@ -19,6 +19,7 @@ rules control use [[MarkdownIt.disable]], [[MarkdownIt.enable]] and
 from __future__ import annotations
 
 from collections.abc import Iterable
+from copy import copy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Generic, TypedDict, TypeVar
 import warnings
@@ -106,6 +107,19 @@ class Ruler(Generic[RuleFuncTv]):
                 if chain and (chain not in rule.alt):
                     continue
                 self.__cache__[chain].append(rule.fn)
+
+    def snapshot(self) -> list[Rule[RuleFuncTv]]:
+        """Return a detached copy of the current rule list.
+
+        The copy can later be passed to :meth:`restore` to roll back every
+        change made to this ruler after the snapshot was taken.
+        """
+        return [copy(rule) for rule in self.__rules__]
+
+    def restore(self, snapshot: list[Rule[RuleFuncTv]]) -> None:
+        """Restore the rule list from a :meth:`snapshot`, discarding later changes."""
+        self.__rules__ = [copy(rule) for rule in snapshot]
+        self.__cache__ = None
 
     def at(
         self, ruleName: str, fn: RuleFuncTv, options: RuleOptionsType | None = None

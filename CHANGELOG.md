@@ -1,5 +1,11 @@
 # Change Log
 
+## Unreleased
+
+### 👌 Improved
+
+* 👌 Make `MarkdownIt.use()` apply plugin updates atomically: parse rules, render rules and options are approved together, and if a plugin raises partway through initialisation every change it made is rolled back, so the previously approved configuration keeps serving unchanged. Documents processed with `render()`/`renderInline()` now also pin the render rules and options approved when they start, so a plugin update committed mid-document only affects later documents
+
 ## 4.3.0 - 2026-11-10
 
 This release fixes two quadratic-time parsing paths that let crafted input stall rendering for minutes (security),
