@@ -846,6 +846,153 @@ class Logger:
             handler_id = self._core.handlers_count
             self._core.handlers_count += 1
 
+        try:
+            handler = self._build_handler(
+                handler_id,
+                sink,
+                level=level,
+                format=format,
+                filter=filter,
+                colorize=colorize,
+                serialize=serialize,
+                backtrace=backtrace,
+                diagnose=diagnose,
+                enqueue=enqueue,
+                context=context,
+                catch=catch,
+                kwargs=kwargs,
+            )
+        except BaseException:
+            with self._core.lock:
+                self._core.handlers_count = handler_id
+            raise
+
+        self._register_handler(handler_id, handler)
+
+        return handler_id
+
+    def reconfigure(self, *, handlers):
+        """Atomically replace the whole set of active handlers.
+
+        Contrary to |configure|, the new handlers are all fully prepared and validated before any
+        of them is activated. The active handlers keep serving the incoming messages until the
+        replacement is ready, then the whole configuration is swapped in a single critical
+        section. This makes the reload safe even when one of the new handlers fails to initialize:
+        the previously active handlers are left untouched and continue to process the logs, while
+        the partially prepared handlers are cleaned up.
+
+        Messages already dispatched to an active handler (including those waiting in the internal
+        queue of an ``enqueue=True`` handler) are still processed by that handler, using its own
+        sink, level, filter and formatting rules. Only the logging calls made after the new
+        configuration is committed are routed to the new handlers.
+
+        Parameters
+        ----------
+        handlers : |list| of |dict|
+            A list of each handler to be activated. The list should contain dicts of params passed
+            to the |add| function as keyword arguments. All the previously added handlers are
+            removed once the new ones are ready. An empty list simply removes every handler.
+
+        Returns
+        -------
+        :class:`list` of :class:`int`
+            A list containing the identifiers of the newly activated sinks.
+
+        Raises
+        ------
+        Exception
+            Any exception raised while preparing one of the handlers is propagated, in which case
+            the active configuration is guaranteed to remain unchanged and usable.
+
+        Examples
+        --------
+        >>> logger.reconfigure(
+        ...     handlers=[
+        ...         dict(sink=sys.stderr, format="[{time}] {message}"),
+        ...         dict(sink="file.log", enqueue=True, filter="my_module"),
+        ...     ]
+        ... )
+        [1, 2]
+        """
+        with self._core.lock:
+            first_handler_id = self._core.handlers_count
+            self._core.handlers_count += len(handlers)
+
+        prepared = []
+
+        try:
+            for offset, params in enumerate(handlers):
+                params = dict(params)
+                if "sink" not in params:
+                    raise TypeError(
+                        "Each handler configuration should contain a 'sink' key, "
+                        "but the handler at index %d does not" % offset
+                    )
+                sink = params.pop("sink")
+                handler = self._build_handler(
+                    first_handler_id + offset,
+                    sink,
+                    level=params.pop("level", _defaults.LOGURU_LEVEL),
+                    format=params.pop("format", _defaults.LOGURU_FORMAT),
+                    filter=params.pop("filter", _defaults.LOGURU_FILTER),
+                    colorize=params.pop("colorize", _defaults.LOGURU_COLORIZE),
+                    serialize=params.pop("serialize", _defaults.LOGURU_SERIALIZE),
+                    backtrace=params.pop("backtrace", _defaults.LOGURU_BACKTRACE),
+                    diagnose=params.pop("diagnose", _defaults.LOGURU_DIAGNOSE),
+                    enqueue=params.pop("enqueue", _defaults.LOGURU_ENQUEUE),
+                    context=params.pop("context", _defaults.LOGURU_CONTEXT),
+                    catch=params.pop("catch", _defaults.LOGURU_CATCH),
+                    kwargs=params,
+                )
+                prepared.append(handler)
+        except BaseException:
+            with self._core.lock:
+                self._core.handlers_count = first_handler_id
+            for handler in prepared:
+                try:
+                    handler.stop()
+                except Exception:
+                    pass
+            raise
+
+        with self._core.lock:
+            old_handlers = self._core.handlers
+            new_handlers = {
+                first_handler_id + offset: handler for offset, handler in enumerate(prepared)
+            }
+            levelnos = (handler.levelno for handler in prepared)
+            self._core.min_level = min(levelnos, default=float("inf"))
+            self._core.handlers = new_handlers
+
+        for handler in old_handlers.values():
+            handler.stop()
+
+        return list(range(first_handler_id, first_handler_id + len(handlers)))
+
+    def _register_handler(self, handler_id, handler):
+        with self._core.lock:
+            handlers = self._core.handlers.copy()
+            handlers[handler_id] = handler
+            self._core.min_level = min(self._core.min_level, handler.levelno)
+            self._core.handlers = handlers
+
+    def _build_handler(
+        self,
+        handler_id,
+        sink,
+        *,
+        level=_defaults.LOGURU_LEVEL,
+        format=_defaults.LOGURU_FORMAT,
+        filter=_defaults.LOGURU_FILTER,
+        colorize=_defaults.LOGURU_COLORIZE,
+        serialize=_defaults.LOGURU_SERIALIZE,
+        backtrace=_defaults.LOGURU_BACKTRACE,
+        diagnose=_defaults.LOGURU_DIAGNOSE,
+        enqueue=_defaults.LOGURU_ENQUEUE,
+        context=_defaults.LOGURU_CONTEXT,
+        catch=_defaults.LOGURU_CATCH,
+        kwargs={},  # noqa: B006
+    ):
         error_interceptor = ErrorInterceptor(catch, handler_id)
 
         if colorize is None and serialize:
@@ -1068,13 +1215,7 @@ class Logger:
                 levels_ansi_codes=self._core.levels_ansi_codes,
             )
 
-            handlers = self._core.handlers.copy()
-            handlers[handler_id] = handler
-
-            self._core.min_level = min(self._core.min_level, levelno)
-            self._core.handlers = handlers
-
-        return handler_id
+        return handler
 
     def remove(self, handler_id=None):
         """Remove a previously added handler and stop sending logs to its sink.

@@ -273,6 +273,22 @@
       pass
     logger.configure(handlers=[{"sink": sink, "context": "spawn", "loop": None}])
 
+- case: reconfigure
+  main: |
+    from loguru import logger
+    import sys
+    ids = logger.reconfigure(handlers=[{"sink": sys.stderr, "colorize": False}])
+    reveal_type(ids)
+  out: |
+    main:4: note: Revealed type is "list[int]"
+
+- case: reconfigure_requires_handlers
+  main: |
+    from loguru import logger
+    logger.reconfigure()
+  out: |
+    main:2: error: Missing keyword argument "handlers" in call to "reconfigure" of "Logger"  [call-arg]
+
 - case: parse
   main: |
     from loguru import logger

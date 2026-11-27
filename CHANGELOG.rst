@@ -1,3 +1,8 @@
+`Unreleased`_
+=============
+
+- Add ``logger.reconfigure()`` to atomically replace the whole set of handlers: the new handlers are all prepared before the swap, a preparation failure leaves the active configuration untouched, and records already dispatched to old handlers are still processed by them.
+
 `0.8.0`_ (2026-11-11)
 =====================
 
