@@ -65,14 +65,27 @@ def load_from_file(filename: str) -> Dict[str, Any]:
 
 
 def format_for_output(secrets: SecretsCollection, is_slim_mode: bool = False) -> Dict[str, Any]:
+    # Since v1.6, human review evidence is stored in a dedicated `audit` section rather than
+    # inline on each finding. Older output versions keep the legacy inline `is_secret` layout.
+    is_v1_6_format = Version(VERSION) >= Version('1.6.0')
+    results = secrets.json()
+
     output = {
         'version': VERSION,
 
         # This will populate settings of filters and plugins,
         **get_settings().json(),
 
-        'results': secrets.json(),
+        'results': results,
     }
+
+    if is_v1_6_format:
+        audit = secrets.audit_json()
+        for entries in results.values():
+            for entry in entries:
+                entry.pop('is_secret', None)
+        if audit:
+            output['audit'] = audit
 
     if not is_slim_mode:
         output['generated_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())

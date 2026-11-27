@@ -57,9 +57,15 @@ def main(argv: Optional[List[str]] = None) -> int:
                 old_baseline = json.loads(f.read())
 
             # Override the results, because this has been updated in `should_update_baseline`.
+            # These still carry inline `is_secret` values; the v1.6 upgrade separates them into
+            # the dedicated `audit` section, so no human label is lost in the upgrade.
             old_baseline['results'] = args.baseline.json()
 
-            args.baseline = baseline.upgrade(old_baseline)
+            upgraded = baseline.upgrade(old_baseline)
+            # Keep the live collection's decisions attached to the migrated evidence, in case
+            # later processing reads from the collection rather than the upgraded dictionary.
+            args.baseline.audit = upgraded.get('audit', {})
+            args.baseline = upgraded
 
         baseline.save_to_file(args.baseline, filename=args.baseline_filename)
         print(

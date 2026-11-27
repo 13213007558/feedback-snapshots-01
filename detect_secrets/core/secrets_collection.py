@@ -1,6 +1,7 @@
 import multiprocessing as mp
 import os
 from collections import defaultdict
+from copy import deepcopy
 from typing import Any
 from typing import Dict
 from typing import Generator
@@ -35,12 +36,31 @@ class SecretsCollection:
         self.data: Dict[str, Set[PotentialSecret]] = defaultdict(set)
         self.root = root
 
+        # Human review evidence is stored separately from the scanned findings (v1.6 format).
+        # Keyed by `filename:hashed_secret:type`, so audit decisions survive finding identity
+        # changes and merges performed during a baseline upgrade.
+        self.audit: Dict[str, Dict[str, Any]] = {}
+
     @classmethod
     def load_from_baseline(cls, baseline: Dict[str, Any]) -> 'SecretsCollection':
         output = cls()
+        output.audit = deepcopy(baseline.get('audit', {}))
+
         for filename in baseline['results']:
             for item in baseline['results'][filename]:
                 secret = PotentialSecret.load_secret_from_dict({'filename': filename, **item})
+
+                # v1.6 keeps decisions in the separate `audit` section. Fall back to an inline
+                # `is_secret` so that older, non-upgraded dictionaries still load.
+                audit_entry = output.audit.get(
+                    f'{filename}:{secret.secret_hash}:{secret.type}',
+                )
+                if audit_entry is not None:
+                    secret.is_secret = audit_entry.get('is_secret')
+                    secret.audit_metadata = audit_entry
+                elif secret.is_secret is None and 'is_secret' in item:
+                    secret.is_secret = item['is_secret']
+
                 output[convert_local_os_path(filename)].add(secret)
 
         return output
@@ -202,12 +222,46 @@ class SecretsCollection:
         self.data = result
 
     def json(self) -> Dict[str, Any]:
-        """Custom JSON encoder"""
+        """Custom JSON encoder.
+
+        Note that, since v1.6, human review decisions are persisted separately via
+        :meth:`audit_json` rather than inline on these findings.
+        """
         output = defaultdict(list)
         for filename, secret in self:
             output[filename].append(secret.json())
 
         return dict(output)
+
+    def audit_json(self) -> Dict[str, Dict[str, Any]]:
+        """Serializes the human review evidence, kept apart from the scanned findings."""
+        section = deepcopy(self.audit)
+
+        for filename, secret in self:
+            identity = f'{filename}:{secret.secret_hash}:{secret.type}'
+            entry = section.get(identity)
+            if entry is None:
+                # A decision made outside of a migration (e.g. an interactive audit) still
+                # needs to survive a save, even without historical sources.
+                if secret.is_secret is None:
+                    continue
+                entry = {
+                    'type': secret.type,
+                    'filename': filename,
+                    'hashed_secret': secret.secret_hash,
+                    'is_secret': secret.is_secret,
+                    'status': 'labelled',
+                    'sources': [],
+                }
+                section[identity] = entry
+
+            entry['is_secret'] = secret.is_secret
+            if entry['status'] == 'needs_review' and secret.is_secret is not None:
+                # A reviewer resolved the conflicting merge: it is no longer pending review,
+                # while the original source evidence stays attached.
+                entry['status'] = 'labelled'
+
+        return section
 
     def exactly_equals(self, other: Any) -> bool:
         return self.__eq__(other, strict=True)      # type: ignore

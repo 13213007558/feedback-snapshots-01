@@ -8,6 +8,7 @@ from ..exceptions import NoLineNumberError
 from ..exceptions import SecretNotFoundOnSpecifiedLineError
 from ..types import SecretContext
 from ..util.code_snippet import get_code_snippet
+from .common import format_audit_evidence
 from .common import get_baseline_from_file
 from .common import get_raw_secret_from_file
 from .common import open_file
@@ -44,6 +45,7 @@ def _classify_secrets(iterator: BidirectionalIterator) -> bool:
                     current_index=iterator.index + 1,
                     num_total_secrets=len(iterator.collection),
                     secret=secret,
+                    header=format_audit_evidence(secret),
                     snippet=get_code_snippet(
                         lines=open_file(secret.filename).raw_lines,
                         line_number=secret.line_number,
@@ -59,6 +61,7 @@ def _classify_secrets(iterator: BidirectionalIterator) -> bool:
                     current_index=iterator.index + 1,
                     num_total_secrets=len(iterator.collection),
                     secret=secret,
+                    header=format_audit_evidence(secret),
                     error=e,
                 ),
             )

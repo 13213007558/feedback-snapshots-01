@@ -150,7 +150,15 @@ class TestModifiesBaselineFromVersionChange:
             f.seek(0)
             data = json.loads(f.read())
 
-            assert data['results'][str(Path(self.FILENAME))][0]['is_secret']
+            # v1.6 keeps human review decisions in the separate `audit` section.
+            finding = data['results'][str(Path(self.FILENAME))][0]
+            assert 'is_secret' not in finding
+            identity = '{}:{}:{}'.format(
+                str(Path(self.FILENAME)),
+                finding['hashed_secret'],
+                finding['type'],
+            )
+            assert data['audit'][identity]['is_secret'] is True
 
     def test_maintains_slim_mode(self):
         with self.get_baseline_file(

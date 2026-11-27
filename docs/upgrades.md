@@ -71,5 +71,23 @@ scripts/bump-version
 
 ### Pushing to PyPi
 
-Once the tag from `scripts/bump-version` has been created and pushed to the repository, the pypi
-github action will automatically start and publish the package to pypi.
+Once the tag from `scripts/bump-version` has been created and pushed to the repository, the
+pypi github action will automatically start and publish the package to pypi.
+
+## Baseline Format: v1.6
+
+Starting with `1.6.0`, human review evidence is stored separately from the scanned findings:
+
+- `results` only contains finding data (type, location, fingerprint, verification status).
+  The inline `is_secret` field is no longer written; old baselines still load and are upgraded.
+- A top-level `audit` section holds the review decisions, keyed by
+  `filename:hashed_secret:type`. Each entry records its `status` (`labelled`, `unlabelled`, or
+  `needs_review`), the effective `is_secret` value, and the full list of contributing `sources`
+  with their original fingerprints and decisions.
+
+An old baseline may ship a `fingerprint_updates` table (old fingerprint -> new fingerprint) to
+describe how a unified configuration collapses distinct findings onto one new fingerprint. The
+`v1_6` upgrade applies that mapping, merges the affected findings into one candidate, and moves
+the review evidence into the `audit` section. When the inherited decisions conflict, the merged
+entry is marked `needs_review` and stays in the audit queue: no automatic decision is made, and
+no contributing source is discarded.

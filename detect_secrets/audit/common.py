@@ -37,6 +37,46 @@ def get_baseline_from_file(filename: str) -> SecretsCollection:
         raise InvalidBaselineError
 
 
+def format_audit_evidence(secret: PotentialSecret) -> Optional[str]:
+    """
+    Renders the review evidence carried over during a baseline upgrade (if any), so that the
+    reviewer can still see every source that contributed to the current finding. Returns None
+    when no migrated evidence exists for this secret.
+    """
+    metadata = getattr(secret, 'audit_metadata', None)
+    if not metadata:
+        return None
+
+    lines = [
+        'Review status: {status}'.format(status=metadata.get('status', 'unlabelled')),
+    ]
+
+    for record in metadata.get('sources', []):
+        decision = record.get('is_secret')
+        if decision is True:
+            decision_text = 'secret'
+        elif decision is False:
+            decision_text = 'false positive'
+        else:
+            decision_text = 'no decision'
+
+        line = (
+            f"- {record['source']}: {decision_text} "
+            f"(fingerprint {record['hashed_secret']}"
+        )
+        if record.get('migrated_hashed_secret'):
+            line += f" -> {record['migrated_hashed_secret']}"
+        line += ')'
+        lines.append(line)
+
+    if metadata.get('status') == 'needs_review':
+        lines.append(
+            'Inherited decisions conflict on the merged fingerprint: manual review required.',
+        )
+
+    return '\n'.join(lines)
+
+
 @lru_cache(maxsize=1)
 def open_file(filename: str) -> 'LineGetter':
     return LineGetter(filename)

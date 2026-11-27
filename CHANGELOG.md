@@ -25,6 +25,25 @@ If you love `detect-secrets`, please star our project on GitHub to show your sup
 [@xxxx]: https://github.com/xxxx
 -->
 
+### v1.6.0
+##### Unreleased
+
+#### :boom: Breaking Changes
+- Baseline format bumped to `1.6.0`. Human review decisions (`is_secret`) are no longer stored
+  inline on findings; they are migrated into a dedicated top-level `audit` section, keeping
+  review evidence separate from scanned finding data.
+
+#### :tada: New Features
+- Added the `v1_6` baseline upgrade. It migrates finding data and audit evidence separately,
+  applies a baseline-supplied `fingerprint_updates` table when a unified configuration maps
+  distinct old fingerprints onto one new fingerprint, and merges the affected findings into a
+  single candidate while preserving every contributing source's evidence.
+- When the inherited human decisions conflict on a merged fingerprint, the entry is held with
+  `status: needs_review` (and therefore remains in the audit queue) instead of guessing an
+  outcome. No contributing source is discarded.
+- The audit screen now displays the retained review evidence (source, prior decision, and the
+  old-to-new fingerprint mapping) for migrated and merged findings.
+
 ### v1.5.0
 ##### May 6th, 2024
 
