@@ -1,5 +1,6 @@
 require 'logger'
 require 'devise'
+require 'devise_two_factor/audit'
 require 'devise_two_factor/models'
 require 'devise_two_factor/strategies'
 

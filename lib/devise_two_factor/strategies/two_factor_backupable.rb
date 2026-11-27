@@ -18,7 +18,15 @@ module Devise
 
       def validate_backup_code(resource)
         return if params[scope].nil? || params[scope]['otp_attempt'].nil?
-        resource.invalidate_otp_backup_code!(params[scope]['otp_attempt'])
+
+        consumed = resource.invalidate_otp_backup_code!(params[scope]['otp_attempt'])
+        if consumed
+          env[DeviseTwoFactor::Audit::CONSUMPTION_CONTEXT_KEY] = {
+            scope: scope,
+            security_identifier: resource.audit_security_identifier
+          }
+        end
+        consumed
       end
     end
   end
