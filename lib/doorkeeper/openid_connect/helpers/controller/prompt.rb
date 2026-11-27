@@ -15,6 +15,17 @@ module Doorkeeper
               priority.find_index(prompt).to_i
             end
 
+            # Bind the requested interaction envelope to this request before any
+            # redirect, so the resumed request cannot be made with a wider or
+            # different set of prompts than it started with. Requests without a
+            # `prompt` parameter and `prompt=none` requests never open a
+            # binding: the latter must stay stateless and fail closed through
+            # the regular silent handling below.
+            if prompt_values.any? && !prompt_values.include?("none") && oidc_authorization_request?
+              oidc_open_authorization_binding!(prompt_values)
+            end
+            oidc_enforce_authorization_binding!(prompt_values)
+
             prompt_values.each do |prompt|
               apply_oidc_prompt!(prompt, prompt_values, owner)
             end
@@ -113,6 +124,15 @@ module Doorkeeper
           def select_account_for_oidc_resource_owner(owner)
             clear_oidc_response
             return_to = return_without_oidc_prompt_param("select_account")
+
+            # Remember where the chooser must send the user back, on the
+            # per-request binding. The chooser completes the binding with the
+            # chosen account via #oidc_bind_selected_resource_owner!, so the
+            # resumed request authenticates exactly the account selected for
+            # this request.
+            binding = oidc_authorization_binding
+            binding[:return_to] = return_to
+            oidc_store_authorization_binding!(binding)
 
             instance_exec(
               owner,

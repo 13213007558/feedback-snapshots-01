@@ -2,6 +2,8 @@ Upgrading? [Migration from Old Versions](https://github.com/doorkeeper-gem/doork
 
 ## Unreleased
 
+- Bind the account chosen through `prompt=select_account` and the request's interaction envelope (`prompt` values) to that single authorization instead of to the whole browser session. Concurrent authorizations for the same client — including a `prompt=none` request in another tab — keep isolated session slots keyed by `state` (or a request fingerprint), so a silent request can neither reuse another request's selected account nor surface an interactive page. Adds host-controller helpers `oidc_bind_selected_resource_owner!`, `oidc_bound_resource_owner_id` and `oidc_authorization_binding_key`; the selected account is dropped once the authorization completes so it cannot be replayed.
+
 - Add entry here
 
 ## v2.1.0 (2026-10-20)

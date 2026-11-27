@@ -133,9 +133,14 @@
       <label>prompt</label>
       <select id="prompt">
         <option value="">(none)</option>
+        <option value="none">none (silent)</option>
         <option value="login">login</option>
         <option value="select_account">select_account</option>
       </select>
+    </div>
+    <div class="field">
+      <label>state</label>
+      <input type="text" id="state" placeholder="(optional correlation key)">
     </div>
     <div class="field">
       <label>max_age</label>
@@ -296,6 +301,7 @@
       p.set('code_challenge_method', 'S256');
     }
     if ($('prompt').value) p.set('prompt', $('prompt').value);
+    if ($('state').value !== '') p.set('state', $('state').value);
     if ($('max_age').value !== '') p.set('max_age', $('max_age').value);
     if ($('force_consent').checked) p.set('force_consent', '1');
 

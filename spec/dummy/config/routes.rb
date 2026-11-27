@@ -11,6 +11,10 @@ Rails.application.routes.draw do
 
   root 'dummy#index'
 
+  get 'select_account' => 'oidc_flows#choose_account'
+  post 'select_account' => 'oidc_flows#select_account'
+  get 'reauthenticate' => 'oidc_flows#reauthenticate'
+
   post 'users' => 'dummy#create_user', as: :users
   post 'applications' => 'dummy#create_application', as: :applications
   match 'callback' => 'dummy#callback', via: %i[get post], as: :callback

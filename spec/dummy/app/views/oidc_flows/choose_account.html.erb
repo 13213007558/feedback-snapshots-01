@@ -1,0 +1,13 @@
+<h1>Select an account</h1>
+<p class="hint">This page is shown only for an interactive authorization request.</p>
+
+<%= form_with url: select_account_path, method: :post do |f| %>
+  <%= hidden_field_tag :return_to, @return_to %>
+  <% @users.each do |user| %>
+    <div class="field">
+      <%= radio_button_tag :resource_owner_id, user.id %>
+      <%= label_tag "resource_owner_id_#{user.id}", "#{user.id} — #{user.name}" %>
+    </div>
+  <% end %>
+  <%= f.submit "Use this account" %>
+<% end %>

@@ -7,6 +7,9 @@ describe Doorkeeper::AuthorizationsController, type: :controller do
   let(:application) { create :application, scopes: default_scopes }
   let(:default_scopes) { "openid profile" }
   let(:token_attributes) { { application_id: application.id, resource_owner_id: user.id, scopes: default_scopes } }
+  let(:binding_session_key) do
+    Doorkeeper::OpenidConnect::Helpers::Controller::AuthorizationBinding::OIDC_AUTHORIZATION_BINDINGS_SESSION_KEY
+  end
 
   def authorize!(params = {})
     get :new, params: {
@@ -160,7 +163,7 @@ describe Doorkeeper::AuthorizationsController, type: :controller do
       it "honors prompt=login on a non-OIDC request" do
         authorize! scope: "profile", prompt: "login"
 
-        expect(response).to redirect_to("/reauthenticate")
+        expect(response.location).to start_with("/reauthenticate")
       end
 
       it "honors prompt=consent on a non-OIDC request" do
@@ -173,7 +176,7 @@ describe Doorkeeper::AuthorizationsController, type: :controller do
       it "honors prompt=select_account on a non-OIDC request" do
         authorize! scope: "profile", prompt: "select_account"
 
-        expect(response).to redirect_to("/select_account")
+        expect(response.location).to start_with("/select_account")
       end
 
       it "honors prompt=none on a non-OIDC request" do
@@ -444,7 +447,7 @@ describe Doorkeeper::AuthorizationsController, type: :controller do
       it "reauthenticates the user if logged in" do
         authorize! prompt: "login"
 
-        expect(response).to redirect_to("/reauthenticate")
+        expect(response.location).to start_with("/reauthenticate")
       end
 
       it "does not mutate the request's query parameters when building the return URL" do
@@ -492,7 +495,32 @@ describe Doorkeeper::AuthorizationsController, type: :controller do
       it "redirects to the select account screen" do
         authorize! prompt: "select_account"
 
-        expect(response).to redirect_to("/select_account")
+        expect(response.location).to start_with("/select_account")
+      end
+
+      it "opens a per-request authorization binding carrying the prompt envelope" do
+        authorize! prompt: "select_account"
+
+        bindings = session[binding_session_key]
+        expect(bindings).to be_present
+        binding = bindings.values.first
+        expect(binding[:prompts]).to eq ["select_account"]
+        expect(binding[:return_to]).to be_present
+      end
+
+      it "namespaces the binding under the request's state when present" do
+        authorize! prompt: "select_account", state: "corr-1"
+
+        bindings = session[binding_session_key]
+        expect(bindings).to have_key "corr-1"
+      end
+    end
+
+    context "with a prompt=none parameter" do
+      it "never opens an authorization binding" do
+        authorize! prompt: "none", current_user: nil
+
+        expect(session[binding_session_key]).to be_nil
       end
     end
 
@@ -507,27 +535,27 @@ describe Doorkeeper::AuthorizationsController, type: :controller do
     context "with multiple prompt values" do
       it "when select_account+login" do
         authorize! prompt: "select_account login"
-        expect(response).to redirect_to("/select_account")
+        expect(response.location).to start_with("/select_account")
       end
 
       it "when login+select_account" do
         authorize! prompt: "login select_account"
-        expect(response).to redirect_to("/select_account")
+        expect(response.location).to start_with("/select_account")
       end
 
       it "when consent+select_account" do
         authorize! prompt: "consent select_account"
-        expect(response).to redirect_to("/select_account")
+        expect(response.location).to start_with("/select_account")
       end
 
       it "when select_account+consent" do
         authorize! prompt: "select_account consent"
-        expect(response).to redirect_to("/select_account")
+        expect(response.location).to start_with("/select_account")
       end
 
       it "when login+consent" do
         authorize! prompt: "login consent"
-        expect(response).to redirect_to("/reauthenticate")
+        expect(response.location).to start_with("/reauthenticate")
       end
     end
 

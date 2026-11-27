@@ -43,12 +43,12 @@ Doorkeeper::OpenidConnect.configure do
     resource_owner.current_sign_in_at
   end
 
-  reauthenticate_resource_owner do |_resource_owner, _return_to|
-    redirect_to "/reauthenticate"
+  reauthenticate_resource_owner do |_resource_owner, return_to|
+    redirect_to "/reauthenticate?return_to=#{CGI.escape(return_to.to_s)}"
   end
 
-  select_account_for_resource_owner do |_resource_owner, _return_to|
-    redirect_to "/select_account"
+  select_account_for_resource_owner do |_resource_owner, return_to|
+    redirect_to "/select_account?return_to=#{CGI.escape(return_to.to_s)}"
   end
 
   subject do |resource_owner|
