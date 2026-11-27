@@ -77,12 +77,24 @@ module Devise
 
         if self.consumed_timestep != timestep
           self.consumed_timestep = timestep
+          migrate_legacy_otp_secret!
           save!(validate: false)
 
           return true
         end
 
         false
+      end
+
+      # If the OTP secret is still stored in the legacy format, copy it to the
+      # Rails encrypted attribute so the format upgrade is persisted by the
+      # same save that records the consumed timestep. If the save fails,
+      # neither the migration nor the consumption is persisted.
+      def migrate_legacy_otp_secret!
+        return if self[:otp_secret].present?
+
+        secret = legacy_otp_secret
+        self.otp_secret = secret if secret.present?
       end
 
       module ClassMethods

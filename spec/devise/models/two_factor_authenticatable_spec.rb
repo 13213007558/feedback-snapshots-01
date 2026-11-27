@@ -12,6 +12,11 @@ class TwoFactorAuthenticatableDouble
     nil
   end
 
+  # mimic ActiveRecord's attribute read used by the legacy migration check
+  def [](attribute)
+    public_send(attribute)
+  end
+
   define_model_callbacks :update
 
   devise :two_factor_authenticatable

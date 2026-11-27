@@ -163,6 +163,8 @@ You can now deploy your upgraded application and devise-two-factor should work a
 
 This gem will fall back to **reading** the OTP secret from the legacy columns if it cannot find one in the new `otp_secret` column. When you **write** a new OTP secret it will always be written to the new `otp_secret` column.
 
+Additionally, when a user successfully validates an OTP while their secret is still stored only in the legacy columns, the secret is copied to the new `otp_secret` column as part of the same save that records the consumed timestep. This means the format upgrade and the OTP consumption are always persisted together: if the save fails, neither is stored and the legacy value keeps being used on the next attempt.
+
 ### Phase 2: Clean up
 
 This "clean up" phase can happen at the same time as your initial deployment but teams managing existing apps will likely want to do clean-up as separate, later deployments.

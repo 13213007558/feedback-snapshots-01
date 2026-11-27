@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Upgrade a legacy (`encrypted_otp_secret`) OTP secret to the Rails encrypted `otp_secret` attribute upon successful OTP validation, persisted in the same save as the consumed timestep so a failed save migrates nothing
+
 # 6.4.1
 
 - Update gem spec metadata sourcecode URI
