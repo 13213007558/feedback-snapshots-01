@@ -110,6 +110,7 @@ module HTTP
     def auth: (String value) -> Session
     def basic_auth: (user: String, pass: String) -> Session
     def digest_auth: (user: String, pass: String) -> Session
+    def bound_auth: (material: untyped, resources: Array[untyped], ?aliases: Hash[untyped, untyped], attach: Hash[untyped, untyped]) -> Session
     def default_options: () -> Options
     def default_options=: (Hash[Symbol, untyped] | Options opts) -> Options
     def nodelay: (?bool enabled) -> Session
@@ -571,6 +572,47 @@ module HTTP
       def compute_response: (String algorithm, String ha1, String ha2, nonce: String, nonce_count: String, cnonce: String, qop: String?) -> String
       def hex_digest: (String algorithm, String data) -> String
       def build_header: (username: String, realm: String, nonce: String, uri: String, qop: String?, nonce_count: String, cnonce: String, response: String, opaque: String?, algorithm: String) -> String
+    end
+
+    class BoundAuth < Feature
+      ATTACH_HEADER: Symbol
+      ATTACH_QUERY: Symbol
+      ATTACH_LOCATIONS: Array[Symbol]
+      READ_ONLY_VERBS: Set[Symbol]
+      DEFAULT_ATTACH: Hash[Symbol, Symbol]
+
+      class BindingError < RequestError
+      end
+
+      attr_reader material: String
+      attr_reader resources: Array[URI]
+      attr_reader aliases: Hash[URI, URI]
+      attr_reader attach: Hash[Symbol, untyped]
+
+      def initialize: (material: untyped, resources: Array[untyped], ?aliases: Hash[untyped, untyped], attach: Hash[untyped, untyped]) -> void
+      def wrap_request: (Request request) -> Request
+      def hops: () -> Array[Hash[Symbol, untyped]]
+      def blocked: () -> Array[Hash[Symbol, untyped]]
+      def material_category: () -> String
+
+      private
+
+      def ensure_read_only!: (Request request) -> void
+      def resolve_resource: (URI uri) -> URI
+      def resource_for: (URI uri) -> URI?
+      def same_resource?: (URI left, URI right) -> bool
+      def resource_identity: (URI uri) -> [String, String]
+      def rebuild: (Request request) -> Request
+      def attach_material: (URI uri, Headers headers) -> void
+      def header_value: () -> String
+      def append_query_param: (URI uri, untyped name, untyped value) -> void
+      def record_hop: (Request request, URI resource) -> void
+      def block!: (Request request, String reason) -> void
+      def block_uri!: (URI uri) -> void
+      def normalize_resource: (untyped uri) -> URI
+      def normalize_aliases: (Hash[untyped, untyped] aliases) -> Hash[URI, URI]
+      def prepare_attach: (Hash[untyped, untyped] attach) -> Hash[Symbol, untyped]
+      def validate!: () -> void
     end
   end
 

@@ -147,6 +147,41 @@ HTTP.base_uri("https://api.example.com/v1").persistent do |http|
 end
 ```
 
+### Resource-Bound Authorization
+
+When a gateway hands you an authorization material that is only valid for
+specific business resources, use `bound_auth` to attach it solely to approved,
+read-only requests. The feature rewrites each request as a bodyless `GET`,
+attaches the material where the gateway indicates, and refuses to send anything
+that cannot be proven to target an approved resource or an approved path alias
+(a resource migration the gateway already consented to).
+
+```ruby
+http = HTTP.bound_auth(
+  material:  "tok_123",
+  resources: ["https://api.example.com/v1/orders/42"],
+  aliases:   { "https://api.example.com/v2/orders/42" =>
+               "https://api.example.com/v1/orders/42" },
+  attach:    { in: :header, name: "Authorization", scheme: "Bearer" }
+)
+
+http.get("https://api.example.com/v1/orders/42")
+# GET /v1/orders/42 with `Authorization: Bearer tok_123`
+
+http.get("https://api.example.com/v2/orders/42")
+# the approved alias keeps working with the same material
+
+http.get("https://api.example.com/v1/orders/99") # raises BoundAuth::BindingError
+http.post("https://api.example.com/v1/orders/42") # raises, not read-only
+```
+
+The binding matches on origin and path, so default query parameters the client
+adds are preserved and the approval stays verifiable on the request actually
+sent. Material can instead be attached as a query parameter with
+`attach: { in: :query, name: "access_token" }`. Each feature instance records
+the hops that carried material (`#hops`, including the material category) and
+the requests that were stopped before sending (`#blocked`, with the reason).
+
 ### Thread Safety
 
 Configured sessions are safe to share across threads:

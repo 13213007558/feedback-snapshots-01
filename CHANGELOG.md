@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- New opt-in `bound_auth` feature (`HTTP.bound_auth`) attaches a gateway-issued
+  authorization material only to read-only requests targeting an approved
+  resource or an approved path alias, so the approval is verifiable on the
+  request actually sent (including default query parameters) and survives an
+  approved resource migration. Requests outside the binding raise
+  `HTTP::Features::BoundAuth::BindingError` before anything is sent, and the
+  feature records the material carried by each hop (`#hops`) and why blocked
+  steps stopped (`#blocked`).
 - `HTTP.nodelay` (and `HTTP::Session#nodelay`) now accepts an optional boolean,
   so `HTTP.nodelay(false)` disables `TCP_NODELAY` for a session. ([#863])
 

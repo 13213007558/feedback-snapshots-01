@@ -282,6 +282,31 @@ module HTTP
       use(digest_auth: { user: user, pass: pass })
     end
 
+    # Enable resource-bound, read-only authorization
+    #
+    # Attaches the given authorization material only to read-only requests
+    # targeting an approved resource (or one of its approved path aliases).
+    # Requests outside the binding are rejected before they are sent.
+    #
+    # @example
+    #   HTTP.bound_auth(
+    #     material: "token-123",
+    #     resources: ["https://example.com/orders/42"],
+    #     attach: { in: :header, name: "Authorization", scheme: "Bearer" }
+    #   ).get("https://example.com/orders/42")
+    #
+    # @see Features::BoundAuth
+    # @param [#to_s] material the authorization material from the gateway
+    # @param [Array<#to_s>] resources URIs the material is valid for
+    # @param [Hash] aliases approved migration locations mapped to resources
+    # @param [Hash] attach where to attach the material
+    # @return [HTTP::Session]
+    # @api public
+    def bound_auth(material:, resources:, aliases: {}, attach: {})
+      use(bound_auth: { material: material, resources: resources,
+                        aliases: aliases, attach: attach })
+    end
+
     # Get options for HTTP
     #
     # @example
