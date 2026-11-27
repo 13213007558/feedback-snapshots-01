@@ -6,8 +6,10 @@ import threading
 from contextlib import contextmanager
 from threading import Thread
 
+from ._audit import FAILED, SUCCESS, AuditTracker, Receipt
 from ._colorizer import Colorizer
 from ._locks_machinery import create_handler_lock
+from ._simple_sinks import AsyncSink
 
 
 def prepare_colored_format(format_, ansi_level):
@@ -25,7 +27,7 @@ def memoize(function):
 
 
 class Message(str):
-    __slots__ = ("record",)
+    __slots__ = ("record", "audit_id")
 
 
 class Handler:
@@ -45,7 +47,9 @@ class Handler:
         error_interceptor,
         exception_formatter,
         id_,
-        levels_ansi_codes
+        levels_ansi_codes,
+        audit=False,
+        audit_tracker=None
     ):
         self._name = name
         self._sink = sink
@@ -61,6 +65,8 @@ class Handler:
         self._exception_formatter = exception_formatter
         self._id = id_
         self._levels_ansi_codes = levels_ansi_codes  # Warning, reference shared among handlers
+
+        self._audit_tracker = AuditTracker() if audit and audit_tracker is None else audit_tracker
 
         self._decolorized_format = None
         self._precolorized_formats = {}
@@ -200,10 +206,21 @@ class Handler:
             with self._protected_lock():
                 if self._stopped:
                     return
+                if self._audit_tracker is not None:
+                    str_record.audit_id = self._audit_tracker.register(record).id
                 if self._enqueue:
                     self._queue.put(str_record)
-                else:
+                elif isinstance(self._sink, AsyncSink):
                     self._sink.write(str_record)
+                else:
+                    try:
+                        self._sink.write(str_record)
+                    except Exception:
+                        if self._audit_tracker is not None:
+                            self._audit_tracker.resolve(str_record.audit_id, FAILED)
+                        raise
+                    if self._audit_tracker is not None:
+                        self._audit_tracker.resolve(str_record.audit_id, SUCCESS)
         except Exception:
             if not self._error_interceptor.should_catch():
                 raise
@@ -252,6 +269,22 @@ class Handler:
     @property
     def levelno(self):
         return self._levelno
+
+    @property
+    def audit_tracker(self):
+        return self._audit_tracker
+
+    def make_receipt(self, task_factory):
+        """Build an immutable :class:`~loguru._audit.Receipt` bounded by the current cutoff.
+
+        The coroutine objects needed to await in-flight writes are only created lazily by
+        ``task_factory`` when the receipt is actually awaited, so a synchronously read receipt
+        never leaves dangling coroutines.
+        """
+        if self._audit_tracker is None:
+            return None
+        cutoff = self._audit_tracker.cutoff()
+        return Receipt(self._id, self._audit_tracker, cutoff, task_factory)
 
     @staticmethod
     def _format_record(log_format, record):
@@ -337,7 +370,14 @@ class Handler:
                 try:
                     self._sink.write(message)
                 except Exception:
+                    if self._audit_tracker is not None:
+                        self._audit_tracker.resolve(message.audit_id, FAILED)
                     self._error_interceptor.print(message.record)
+                else:
+                    if self._audit_tracker is not None and not isinstance(
+                        self._sink, AsyncSink
+                    ):
+                        self._audit_tracker.resolve(message.audit_id, SUCCESS)
 
     def __getstate__(self):
         state = self.__dict__.copy()

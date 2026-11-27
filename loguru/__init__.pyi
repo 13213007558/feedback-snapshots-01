@@ -69,6 +69,31 @@ Catcher = NewType("Catcher", _GeneratorContextManager[None])
 Contextualizer = NewType("Contextualizer", _GeneratorContextManager[None])
 AwaitableCompleter = Awaitable[None]
 
+QUEUED: str
+SUCCESS: str
+FAILED: str
+PENDING: str
+
+class AuditEntry(NamedTuple):
+    id: int
+    status: str
+    record: Dict[str, Any]
+
+class Receipt(Awaitable["Receipt"]):
+    @property
+    def handler_id(self) -> int: ...
+    @property
+    def cutoff(self) -> int: ...
+    @property
+    def entries(self) -> Tuple[AuditEntry, ...]: ...
+    def __len__(self) -> int: ...
+    def __iter__(self): ...
+    def __getitem__(self, entry_id: int) -> AuditEntry: ...
+
+class ReceiptBook(Dict[int, Receipt], Awaitable["ReceiptBook"]):
+    def __await__(self): ...
+
+
 class Level(NamedTuple):
     name: str
     no: int
@@ -143,6 +168,7 @@ class BasicHandlerConfig(TypedDict, total=False):
     diagnose: bool
     enqueue: bool
     catch: bool
+    audit: bool
 
 class FileHandlerConfig(TypedDict, total=False):
     sink: Union[str, PathLikeStr]
@@ -155,6 +181,7 @@ class FileHandlerConfig(TypedDict, total=False):
     diagnose: bool
     enqueue: bool
     catch: bool
+    audit: bool
     rotation: Optional[
         Union[
             str,
@@ -188,6 +215,7 @@ class AsyncHandlerConfig(TypedDict, total=False):
     diagnose: bool
     enqueue: bool
     catch: bool
+    audit: bool
     context: Optional[Union[str, BaseContext]]
     loop: Optional[AbstractEventLoop]
 
@@ -216,7 +244,8 @@ class Logger:
         diagnose: bool = ...,
         enqueue: bool = ...,
         context: Optional[Union[str, BaseContext]] = ...,
-        catch: bool = ...
+        catch: bool = ...,
+        audit: bool = ...
     ) -> int: ...
     @overload
     def add(
@@ -233,7 +262,8 @@ class Logger:
         enqueue: bool = ...,
         catch: bool = ...,
         context: Optional[Union[str, BaseContext]] = ...,
-        loop: Optional[AbstractEventLoop] = ...
+        loop: Optional[AbstractEventLoop] = ...,
+        audit: bool = ...
     ) -> int: ...
     @overload
     def add(
@@ -250,6 +280,7 @@ class Logger:
         enqueue: bool = ...,
         context: Optional[Union[str, BaseContext]] = ...,
         catch: bool = ...,
+        audit: bool = ...,
         rotation: Optional[
             Union[
                 str,
@@ -274,6 +305,10 @@ class Logger:
     ) -> int: ...
     def remove(self, handler_id: Optional[int] = ...) -> None: ...
     def complete(self) -> AwaitableCompleter: ...
+    @overload
+    def receipt(self) -> ReceiptBook: ...
+    @overload
+    def receipt(self, handler_id: int) -> Receipt: ...
     @overload
     def catch(
         self,

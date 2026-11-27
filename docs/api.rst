@@ -26,6 +26,7 @@ API Reference
 
     * :meth:`~loguru._logger.Logger.remove`
     * :meth:`~loguru._logger.Logger.complete`
+    * :meth:`~loguru._logger.Logger.receipt`
     * :meth:`~loguru._logger.Logger.catch`
     * :meth:`~loguru._logger.Logger.opt`
     * :meth:`~loguru._logger.Logger.bind`

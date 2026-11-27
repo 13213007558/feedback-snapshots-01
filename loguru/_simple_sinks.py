@@ -3,6 +3,7 @@ import logging
 import weakref
 
 from ._asyncio_loop import get_running_loop, get_task_loop
+from ._audit import FAILED, SUCCESS
 
 
 class StreamSink:
@@ -133,11 +134,13 @@ class AsyncSink:
         An interceptor for handling errors.
     """
 
-    def __init__(self, function, loop, error_interceptor):
+    def __init__(self, function, loop, error_interceptor, audit_tracker=None):
         self._function = function
         self._loop = loop
         self._error_interceptor = error_interceptor
+        self._audit_tracker = audit_tracker
         self._tasks = weakref.WeakSet()
+        self._audit_ids = weakref.WeakKeyDictionary()
 
     def write(self, message):
         """Asynchronously write a message.
@@ -156,13 +159,21 @@ class AsyncSink:
         task = loop.create_task(coroutine)
 
         def check_exception(future):
-            if future.cancelled() or future.exception() is None:
+            if future.cancelled():
                 return
+            if future.exception() is None:
+                if self._audit_tracker is not None:
+                    self._audit_tracker.resolve(message.audit_id, SUCCESS)
+                return
+            if self._audit_tracker is not None:
+                self._audit_tracker.resolve(message.audit_id, FAILED)
             if not self._error_interceptor.should_catch():
                 raise future.exception()
             self._error_interceptor.print(message.record, exception=future.exception())
 
         task.add_done_callback(check_exception)
+        if self._audit_tracker is not None:
+            self._audit_ids[task] = message.audit_id
         self._tasks.add(task)
 
     def stop(self):
@@ -196,19 +207,27 @@ class AsyncSink:
         loop = get_running_loop()
         if get_task_loop(task) is not loop:
             return
+        audit_id = self._audit_ids.get(task) if self._audit_tracker is not None else None
         try:
             await task
         except Exception:
+            if audit_id is not None:
+                self._audit_tracker.resolve(audit_id, FAILED)
             pass  # Handled in "check_exception()"
+        else:
+            if audit_id is not None:
+                self._audit_tracker.resolve(audit_id, SUCCESS)
 
     def __getstate__(self):
         state = self.__dict__.copy()
         state["_tasks"] = None
+        state["_audit_ids"] = None
         return state
 
     def __setstate__(self, state):
         self.__dict__.update(state)
         self._tasks = weakref.WeakSet()
+        self._audit_ids = weakref.WeakKeyDictionary()
 
 
 class CallableSink:

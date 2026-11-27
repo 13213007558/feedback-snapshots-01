@@ -1,3 +1,8 @@
+Unreleased
+==========
+
+- Add an opt-in ``audit=True`` argument to ``logger.add()`` and a new ``logger.receipt()`` method producing an immutable, cutoff-bounded receipt of the records accepted by an audited sink, distinguishing successfully written records, explicit sink failures and records that remain unconfirmed (for instance because they are scheduled on another event loop).
+
 `0.8.0`_ (2026-11-11)
 =====================
 

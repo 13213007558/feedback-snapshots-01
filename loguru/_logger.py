@@ -112,6 +112,7 @@ from os.path import basename, splitext
 from threading import current_thread
 
 from . import _asyncio_loop, _colorama, _defaults, _filters
+from ._audit import AuditTracker, ReceiptBook
 from ._better_exceptions import ExceptionFormatter
 from ._colorizer import Colorizer, try_formatting
 from ._contextvars import ContextVar
@@ -284,6 +285,7 @@ class Logger:
         enqueue=_defaults.LOGURU_ENQUEUE,
         context=_defaults.LOGURU_CONTEXT,
         catch=_defaults.LOGURU_CATCH,
+        audit=_defaults.LOGURU_AUDIT,
         **kwargs
     ):
         r"""Add a handler sending log messages to a sink adequately configured.
@@ -326,6 +328,13 @@ class Logger:
             Whether errors occurring while sink handles logs messages should be automatically
             caught. If ``True``, an exception message is displayed on |sys.stderr| but the exception
             is not propagated to the caller, preventing your app to crash.
+        audit : |bool|, optional
+            Whether the handler should keep track of the terminal state of every record it accepts.
+            When enabled, an immutable and cutoff-bounded receipt can be produced with
+            :meth:`~Logger.receipt` to confirm which records were successfully written, which ones
+            failed, and which ones remain unconfirmed (for example because they are scheduled on
+            another event loop). It defaults to ``False`` and has no effect on the other handlers or
+            on the usual |complete| method.
         **kwargs
             Additional parameters that are only valid to configure a coroutine or file sink (see
             below).
@@ -848,6 +857,8 @@ class Logger:
 
         error_interceptor = ErrorInterceptor(catch, handler_id)
 
+        audit_tracker = AuditTracker() if audit else None
+
         if colorize is None and serialize:
             colorize = False
 
@@ -913,7 +924,7 @@ class Logger:
                     ) from e
 
             coro = sink if iscoroutinefunction(sink) else sink.__call__
-            wrapped_sink = AsyncSink(coro, loop, error_interceptor)
+            wrapped_sink = AsyncSink(coro, loop, error_interceptor, audit_tracker)
             encoding = "utf8"
             terminator = "\n"
             exception_prefix = ""
@@ -1066,6 +1077,8 @@ class Logger:
                 error_interceptor=error_interceptor,
                 exception_formatter=exception_formatter,
                 levels_ansi_codes=self._core.levels_ansi_codes,
+                audit=audit,
+                audit_tracker=audit_tracker,
             )
 
             handlers = self._core.handlers.copy()
@@ -1188,6 +1201,71 @@ class Logger:
                     yield from task.__await__()
 
         return AwaitableCompleter()
+
+    def receipt(self, handler_id=None):
+        """Return a cutoff-bounded, immutable receipt for audited handlers.
+
+        Only handlers added with ``audit=True`` produce receipts. The request first drains the
+        internal queue of each audited handler, exactly like |complete|, then captures a cutoff:
+        only records already accepted by the sink are reported. Subsequent logging calls can never
+        alter the returned receipt.
+
+        The returned object can be awaited so that asynchronous writes scheduled on the running
+        event loop reach a terminal state before the snapshot is materialized. It can also be read
+        directly, in which case the snapshot is materialized immediately and any record still in
+        flight (for instance a task owned by another event loop) is reported as pending.
+
+        Parameters
+        ----------
+        handler_id : :class:`int`, optional
+            The identifier of an audited handler, as returned by |add|. If ``None`` (the default),
+            a mapping of every audited handler identifier to its receipt is returned instead.
+
+        Returns
+        -------
+        :class:`~loguru._audit.Receipt` or :class:`~loguru._audit.ReceiptBook`
+            A receipt for the given handler, or a mapping of receipts for all audited handlers.
+
+        Raises
+        ------
+        ValueError
+            If ``handler_id`` does not exist, or if the targeted handler was not added with
+            ``audit=True``.
+        """
+        if not (handler_id is None or type(handler_id) is int):
+            raise TypeError(
+                "Invalid handler id, it should be an integer as returned "
+                "by the 'add()' method (or None), not: '%s'" % type(handler_id).__name__
+            )
+
+        with self._core.lock:
+            if handler_id is not None and handler_id not in self._core.handlers:
+                raise ValueError("There is no existing handler with id %d" % handler_id) from None
+
+            if handler_id is None:
+                handler_ids = [
+                    ident
+                    for ident, handler in self._core.handlers.items()
+                    if handler.audit_tracker is not None
+                ]
+            else:
+                if self._core.handlers[handler_id].audit_tracker is None:
+                    raise ValueError(
+                        "Handler %d was not added with 'audit=True', no receipt is available"
+                        % handler_id
+                    )
+                handler_ids = [handler_id]
+
+            receipts = ReceiptBook()
+
+            for ident in handler_ids:
+                handler = self._core.handlers[ident]
+                handler.complete_queue()
+                receipts[ident] = handler.make_receipt(handler.tasks_to_complete)
+
+        if handler_id is not None:
+            return receipts[handler_id]
+        return receipts
 
     def catch(
         self,
