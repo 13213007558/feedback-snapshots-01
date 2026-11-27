@@ -81,6 +81,20 @@ For baselines older than version 0.9, just recreate it.
 $ git diff --staged --name-only -z | xargs -0 detect-secrets-hook --baseline .secrets.baseline
 ```
 
+**Reviewing the Exact Staged Snapshot:**
+
+```bash
+$ detect-secrets-hook --staged --json --baseline .secrets.baseline app.py
+```
+
+With `--staged`, the files to check and the baseline are both read from the Git index,
+not the working tree, and neither the index nor the working tree is modified. The JSON
+output is a receipt that names the blob (and SHA-256 of its bytes) actually read for each
+input and for the baseline, whether the working tree still matches those blobs, the
+baseline version, and any staged rename provenance (`renamed_from`). This makes it
+possible to tell which snapshot a passing result refers to, including when the baseline
+was renamed and its update was staged together with the rename.
+
 **Scanning All Tracked Files:**
 
 ```bash

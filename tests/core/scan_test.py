@@ -107,3 +107,46 @@ def configure_plugins():
         ],
     }):
         yield
+
+
+class TestScanFileContents:
+    @staticmethod
+    def test_uses_the_given_path_for_filters_and_results():
+        content = 'http://username:whywouldyouusehttpforpasswords@example.com\n'
+        with transient_settings({'plugins_used': [{'name': 'BasicAuthDetector'}]}):
+            secrets = list(scan.scan_file_contents('test_data/not-on-disk.txt', content))
+
+        assert len(secrets) == 1
+        assert secrets[0].filename == 'test_data/not-on-disk.txt'
+        assert secrets[0].line_number == 1
+
+    @staticmethod
+    def test_applies_filename_filters_to_the_staged_path():
+        content = 'http://username:whywouldyouusehttpforpasswords@example.com\n'
+        with transient_settings({
+            'plugins_used': [{'name': 'BasicAuthDetector'}],
+            'filters_used': [{
+                'path': 'detect_secrets.filters.regex.should_exclude_file',
+                'pattern': [r'\.lock$'],
+            }],
+        }):
+            assert not list(scan.scan_file_contents('package.lock', content))
+            assert list(scan.scan_file_contents('app.txt', content))
+
+    @staticmethod
+    def test_does_not_require_the_file_to_exist():
+        content = 'http://username:whywouldyouusehttpforpasswords@example.com\n'
+        with transient_settings({'plugins_used': [{'name': 'BasicAuthDetector'}]}):
+            assert not os.path.exists('test_data/staged-only/app.txt')
+            assert list(scan.scan_file_contents('test_data/staged-only/app.txt', content))
+
+    @staticmethod
+    def test_yaml_transformers_still_apply_to_staged_content():
+        content = 'token: ZmFrZS1zdGFnZWQtc2VjcmV0LW1hcmtlci1hbHBoYS0wMDE\n'
+        with transient_settings({
+            'plugins_used': [{'name': 'Base64HighEntropyString', 'limit': 4.5}],
+        }):
+            secrets = list(scan.scan_file_contents('settings.yaml', content))
+
+        assert len(secrets) == 1
+        assert secrets[0].filename == 'settings.yaml'

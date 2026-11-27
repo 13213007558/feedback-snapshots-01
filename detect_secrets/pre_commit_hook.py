@@ -1,13 +1,18 @@
 import argparse
+import hashlib
 import json
 import os
+import subprocess
 import sys
 import textwrap
+from typing import Any
+from typing import Dict
 from typing import List
 from typing import Optional
 
 from detect_secrets.__version__ import VERSION
 from detect_secrets.core import baseline
+from detect_secrets.core import scan
 from detect_secrets.core.log import log
 from detect_secrets.core.secrets_collection import SecretsCollection
 from detect_secrets.core.usage import ParserBuilder
@@ -23,6 +28,9 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if args.verbose:    # pragma: no cover
         log.set_debug_level(args.verbose)
+
+    if args.staged:
+        return run_staged_review(args)
 
     # Find all secrets in files to be committed
     secrets = SecretsCollection()
@@ -77,10 +85,194 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     :raises: ValueError
     """
     output = ParserBuilder().add_pre_commit_arguments().parse_args(argv)
-    if output.baseline:
+    if output.baseline and not getattr(output, 'staged', False):
         raise_exception_if_baseline_file_is_unstaged(output.baseline_filename)
 
     return output
+
+
+def run_staged_review(args: argparse.Namespace) -> int:
+    """
+    Reviews the exact versions recorded in the Git index, without touching either the
+    index or the working tree.
+
+    The baseline is already loaded from its index blob (see `usage.baseline.parse_args`).
+    Here we scan each requested file from its index blob and emit a receipt that ties
+    every decision to the blob that was read.
+    """
+    secrets = SecretsCollection()
+    input_receipts: List[Dict[str, Any]] = []
+    missing: List[str] = []
+    unmerged: List[str] = []
+    binary: List[str] = []
+    try:
+        conflicted = git.get_unmerged_paths(*args.filenames)
+    except subprocess.CalledProcessError:
+        print('Unable to read the Git index for a staged review.', file=sys.stderr)
+        return 1
+
+    for filename in args.filenames:
+        staged = git.read_index_blob(filename)
+        if staged is None:
+            (unmerged if filename in conflicted else missing).append(filename)
+            input_receipts.append(_input_receipt(filename, None, filename in conflicted))
+            continue
+
+        input_receipts.append(_input_receipt(filename, staged, False))
+        if staged.content is None:
+            binary.append(filename)
+            continue
+
+        for secret in scan.scan_file_contents(staged.path, staged.content):
+            secrets[staged.path].add(secret)
+
+    baseline_collection = args.baseline
+    new_secrets = secrets
+    if baseline_collection is not None:
+        new_secrets = secrets - baseline_collection
+
+    baseline_version = getattr(args, 'baseline_version', None)
+    baseline_blob = getattr(args, 'baseline_blob', None)
+    version_consistent = baseline_version is None or baseline_version == VERSION
+
+    receipt: Dict[str, Any] = {
+        'mode': 'staged',
+        'tool_version': VERSION,
+        'baseline': _baseline_receipt(args, baseline_version, baseline_blob),
+        'inputs': input_receipts,
+        'mixed_worktree_and_index': sorted(
+            item['path'] for item in input_receipts
+            if item['staged'] and not item['worktree_matches_index']
+        ),
+        'new_secrets': new_secrets.json(),
+        'new_secret_count': len(new_secrets),
+        'version_consistent': version_consistent,
+        'decision': 'pass',
+        'blocking_reason': None,
+    }
+
+    if unmerged:
+        receipt['decision'] = 'block'
+        receipt['blocking_reason'] = 'unmerged-input'
+    elif missing:
+        receipt['decision'] = 'block'
+        receipt['blocking_reason'] = 'unstaged-input'
+    elif binary:
+        receipt['decision'] = 'block'
+        receipt['blocking_reason'] = 'binary-input'
+    elif not version_consistent:
+        receipt['decision'] = 'block'
+        receipt['blocking_reason'] = 'baseline-version-mismatch'
+    elif new_secrets:
+        receipt['decision'] = 'block'
+        receipt['blocking_reason'] = 'new-secrets'
+
+    if args.json:
+        print(json.dumps(receipt, indent=2, sort_keys=True))
+    else:
+        _print_staged_review(receipt, new_secrets)
+
+    return 0 if receipt['decision'] == 'pass' else 1
+
+
+def _blob_sha256(raw: bytes) -> str:
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _input_receipt(
+    filename: str,
+    staged: Optional[git.StagedContent],
+    unmerged: bool = False,
+) -> Dict[str, Any]:
+    worktree_blob = git.get_worktree_blob_id(filename)
+    if staged is None:
+        return {
+            'path': filename,
+            'staged': False,
+            'unmerged': unmerged,
+            'blob': None,
+            'blob_sha256': None,
+            'bytes': None,
+            'head_blob': git.get_head_blob_id(filename),
+            'worktree_blob': worktree_blob,
+            'worktree_matches_index': False,
+        }
+
+    return {
+        'path': staged.path,
+        'staged': True,
+        'unmerged': False,
+        'blob': staged.object_id,
+        'blob_sha256': _blob_sha256(staged.raw),
+        'bytes': len(staged.raw),
+        'head_blob': git.get_head_blob_id(staged.path),
+        'worktree_blob': worktree_blob,
+        'worktree_matches_index': worktree_blob == staged.object_id,
+    }
+
+
+def _baseline_receipt(
+    args: argparse.Namespace,
+    baseline_version: Optional[str],
+    baseline_blob: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    if not getattr(args, 'baseline_filename', None):
+        return None
+
+    filename = args.baseline_filename
+    staged = git.read_index_blob(filename)
+    worktree_blob = git.get_worktree_blob_id(filename)
+
+    baseline: Dict[str, Any] = {
+        'path': filename,
+        'blob': staged.object_id if staged else baseline_blob,
+        'blob_sha256': _blob_sha256(staged.raw) if staged else None,
+        'version': baseline_version,
+        'version_consistent': baseline_version is None or baseline_version == VERSION,
+        'renamed_from': getattr(args, 'baseline_rename_source', None),
+        'approved_secret_count': len(args.baseline) if args.baseline is not None else 0,
+        'worktree_blob': worktree_blob,
+        'worktree_matches_index': bool(
+            staged and worktree_blob == staged.object_id,
+        ),
+    }
+
+    return baseline
+
+
+def _print_staged_review(receipt: Dict[str, Any], new_secrets: SecretsCollection) -> None:
+    baseline = receipt['baseline']
+    if baseline:
+        print(
+            'Baseline (index): {path} @ {blob} (version {version}{rename})'.format(
+                path=baseline['path'],
+                blob=baseline['blob'],
+                version=baseline['version'],
+                rename=(
+                    f", renamed from {baseline['renamed_from']}"
+                    if baseline['renamed_from'] else ''
+                ),
+            ),
+        )
+
+    for item in receipt['inputs']:
+        print(
+            'Input (index): {path} @ {blob} (working tree {state})'.format(
+                path=item['path'],
+                blob=item['blob'],
+                state=(
+                    'matches index' if item['worktree_matches_index']
+                    else 'differs from index'
+                ),
+            ),
+        )
+
+    if receipt['blocking_reason'] == 'new-secrets':
+        pretty_print_diagnostics(new_secrets)
+    elif receipt['blocking_reason']:
+        print(f'Blocked: {receipt["blocking_reason"]}')
+    else:
+        print('No new secrets found in the staged content.')
 
 
 def raise_exception_if_baseline_file_is_unstaged(filename: str) -> None:

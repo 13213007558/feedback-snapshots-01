@@ -1,5 +1,7 @@
+import io
 import os
 import subprocess
+from contextlib import contextmanager
 from typing import Any
 from typing import cast
 from typing import Generator
@@ -166,6 +168,61 @@ def scan_file(filename: str) -> Generator[PotentialSecret, None, None]:
         return
 
 
+def scan_file_contents(filename: str, content: str) -> Generator[PotentialSecret, None, None]:
+    """
+    Scans `content` as if it were the contents of `filename`.
+
+    This is used when the version to inspect is not the working tree copy (e.g. the
+    staged blob), but filters and transformers still need the original path.
+    """
+    try:
+        if not get_plugins():   # pragma: no cover
+            log.error('No plugins to scan with!')
+            return
+    except FileNotFoundError:
+        log.error('Unable to load plugins!')
+        return
+
+    # The caller supplied the content, so the path does not need to exist on disk.
+    with _ignore_missing_files():
+        if _is_filtered_out(required_filter_parameters=['filename'], filename=filename):
+            return
+
+        buffer = io.StringIO(content)
+        buffer.name = filename     # type: ignore[attr-defined]
+
+        log.info(f'Checking file: {filename}')
+        has_secret = False
+        for lines in _get_lines_from_buffer(cast(NamedIO, buffer)):
+            for secret in _process_line_based_plugins(
+                lines=list(enumerate(lines, start=1)),
+                filename=filename,
+            ):
+                has_secret = True
+                yield secret
+
+            if has_secret:
+                break
+
+
+@contextmanager
+def _ignore_missing_files() -> Generator[None, None, None]:
+    """
+    Temporarily disables the on-disk existence check, so in-memory content can be scanned
+    under a path that is not present in the working tree (e.g. a staged-only file).
+    """
+    path = 'detect_secrets.filters.common.is_invalid_file'
+    settings = get_settings()
+    original = settings.filters.get(path)
+    settings.disable_filters(path)
+    try:
+        yield
+    finally:
+        if original is not None:
+            settings.filters[path] = original
+        get_filters.cache_clear()
+
+
 def scan_diff(diff: str) -> Generator[PotentialSecret, None, None]:
     """
     :raises: ImportError
@@ -260,24 +317,27 @@ def _get_lines_from_file(filename: str) -> Generator[List[str], None, None]:
     """
     with open(filename) as f:
         log.info(f'Checking file: {filename}')
+        yield from _get_lines_from_buffer(cast(NamedIO, f))
 
-        try:
-            lines = get_transformed_file(cast(NamedIO, f))
-            if not lines:
-                lines = f.readlines()
-        except UnicodeDecodeError:
-            # We flat out ignore binary files
-            return
 
-        yield lines
-
-        # If the above lines don't prove to be useful to the caller, try using eager transformers.
-        f.seek(0)
-        lines = get_transformed_file(cast(NamedIO, f), use_eager_transformers=True)
+def _get_lines_from_buffer(f: NamedIO) -> Generator[List[str], None, None]:
+    try:
+        lines = get_transformed_file(f)
         if not lines:
-            return
+            lines = f.readlines()
+    except UnicodeDecodeError:
+        # We flat out ignore binary files
+        return
 
-        yield lines
+    yield lines
+
+    # If the above lines don't prove to be useful to the caller, try using eager transformers.
+    f.seek(0)
+    lines = get_transformed_file(f, use_eager_transformers=True)
+    if not lines:
+        return
+
+    yield lines
 
 
 def _get_lines_from_diff(diff: str) -> Generator[Tuple[str, List[Tuple[int, str]]], None, None]:
