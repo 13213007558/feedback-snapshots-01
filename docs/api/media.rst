@@ -80,6 +80,70 @@ do the heavy lifting for you.
     will only process request media the first time it is referenced. Subsequent
     interactions will use a cached object.
 
+.. _media_raw_body:
+
+Verifying the Raw Request Body
+------------------------------
+
+Some endpoints, such as callbacks and webhooks, must verify a signature over
+the *exact* bytes that were sent before the body is deserialized. Use
+:meth:`~falcon.Request.get_raw_body` (or
+:meth:`~falcon.asgi.Request.get_raw_body` for ASGI) for this purpose:
+
+.. tab-set::
+
+    .. tab-item:: WSGI
+
+        .. code:: python
+
+            import falcon
+
+
+            class CallbackResource:
+                def on_post(self, req, resp):
+                    # Buffer and verify the exact bytes that were sent.
+                    body = req.get_raw_body()
+                    verify_signature(body, req.get_header('X-Signature'))
+
+                    # The media handler still receives the complete body.
+                    payload = req.get_media()
+                    resp.media = {'received': payload}
+
+    .. tab-item:: ASGI
+
+        .. code:: python
+
+            import falcon
+
+
+            class CallbackResource:
+                async def on_post(self, req, resp):
+                    body = await req.get_raw_body()
+                    verify_signature(body, req.get_header('X-Signature'))
+
+                    payload = await req.get_media()
+                    resp.media = {'received': payload}
+
+Falcon buffers the body the first time ``get_raw_body()`` is called and
+transparently replays it to :meth:`~falcon.Request.get_media`,
+:attr:`~falcon.Request.bounded_stream` (and the ASGI equivalents), so a
+middleware or hook that inspects the body will not starve the responder.
+Call ``get_raw_body()`` *before* ``get_media()``; the reverse order is refused
+with :class:`~falcon.OperationNotAllowed`, since the original bytes are not
+retained by the standard media code path.
+
+The amount of data that will be buffered is bounded by
+:attr:`~falcon.RequestOptions.max_body_size` (default 8 MiB):
+
+* :class:`~falcon.RequestBodyTooLarge` (HTTP 413) is raised if the body
+  exceeds the limit.
+* :class:`~falcon.RequestBodyIncomplete` (HTTP 400) is raised if the client
+  disconnects, or otherwise stops sending data, after a partial body has been
+  received. In this case neither a partial signature check nor a partial
+  deserialization can succeed.
+
+.. versionadded:: 4.5
+
 .. _media_validation:
 
 Validating Media

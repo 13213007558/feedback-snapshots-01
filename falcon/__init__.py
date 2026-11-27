@@ -149,6 +149,8 @@ __all__ = (
     'MultipartParseError',
     'OperationNotAllowed',
     'PayloadTypeError',
+    'RequestBodyIncomplete',
+    'RequestBodyTooLarge',
     'UnsupportedError',
     'UnsupportedScopeError',
     'WebSocketDisconnected',
@@ -403,6 +405,8 @@ from falcon.errors import MediaValidationError
 from falcon.errors import MultipartParseError
 from falcon.errors import OperationNotAllowed
 from falcon.errors import PayloadTypeError
+from falcon.errors import RequestBodyIncomplete
+from falcon.errors import RequestBodyTooLarge
 from falcon.errors import UnsupportedError
 from falcon.errors import UnsupportedScopeError
 from falcon.errors import WebSocketDisconnected

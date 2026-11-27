@@ -98,6 +98,8 @@ __all__ = (
     'MultipartParseError',
     'OperationNotAllowed',
     'PayloadTypeError',
+    'RequestBodyIncomplete',
+    'RequestBodyTooLarge',
     'UnsupportedError',
     'UnsupportedScopeError',
     'WebSocketDisconnected',
@@ -2716,6 +2718,112 @@ class MultipartParseError(MediaMalformedError):
             title='Malformed multipart/form-data request media',
             description=description,
             **kwargs,  # type: ignore[arg-type]
+        )
+
+
+class RequestBodyTooLarge(HTTPError):
+    """413 Content Too Large.
+
+    The request body exceeds the configured
+    :attr:`~falcon.RequestOptions.max_body_size` limit.
+
+    This exception is raised by
+    :meth:`Request.get_raw_body() <falcon.Request.get_raw_body>` (and the
+    corresponding ASGI method) when the request body is buffered for raw
+    access and would exceed the configured maximum size.
+
+    Keyword Args:
+        title (str): Error title (default '413 Content Too Large').
+        description (str): Human-friendly description of the error, along with
+            a helpful suggestion or two.
+        headers (dict or list): A ``dict`` of header names and values
+            to set, or a ``list`` of (*name*, *value*) tuples. Both *name* and
+            *value* must be of type ``str`` or ``StringType``, and only
+            character values 0x00 through 0xFF may be used on platforms that
+            use wide characters.
+        href (str): A URL someone can visit to find out more information
+            (default ``None``). Unicode characters are percent-encoded.
+        href_text (str): If href is given, use this as the friendly
+            title/description for the link (default 'API documentation
+            for this error').
+        code (int): An internal code that customers can reference in their
+            support request or to help them when searching for knowledge
+            base articles related to this error (default ``None``).
+    """
+
+    def __init__(
+        self,
+        *,
+        title: str | None = None,
+        description: str | None = None,
+        headers: HeaderArg | None = None,
+        **kwargs: HTTPErrorKeywordArguments,
+    ) -> None:
+        super().__init__(
+            status.HTTP_413,
+            title=title,
+            description=description,
+            headers=headers,
+            **kwargs,  # type: ignore[arg-type]
+        )
+
+
+class RequestBodyIncomplete(HTTPBadRequest):
+    """400 Bad Request.
+
+    The request body was interrupted before the entire payload could be read.
+
+    This exception is raised by
+    :meth:`Request.get_raw_body() <falcon.Request.get_raw_body>` (and the
+    corresponding ASGI method) when the client disconnects, or otherwise
+    stops sending data, after a partial body has already been received. A
+    partial body must never be handed off to a media handler or used to
+    satisfy a signature check.
+
+    All the arguments are defined as keyword-only.
+
+    Keyword Args:
+        title (str): Error title (default '400 Bad Request').
+        description (str): Human-friendly description of the error.
+            Defaults to a message that includes the number of bytes that
+            were received before the interruption.
+        headers (dict or list): A ``dict`` of header names and values
+            to set, or a ``list`` of (*name*, *value*) tuples.
+        href (str): A URL someone can visit to find out more information
+            (default ``None``). Unicode characters are percent-encoded.
+        href_text (str): If href is given, use this as the friendly
+            title/description for the link (default 'API documentation
+            for this error').
+        code (int): An internal code that customers can reference in their
+            support request or to help them when searching for knowledge
+            base articles related to this error (default ``None``).
+    """
+
+    bytes_received: int
+    """Number of body bytes that were received before the interruption."""
+
+    def __init__(
+        self,
+        bytes_received: int = 0,
+        *,
+        title: str | None = None,
+        description: str | None = None,
+        headers: HeaderArg | None = None,
+        **kwargs: HTTPErrorKeywordArguments,
+    ) -> None:
+        self.bytes_received = bytes_received
+
+        if description is None:
+            description = (
+                'The request body was interrupted after receiving {} '
+                'byte(s).'.format(bytes_received)
+            )
+
+        super().__init__(
+            title=title,
+            description=description,
+            headers=headers,
+            **kwargs,
         )
 
 

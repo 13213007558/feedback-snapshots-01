@@ -114,6 +114,7 @@ class Request:
         'uri_template',
         '_media',
         '_media_error',
+        '_raw_body',
         'is_websocket',
     )
     _cookies: dict[str, list[str]] | None = None
@@ -321,6 +322,7 @@ class Request:
 
         self.stream = env['wsgi.input']
         self._bounded_stream: BoundedStream | None = None  # Lazy wrapping
+        self._raw_body: bytes | None = None
 
         # PERF(kgriffs): Technically, we should spend a few more
         # cycles and parse the content type for real, but
@@ -1084,6 +1086,95 @@ class Request:
                     netloc_value += ':' + port
 
         return netloc_value
+
+    def get_raw_body(self) -> bytes:
+        """Return the raw bytes of the request body.
+
+        The first time this method is called, the entire request body is
+        buffered and cached. The result is returned unchanged on subsequent
+        calls, and :meth:`get_media` will replay the same bytes to the
+        configured media handler, so that a body verification step does not
+        consume the body out from under the application::
+
+            # Verify the signature against the exact bytes that were sent.
+            body = req.get_raw_body()
+            verify_signature(body, req.get_header('X-Signature'))
+
+            # The media handler still sees the complete body.
+            payload = req.get_media()
+
+        Unlike :attr:`bounded_stream`, this method never raises or silently
+        returns a truncated payload when the client disconnects midway through
+        the body. Instead, :class:`~falcon.RequestBodyIncomplete` is raised so
+        that neither a partial signature check nor a partial deserialization
+        can succeed.
+
+        Warning:
+            This operation buffers the entire body in memory. It also
+            necessarily consumes the request stream, although the buffered
+            bytes are transparently replayed to subsequent readers within the
+            framework, including :meth:`get_media`.
+
+        Returns:
+            bytes: The raw request body.
+
+        Raises:
+            RequestBodyTooLarge: The body exceeds
+                :attr:`RequestOptions.max_body_size`.
+            RequestBodyIncomplete: The body was interrupted before the
+                expected number of bytes could be read.
+
+        .. versionadded:: 4.5
+        """
+        if self._raw_body is not None:
+            return self._raw_body
+
+        if self._media is not _UNSET or self._media_error is not None:
+            # NOTE(caselit): The body was already consumed by get_media(),
+            #   which does not retain the original bytes. Refuse rather than
+            #   silently returning a truncated (empty) body.
+            raise errors.OperationNotAllowed(
+                'The raw request body is unavailable after get_media() has '
+                'consumed the request stream. Call get_raw_body() first.'
+            )
+
+        content_length = self.content_length or 0
+        max_body_size = self.options.max_body_size
+
+        if max_body_size and content_length > max_body_size:
+            self._raise_body_too_large(max_body_size)
+
+        stream = self.bounded_stream
+
+        if content_length == 0:
+            self._raw_body = b''
+            return self._raw_body
+
+        # NOTE(caselit): A short read does not necessarily mean the source was
+        #   interrupted; some WSGI input wrappers may return fewer bytes than
+        #   requested even when more data is available. Keep reading until the
+        #   expected number of bytes has been received, or the stream signals
+        #   EOF (in which case the source was interrupted).
+        chunks: list[bytes] = []
+        remaining = content_length
+        while remaining > 0:
+            chunk = stream.read(remaining)
+            if not chunk:
+                break
+
+            chunks.append(chunk)
+            remaining -= len(chunk)
+
+        body = chunks[0] if len(chunks) == 1 else b''.join(chunks)
+
+        if len(body) < content_length:
+            raise errors.RequestBodyIncomplete(len(body))
+
+        self._raw_body = body
+        # Replace the consumed stream with a replayable one so that media
+        # handlers and any other downstream readers still see the whole body.
+        self._bounded_stream = BoundedStream(BytesIO(body), len(body))
+        return self._raw_body
 
     def get_media(self, default_when_empty: UnsetOr[Any] = _UNSET) -> Any:
         """Return a deserialized form of the request stream.
@@ -2886,6 +2977,15 @@ class Request:
 
         return BoundedStream(self.env['wsgi.input'], content_length)
 
+    @staticmethod
+    def _raise_body_too_large(max_body_size: int) -> None:
+        raise errors.RequestBodyTooLarge(
+            description=(
+                'The request body exceeds the configured maximum size '
+                'of {} bytes.'.format(max_body_size)
+            )
+        )
+
     def _parse_form_urlencoded(self) -> None:
         content_length = self.content_length
         if not content_length:
@@ -3030,6 +3130,23 @@ class RequestOptions:
     By default, handlers are provided for the ``application/json``,
     ``application/x-www-form-urlencoded`` and ``multipart/form-data`` media types.
     """
+    max_body_size: int
+    """Maximum number of bytes that may be buffered by
+    :meth:`Request.get_raw_body() <falcon.Request.get_raw_body>` (default
+    8 MiB).
+
+    This limit only applies when the raw request body is explicitly buffered
+    (for example, in order to verify a callback's signature before handing the
+    body off to a media handler). Regular media deserialization via
+    :meth:`~falcon.Request.get_media` is not affected by this option.
+
+    If the request body exceeds this limit,
+    :class:`~falcon.RequestBodyTooLarge` is raised.
+
+    Set to ``0`` to disable the limit (not recommended for public endpoints).
+
+    .. versionadded:: 4.5
+    """
 
     __slots__ = (
         'keep_blank_qs_values',
@@ -3038,6 +3155,7 @@ class RequestOptions:
         'strip_url_path_trailing_slash',
         'default_media_type',
         'media_handlers',
+        'max_body_size',
     )
 
     def __init__(self) -> None:
@@ -3047,3 +3165,4 @@ class RequestOptions:
         self.strip_url_path_trailing_slash = False
         self.default_media_type = DEFAULT_MEDIA_TYPE
         self.media_handlers = Handlers()
+        self.max_body_size = 8 * 1024 * 1024

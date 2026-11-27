@@ -50,6 +50,13 @@ __all__ = ('Request',)
 _SINGLETON_HEADERS_BYTESTR = frozenset([h.encode() for h in SINGLETON_HEADERS])
 
 
+async def _no_more_body() -> AsgiEvent:
+    # NOTE(caselit): The in-memory replay stream is preloaded via its first
+    #   event, so receive() should never be called. Return an empty terminal
+    #   event defensively rather than blocking.
+    return {'type': 'http.request', 'body': b'', 'more_body': False}
+
+
 class Request(request.Request):
     """Represents a client's HTTP request.
 
@@ -98,6 +105,7 @@ class Request(request.Request):
     _cached_uri: str | None = None
     _media: UnsetOr[Any] = _UNSET
     _media_error: Exception | None = None
+    _raw_body: bytes | None = None
     _stream: BoundedStream | None = None
 
     scope: AsgiRequestScope
@@ -236,6 +244,7 @@ class Request(request.Request):
 
         # PERF(vytas): Fall back to class variable(s) when unset.
         # self._stream = None
+        # self._raw_body = None
         self._receive: AsgiReceive = receive
         self._first_event: AsgiEvent | None = first_event
 
@@ -573,6 +582,92 @@ class Request(request.Request):
                     netloc_value = f'{netloc_value}:{port}'
 
         return netloc_value
+
+    async def get_raw_body(self) -> bytes:  # type: ignore[override]
+        """Return the raw bytes of the request body.
+
+        The first time this method is called, the entire request body is
+        buffered and cached. The result is returned unchanged on subsequent
+        calls, and :meth:`get_media` will replay the same bytes to the
+        configured media handler, so that a body verification step does not
+        consume the body out from under the application::
+
+            # Verify the signature against the exact bytes that were sent.
+            body = await req.get_raw_body()
+            verify_signature(body, req.get_header('X-Signature'))
+
+            # The media handler still sees the complete body.
+            payload = await req.get_media()
+
+        Unlike :attr:`stream`, this method never silently returns a truncated
+        payload when the client disconnects midway through the body. Instead,
+        :class:`~falcon.RequestBodyIncomplete` is raised so that neither a
+        partial signature check nor a partial deserialization can succeed.
+
+        Warning:
+            This operation buffers the entire body in memory. It also
+            necessarily consumes the request stream, although the buffered
+            bytes are transparently replayed to subsequent readers within the
+            framework, including :meth:`get_media`.
+
+        Returns:
+            bytes: The raw request body.
+
+        Raises:
+            RequestBodyTooLarge: The body exceeds
+                :attr:`RequestOptions.max_body_size`.
+            RequestBodyIncomplete: The body was interrupted before the
+                expected number of bytes could be read.
+
+        .. versionadded:: 4.5
+        """
+        if self._raw_body is not None:
+            return self._raw_body
+
+        if self._media is not _UNSET or self._media_error is not None:
+            # NOTE(caselit): The body was already consumed by get_media(),
+            #   which does not retain the original bytes. Refuse rather than
+            #   silently returning a truncated (empty) body.
+            raise errors.OperationNotAllowed(
+                'The raw request body is unavailable after get_media() has '
+                'consumed the request stream. Call get_raw_body() first.'
+            )
+
+        if self.is_websocket:
+            raise errors.UnsupportedError(
+                'ASGI does not support reading the WebSocket handshake request body.'
+            )
+
+        content_length = self.content_length
+        max_body_size = self.options.max_body_size
+
+        if max_body_size and content_length is not None:
+            if content_length > max_body_size:
+                self._raise_body_too_large(max_body_size)
+
+        body = await self.stream.readall()
+
+        if max_body_size and len(body) > max_body_size:
+            # NOTE(caselit): Also covers streams of unknown length (e.g., a
+            #   chunked upload without Content-Length).
+            self._raise_body_too_large(max_body_size)
+
+        if content_length is not None and len(body) < content_length:
+            # NOTE(caselit): An ASGI disconnect event (or a prior partial read)
+            #   leaves a truncated body. Never hand that to a media handler or
+            #   a signature check.
+            raise errors.RequestBodyIncomplete(len(body))
+
+        self._raw_body = body
+        # Replace the consumed stream with one preloaded with the buffered
+        # bytes so that media handlers and any other downstream readers still
+        # see the whole body.
+        self._stream = BoundedStream(
+            _no_more_body,
+            first_event={'type': 'http.request', 'body': body, 'more_body': False},
+            content_length=len(body),
+        )
+        return self._raw_body
 
     async def get_media(self, default_when_empty: UnsetOr[Any] = _UNSET) -> Any:
         """Return a deserialized form of the request stream.
