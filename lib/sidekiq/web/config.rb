@@ -22,7 +22,10 @@ module Sidekiq
         # and very difficult for us to vendor or provide ourselves. If you are worried
         # about data security and wish to self-host, you can change these URLs.
         profile_view_url: "https://profiler.firefox.com/public/%s",
-        profile_store_url: "https://api.profiler.firefox.com/compressed-store"
+        profile_store_url: "https://api.profiler.firefox.com/compressed-store",
+        # Inject an object responding to #upload(data) => sid. Used by tests
+        # and by deployments which proxy the shared store themselves.
+        profile_store_client: nil
       }
 
       ##

@@ -376,37 +376,43 @@ module Sidekiq
       end
 
       get "/profiles/:key" do
-        store = config[:profile_store_url]
-        return redirect_to "#{root_path}profiles" unless store
+        record = Sidekiq::ProfileRecord.fetch(route_params(:key))
+        # Decided against this record as it is right now, never against a
+        # listing snapshot: revoking sharing immediately blocks the send.
+        url = Sidekiq::Web::ProfileSharing.view_url(
+          record,
+          view_url: config[:profile_view_url],
+          store: profile_store
+        )
+        url ? redirect_to(url) : redirect_to("#{root_path}profiles")
+      end
 
-        key = route_params(:key)
-        sid = Sidekiq.redis { |c| c.hget(key, "sid") }
+      post "/profiles/:key/share" do
+        record = Sidekiq::ProfileRecord.fetch(route_params(:key))
+        halt(404) unless record
 
-        unless sid
-          require "net/http"
-          data = Sidekiq.redis { |c| c.hget(key, "data") }
-
-          store_uri = URI(store)
-          http = Net::HTTP.new(store_uri.host, store_uri.port)
-          http.use_ssl = store_uri.scheme == "https"
-          request = Net::HTTP::Post.new(store_uri.request_uri)
-          request.body = data
-          request["Accept"] = "application/vnd.firefox-profiler+json;version=1.0"
-          request["User-Agent"] = "Sidekiq #{Sidekiq::VERSION} job profiler"
-
-          resp = http.request(request)
-          # https://raw.githubusercontent.com/firefox-devtools/profiler-server/master/tools/decode_jwt_payload.py
-          rawjson = resp.body.split(".")[1].unpack1("m")
-          sid = Sidekiq.load_json(rawjson)["profileToken"]
-          Sidekiq.redis { |c| c.hset(key, "sid", sid) }
+        if url_params("revoke")
+          # Withdrawing sharing must not shorten internal retention.
+          record.revoke_share!
+        else
+          mode = url_params("mode") || "read_only"
+          hours = (url_params("hours") || 1).to_i
+          hours = 1 if hours < 1
+          hours = 168 if hours > 168
+          begin
+            record.approve_share!(mode: mode, expires_at: Time.now + (hours * 3600))
+          rescue ArgumentError => ex
+            logger.warn { "Unable to approve profile sharing for #{record.key}: #{ex.message}" }
+          end
         end
-        url = config[:profile_view_url] % sid
-        redirect_to url
+
+        redirect "#{root_path}profiles"
       end
 
       get "/profiles/:key/data" do
-        key = route_params(:key)
-        data = Sidekiq.redis { |c| c.hget(key, "data") }
+        record = Sidekiq::ProfileRecord.fetch(route_params(:key))
+        data = Sidekiq::Web::ProfileSharing.data(record)
+        halt(404) unless data
 
         [200, {
           "content-type" => "application/json",

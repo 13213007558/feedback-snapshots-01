@@ -17,6 +17,7 @@
         <th><%= t('Token') %></th>
         <th><%= t('Size') %></th>
         <th><%= t('ElapsedTime') %></th>
+        <th><%= t('SharedUntil') %></th>
         <th>&nbsp</th>
       </thead>
       <% @profiles.each do |record| %>
@@ -28,10 +29,34 @@
           <td><%= format_memory(record.size / 1024) %> </td>
           <td><%= number_with_delimiter(record.elapsed, precision: 2) %> </td>
           <td>
-            <% if config[:profile_store_url] %>
+            <% if record.shareable? %>
+              <%= record.share_mode %> <%= relative_time(record.share_until) %>
+            <% else %>
+              <%= t('NotShared') %>
+            <% end %>
+          </td>
+          <td>
+            <%# Viewing is gated on this record's own approval, not the store's existence. %>
+            <% if (config[:profile_store_client] || config[:profile_store_url]) && record.viewable? %>
               <a target="_blank" class="btn" href="<%= root_path %>profiles/<%= CGI.escape(record.key) %>"><%= t("View") %></a>
             <% end %>
             <a class="btn" href="<%= root_path %>profiles/<%= CGI.escape(record.key) %>/data"><%= t("Data") %></a>
+            <form action="<%= root_path %>profiles/<%= CGI.escape(record.key) %>/share" method="post" style="display:inline">
+              <%= csrf_tag %>
+              <select name="mode" aria-label="<%= t('ShareMode') %>">
+                <option value="read_only"><%= t('ShareReadOnly') %></option>
+                <option value="transfer"><%= t('ShareTransfer') %></option>
+              </select>
+              <input type="number" name="hours" value="1" min="1" max="168" aria-label="<%= t('ShareHours') %>">
+              <button type="submit" class="btn"><%= t('ApproveSharing') %></button>
+            </form>
+            <% if record.shareable? %>
+              <form action="<%= root_path %>profiles/<%= CGI.escape(record.key) %>/share" method="post" style="display:inline">
+                <%= csrf_tag %>
+                <input type="hidden" name="revoke" value="1">
+                <button type="submit" class="btn btn-danger"><%= t('RevokeSharing') %></button>
+              </form>
+            <% end %>
           </td>
         </tr>
       <% end %>

@@ -108,4 +108,12 @@ en:
   View: View
   Token: Token
   ElapsedTime: Elapsed Time
+  SharedUntil: Shared Until
+  NotShared: Not shared
+  ShareMode: Share mode
+  ShareReadOnly: Read only
+  ShareTransfer: Transferable
+  ShareHours: Hours
+  ApproveSharing: Approve sharing
+  RevokeSharing: Revoke sharing
   ClickToLearnMore: Click to learn more

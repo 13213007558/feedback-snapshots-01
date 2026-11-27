@@ -1356,10 +1356,12 @@ module Sidekiq
 
     # This is a point in time/snapshot API, you'll need to instantiate a new instance
     # if you want to fetch newer records.
-    def initialize
+    def initialize(clock: Time)
+      @clock = clock
+      now = clock.now
       @records = Sidekiq.redis do |c|
-        # This throws away expired profiles
-        c.zremrangebyscore("profiles", "-inf", Time.now.to_f.to_s)
+        # This throws away profiles past their internal retention deadline
+        c.zremrangebyscore("profiles", "-inf", now.to_f.to_s)
         # retrieve records, newest to oldest
         c.zrange("profiles", "+inf", 0, "byscore", "rev")
       end
@@ -1370,30 +1372,68 @@ module Sidekiq
     end
 
     def each(&block)
-      fetch_keys = %w[started_at jid type token size elapsed].freeze
+      now = @clock.now
       arrays = Sidekiq.redis do |c|
         c.pipelined do |p|
           @records.each do |key|
-            p.hmget(key, *fetch_keys)
+            p.hmget(key, *ProfileRecord::FIELDS)
           end
         end
       end
 
-      arrays.compact.map { |arr| ProfileRecord.new(arr) }.each(&block)
+      arrays.compact
+        .reject { |arr| arr.compact.empty? }
+        .map { |arr| ProfileRecord.new(arr) }
+        .select { |record| record.retained?(now: now) }
+        .each(&block)
     end
   end
 
+  # A single collected job profile.
+  #
+  # Internal retention and sharing are separate deadlines. `retained_until`
+  # controls how long the profile stays in Redis for internal support use;
+  # `share_until` controls whether it may be shown in or uploaded to the
+  # configured profile store. Revoking sharing clears only the share fields,
+  # leaving internal retention untouched.
   class ProfileRecord
-    attr_reader :started_at, :jid, :type, :token, :size, :elapsed
+    # Must stay in this order: ProfileSet uses hmget with it.
+    FIELDS = %w[
+      started_at jid type token size elapsed
+      retained_until share_until share_mode share_approved_at sid
+    ].freeze
 
-    def initialize(arr)
-      # Must be same order as fetch_keys above
-      @started_at = Time.at(Integer(arr[0]))
-      @jid = arr[1]
-      @type = arr[2]
-      @token = arr[3]
-      @size = Integer(arr[4])
-      @elapsed = Float(arr[5])
+    SHARE_MODES = %w[read_only transfer].freeze
+
+    attr_reader :started_at, :jid, :type, :token, :size, :elapsed,
+      :retained_until, :share_until, :share_mode, :share_approved_at, :sid
+
+    def initialize(values)
+      values = FIELDS.zip(values).to_h if values.is_a?(Array)
+      values = values.transform_keys(&:to_s)
+
+      @started_at = Time.at(Integer(values["started_at"]))
+      @jid = values["jid"]
+      @type = values["type"]
+      @token = values["token"]
+      @size = Integer(values["size"]) if values["size"]
+      @elapsed = Float(values["elapsed"]) if values["elapsed"]
+      @retained_until = values["retained_until"] && Time.at(Integer(values["retained_until"]))
+      @share_until = values["share_until"] && Time.at(Integer(values["share_until"]))
+      @share_mode = values["share_mode"]
+      @share_approved_at = values["share_approved_at"] && Time.at(Integer(values["share_approved_at"]))
+      @sid = values["sid"]
+    end
+
+    # Fetch the current state of one specific record. Always hits Redis so
+    # authorization decisions use the record as it exists now, not a snapshot.
+    # Retention-expired records are treated as gone.
+    # @return [ProfileRecord, nil]
+    def self.fetch(key, now: Time.now)
+      values = Sidekiq.redis { |c| c.hmget(key, *FIELDS) }
+      return nil if values.nil? || values.compact.empty?
+      record = new(values)
+      record.retained?(now: now) ? record : nil
     end
 
     def key
@@ -1402,6 +1442,74 @@ module Sidekiq
 
     def data
       Sidekiq.redis { |c| c.hget(key, "data") }
+    end
+
+    # Is the record still inside its internal retention window?
+    def retained?(now: Time.now)
+      retained_until.nil? || now < retained_until
+    end
+
+    # Has the application approved sharing this specific record, and is that
+    # approval still current?
+    def shareable?(now: Time.now)
+      !share_until.nil? && now < share_until
+    end
+
+    # Transferable records may be uploaded to the external profile store.
+    def transferable?(now: Time.now)
+      shareable?(now: now) && share_mode == "transfer"
+    end
+
+    # Can this record be displayed by the shared viewer? Either it was already
+    # uploaded (sid cached) or we are allowed to upload it now.
+    def viewable?(now: Time.now)
+      shareable?(now: now) && (!sid.to_s.empty? || transferable?(now: now))
+    end
+
+    # Approve sharing for this record only, until +expires_at+.
+    #
+    # @param mode [String] "read_only" (view/download only, never upload) or
+    #   "transfer" (may also be uploaded to the shared store)
+    # @param expires_at [Time] the sharing deadline
+    def approve_share!(mode:, expires_at:, now: Time.now)
+      mode = mode.to_s
+      raise ArgumentError, "Unknown profile share mode: #{mode}" unless SHARE_MODES.include?(mode)
+      raise ArgumentError, "Share expiry must be in the future" unless expires_at && expires_at > now
+
+      Sidekiq.redis do |c|
+        c.multi do |m|
+          m.hset(key, "share_mode" => mode, "share_until" => expires_at.to_i, "share_approved_at" => now.to_i)
+        end
+      end
+
+      @share_mode = mode
+      @share_until = expires_at
+      @share_approved_at = now
+      self
+    end
+
+    # Withdraw the sharing approval for this record. Internal data and its
+    # retention deadline are left intact, so support can still use it until
+    # the original expiry. The cached external token is dropped so a future
+    # approval must go through the store again.
+    def revoke_share!
+      Sidekiq.redis do |c|
+        c.multi do |m|
+          m.hdel(key, "share_until", "share_mode", "share_approved_at", "sid")
+        end
+      end
+
+      @share_until = nil
+      @share_mode = nil
+      @share_approved_at = nil
+      @sid = nil
+      self
+    end
+
+    # Remember the external store token for this record.
+    def cache_sid(value)
+      Sidekiq.redis { |c| c.hset(key, "sid", value) }
+      @sid = value
     end
   end
 

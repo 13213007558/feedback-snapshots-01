@@ -5,6 +5,7 @@
 HEAD
 ----------
 
+- Job profiles are no longer shareable implicitly. Each profile record now carries its own share approval (`read_only` or `transfer`) with a separate expiry; viewing, downloading and uploading are authorized per record. Revoking sharing clears only the share state, so internal retention continues until the original deadline. Profiles are still never uploaded unless approved for transfer on that record.
 - Fix cancellation of iterable jobs before their first checkpoint [#7099]
 - Do not count or log an interrupted iterable job as a failure [#7103]
 - `config.redis=` now raises if the Redis connection pool was already created, instead of silently ignoring the new settings. The error names the code which created the pool. Apps which configure Sidekiq inside `Rails.application.reloader.to_prepare` should move that code out: `to_prepare` runs again on every code reload in development, and the second run will raise. `Sidekiq::CurrentAttributes.persist("Current")` takes a String, so it does not need `to_prepare` either [#7115]

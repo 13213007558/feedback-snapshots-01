@@ -291,6 +291,14 @@ module Sidekiq
       end
     end
 
+    # The object which sends approved profiles to the shared viewer.
+    # Configure `profile_store_client` to inject your own transport.
+    def profile_store
+      config[:profile_store_client] ||
+        (config[:profile_store_url] &&
+          Sidekiq::Web::ProfileStore.new(config[:profile_store_url]))
+    end
+
     def redis_info
       @info ||= Sidekiq.default_configuration.redis_info
     end

@@ -1078,6 +1078,44 @@ describe "API" do
         assert record.jid
       end
     end
+
+    it "approves and revokes sharing without touching internal retention" do
+      add_profile(1, "mike", "123")
+      record = Sidekiq::ProfileRecord.fetch("mike-123")
+      refute record.shareable?
+      refute record.transferable?
+      refute record.viewable?
+
+      record.approve_share!(mode: "transfer", expires_at: Time.now + 300)
+      record = Sidekiq::ProfileRecord.fetch("mike-123")
+      assert record.shareable?
+      assert record.transferable?
+      assert record.viewable?
+      assert_equal "transfer", record.share_mode
+
+      retained = record.retained_until
+      record.revoke_share!
+      record = Sidekiq::ProfileRecord.fetch("mike-123")
+      refute record.shareable?
+      refute record.transferable?
+      refute record.viewable?
+      assert_equal retained, record.retained_until
+      assert_equal "ProfileJob", record.type
+
+      data = Sidekiq.redis { |c| c.hget("mike-123", "data") }
+      refute_nil data, "internal data must survive revoking"
+    end
+
+    it "rejects an unknown share mode" do
+      add_profile(1, "mike", "123")
+      record = Sidekiq::ProfileRecord.fetch("mike-123")
+      assert_raises(ArgumentError) do
+        record.approve_share!(mode: "public", expires_at: Time.now + 300)
+      end
+      assert_raises(ArgumentError) do
+        record.approve_share!(mode: "read_only", expires_at: Time.now - 1)
+      end
+    end
   end
 
   it "runs load hooks" do

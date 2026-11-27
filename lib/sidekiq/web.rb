@@ -137,4 +137,6 @@ end
 
 require "sidekiq/web/router"
 require "sidekiq/web/action"
+require "sidekiq/web/profile_store"
+require "sidekiq/web/profile_sharing"
 require "sidekiq/web/application"

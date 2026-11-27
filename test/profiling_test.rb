@@ -56,17 +56,27 @@ describe "profiling" do
       assert_equal header, data # gzip magic number
     end
 
-    Sidekiq.redis { |c| c.hset("mike-1234", "sid", "sid1234") }
-    Sidekiq.redis { |c| c.hset("bob-5678", "sid", "sid5678") }
-
     get "/profiles"
     assert_match(/mike-1234/, last_response.body)
     assert_match(/bob-5678/, last_response.body)
-    assert_match(/View/, last_response.body)
+    refute_match(/View/, last_response.body)
+
+    # Approve only mike, read-only, and give it a cached viewer token.
+    Sidekiq::ProfileRecord.fetch("mike-1234").approve_share!(mode: "read_only", expires_at: Time.now + 3600)
+    Sidekiq.redis { |c| c.hset("mike-1234", "sid", "sid1234") }
+
+    get "/profiles"
+    assert_match(/href="[^"]*profiles\/mike-1234"/, last_response.body)
+    refute_match(/href="[^"]*profiles\/bob-5678"/, last_response.body)
 
     get "/profiles/mike-1234"
     assert_equal 302, last_response.status
     assert_equal "https://localhost/public/sid1234", last_response.headers["Location"]
+
+    # bob was never approved and must not be viewable even though a store exists.
+    get "/profiles/bob-5678"
+    assert_equal 302, last_response.status
+    assert_equal "/profiles", last_response.headers["Location"]
 
     get "/profiles/mike-1234/data"
     assert_equal "application/json", last_response.headers["Content-Type"]
