@@ -12,6 +12,13 @@ from . import _string_parsers as string_parsers
 from ._ctime_functions import get_ctime, set_ctime
 from ._datetime import aware_now
 
+# Suffix of the sidecar file marking a log as retained for an incident
+# investigation. Its body holds an ISO 8601 UTC expiry timestamp.
+HOLD_SUFFIX = ".hold"
+# Suffix of a compression output that was not finalized, so a later rotation
+# can tell half-finished archives apart from handed-off ones.
+PARTIAL_SUFFIX = ".part"
+
 
 def generate_rename_path(root, ext, creation_time):
     creation_datetime = datetime.datetime.fromtimestamp(creation_time)
@@ -59,6 +66,37 @@ def remove_file(path):
         ) from error
 
 
+def hold_path(path):
+    return path + HOLD_SUFFIX
+
+
+def write_hold(path, until):
+    marker = hold_path(path)
+    with open(marker, "w", encoding="ascii") as file:
+        file.write(until.astimezone(datetime.timezone.utc).isoformat())
+
+
+def hold_is_active(path, now=None):
+    marker = hold_path(path)
+    if not os.path.exists(marker):
+        return False
+    try:
+        with open(marker, "r", encoding="ascii") as file:
+            until = datetime.datetime.fromisoformat(file.read().strip())
+    except (OSError, ValueError):
+        # A malformed marker is treated as an active hold rather than dropping
+        # evidence that an investigation may still depend on.
+        return True
+    if now is None:
+        now = aware_now()
+    if until.tzinfo is None:
+        until = until.replace(tzinfo=datetime.timezone.utc)
+    if now < until:
+        return True
+    remove_file(marker)
+    return False
+
+
 class FileDateFormatter:
     def __init__(self, datetime=None):
         self.datetime = datetime or aware_now()
@@ -95,7 +133,32 @@ class Compression:
             root, ext_before = os.path.splitext(path_in)
             renamed_path = generate_rename_path(root, ext_before + ext, creation_time)
             rename_file(path_out, renamed_path)
-        compress_function(path_in, path_out)
+
+        path_tmp = path_out + PARTIAL_SUFFIX
+        try:
+            compress_function(path_in, path_tmp)
+            # Carry the creation time over the final rename so downstream code
+            # (and ctime-aware tests) still finds the archive by its final name.
+            try:
+                creation_time = get_ctime(path_tmp)
+            except OSError:
+                creation_time = None
+            os.replace(path_tmp, path_out)
+            if creation_time is not None:
+                set_ctime(path_out, creation_time)
+        except Exception:
+            # The source file is intentionally left untouched so it stays
+            # recoverable; any half-finished output is removed because it can be
+            # mistaken for a handed-off archive at the next rotation.
+            if os.path.exists(path_tmp):
+                remove_file(path_tmp)
+            raise
+
+        # The retention declaration follows the evidence into the archive.
+        marker_in = hold_path(path_in)
+        if os.path.exists(marker_in):
+            rename_file(marker_in, hold_path(path_out))
+
         remove_file(path_in)
 
 
@@ -226,6 +289,7 @@ class FileSink:
         self._rotation_function = self._make_rotation_function(rotation)
         self._retention_function = self._make_retention_function(retention)
         self._compression_function = self._make_compression_function(compression)
+        self._compression_ext = self._compression_extension(compression)
 
         self._file = None
         self._file_path = None
@@ -323,23 +387,93 @@ class FileSink:
                 renamed_path = generate_rename_path(root, ext, creation_time)
                 rename_file(old_path, renamed_path)
                 old_path = renamed_path
+        else:
+            new_path = None
 
         if is_rotating or self._rotation_function is None:
+            # Finish archives interrupted by an earlier failure before handling
+            # the file just rotated, so pending raw logs and finalized archives
+            # are never mixed inside the retention candidates. Recovery only
+            # runs at rotation: on stop the current raw log is compressed once
+            # and left untouched otherwise.
+            if is_rotating:
+                self._recover_pending_archives(skip=old_path)
+
             if self._compression_function is not None and old_path is not None:
                 self._compression_function(old_path)
 
             if self._retention_function is not None:
-                logs = {
-                    file
-                    for pattern in self._glob_patterns
-                    for file in glob.glob(pattern)
-                    if os.path.isfile(file)
-                }
-                self._retention_function(list(logs))
+                self._apply_retention(active_path=new_path)
 
         if is_rotating:
             self._create_file(new_path)
             set_ctime(new_path, datetime.datetime.now().timestamp())
+
+    def _managed_files(self):
+        return {
+            file
+            for pattern in self._glob_patterns
+            for file in glob.glob(pattern)
+            if os.path.isfile(file)
+        }
+
+    def _is_pending_raw(self, path, active_path):
+        if self._compression_ext is None:
+            return False
+        if path == active_path:
+            return False
+        return not path.endswith(self._compression_ext)
+
+    def _recover_pending_archives(self, *, skip):
+        if self._compression_function is None:
+            return
+
+        for path in self._managed_files():
+            if path.endswith(PARTIAL_SUFFIX):
+                remove_file(path)
+
+        now = aware_now()
+        for path in sorted(self._managed_files()):
+            if path.endswith(HOLD_SUFFIX) or path.endswith(PARTIAL_SUFFIX):
+                continue
+            if path == skip or not self._is_pending_raw(path, skip):
+                continue
+            # Evidence under an active retention declaration is not reworked:
+            # its raw form stays untouched until the hold expires. Files handed
+            # off by the current rotation are compressed afterwards regardless.
+            if hold_is_active(path, now):
+                continue
+            self._compression_function(path)
+
+    def _apply_retention(self, *, active_path):
+        now = aware_now()
+        managed = self._managed_files()
+
+        # Expired markers whose target disappeared are pruned; active markers
+        # without a target are kept until they expire.
+        for path in managed:
+            if path.endswith(HOLD_SUFFIX):
+                target = path[: -len(HOLD_SUFFIX)]
+                if not os.path.exists(target):
+                    hold_is_active(target, now)
+
+        candidates = []
+        held = []
+        pending = []
+
+        for path in sorted(managed):
+            if path.endswith(HOLD_SUFFIX) or path.endswith(PARTIAL_SUFFIX):
+                continue
+            if hold_is_active(path, now):
+                held.append(path)
+            elif self._is_pending_raw(path, active_path):
+                pending.append(path)
+            else:
+                candidates.append(path)
+
+        self._retention_function(candidates)
+
+        return {"candidates": candidates, "held": held, "pending": pending}
 
     @staticmethod
     def _make_glob_patterns(path):
@@ -353,6 +487,14 @@ class FileSink:
             return [escaped, escaped + ".*"]
 
         return [escaped, escaped + ".*", root + ".*" + ext, root + ".*" + ext + ".*"]
+
+    @staticmethod
+    def _compression_extension(compression):
+        if compression is None or callable(compression):
+            return None
+        if isinstance(compression, str):
+            return "." + compression.strip().lstrip(".")
+        return None
 
     @staticmethod
     def _make_rotation_function(rotation):
