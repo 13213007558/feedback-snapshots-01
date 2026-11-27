@@ -42,5 +42,10 @@ en:
           signing_key_not_configured: 'Doorkeeper::OpenidConnect.configure.signing_key must resolve to at least one key.'
           issuer_not_configured: 'Doorkeeper::OpenidConnect.configure.issuer must resolve to a non-blank value.'
           dynamic_client_registration_unauthorized: 'Authorization required for client registration'
+          subject_type_invalid: 'Unsupported subject_type %{subject_type}; configure :public or :pairwise.'
+          subject_type_not_advertised: 'subject_type %{subject_type} is not listed in subject_types_supported (%{supported}).'
+          pairwise_subject_salt_not_configured: 'pairwise_subject_salt must be configured when a pairwise subject_type is used.'
+          subject_binding_migration_missing: 'Pairwise subjects require the oidc_subject columns on oauth_access_grants and oauth_access_tokens; run `rails generate doorkeeper:openid_connect:add_subject_binding` and `rails db:migrate`.'
+          reauthorization_required: 'The authorization was issued under a different subject identifier policy and must be authorized again.'
           # ID Token claim error messages
           missing_required_claim: 'Required ID Token claim `%{claim}` is missing or blank'

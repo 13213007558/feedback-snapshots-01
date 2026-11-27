@@ -115,10 +115,18 @@ module Doorkeeper
       end
 
       def subject
-        Doorkeeper::OpenidConnect.configuration.subject.call(
+        # Resolve from the policy pinned on the access token (copied there from
+        # the grant at exchange and through every refresh), not from the
+        # client's current policy: an authorization keeps the identifier it was
+        # issued for, and a policy change is surfaced as a re-authorization
+        # requirement at the token endpoint instead of a silently swapped `sub`.
+        # Falls back to the current policy when the binding columns are absent
+        # or the record predates them, which preserves the historical behaviour.
+        SubjectIdentifier.identifier_for(
           @resource_owner,
           @access_token.application,
-        ).to_s
+          record: @access_token,
+        )
       end
 
       def audience

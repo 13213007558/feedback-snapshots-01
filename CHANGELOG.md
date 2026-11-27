@@ -2,7 +2,7 @@ Upgrading? [Migration from Old Versions](https://github.com/doorkeeper-gem/doork
 
 ## Unreleased
 
-- Add entry here
+- Add pairwise subject identifier support (`subject_type :pairwise`) with per-partner, uncorrelatable `sub` values. The policy in force at issuance is pinned onto access grants and access tokens (new `oidc_subject*` columns via `doorkeeper:openid_connect:add_subject_binding`), so an ID Token and UserInfo always agree and a refresh never hands one partner another partner's identifier. Records whose pinned policy no longer matches the client fail with an OAuth `invalid_grant` re-authorization error; pre-migration rows keep working while the client stays `public`.
 
 ## v2.1.0 (2026-10-20)
 

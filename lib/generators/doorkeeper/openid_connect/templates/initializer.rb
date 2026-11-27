@@ -108,6 +108,53 @@ Doorkeeper::OpenidConnect.configure do
     # Digest::SHA256.hexdigest("#{resource_owner.id}#{URI.parse(application.redirect_uri).host}#{'your_secret_salt'}")
   end
 
+  # Subject identifier type for NEW authorizations (OIDC Core §8).
+  #
+  #  - :public (default): every client receives the value the `subject` block
+  #    above returns, so all clients see the same identifier for one person.
+  #  - :pairwise: each partner receives a different, uncorrelatable identifier
+  #    (an HMAC over the local subject and the partner's sector). The ID Token
+  #    and UserInfo of one partner still identify the same person.
+  #
+  # Pairwise identifiers require the subject-binding migration. Generate and
+  # run it once before enabling :pairwise:
+  #
+  #   rails generate doorkeeper:openid_connect:add_subject_binding
+  #   rails db:migrate
+  #
+  # The policy is pinned onto each authorization at issuance, so changing this
+  # later never rewrites the identifier an existing authorization returns on
+  # refresh or at UserInfo. A record whose pinned policy no longer matches its
+  # client (a move to/from pairwise, a changed sector/owner, or a rotated salt)
+  # is rejected with an OAuth `invalid_grant` so the end user re-authorizes
+  # instead of one partner being handed another partner's identifier.
+  #
+  # subject_type :public
+  #
+  # REQUIRED when subject_type (or a per-client subject_type block) is
+  # :pairwise. Rotating this secret changes every pairwise identifier and
+  # forces the affected authorizations to be re-authorized.
+  #
+  # pairwise_subject_salt ENV["OIDC_PAIRWISE_SUBJECT_SALT"]
+  #
+  # Optional: group several client registrations of one partner into a single
+  # pairwise sector (OIDC Core §8.1). A callable receives the application; a
+  # static value is used as-is. Defaults to the registration's own identity
+  # (uid + Doorkeeper owner), so registrations that merely share a redirect
+  # host still get unrelated identifiers.
+  #
+  # pairwise_sector_identifier do |application|
+  #   application.owner_id.to_s
+  # end
+  #
+  # Optional: identify the partner behind a registration. Defaults to the
+  # client uid plus its Doorkeeper owner, so transferring a registration to
+  # another owner invalidates the authorizations issued under the old owner.
+  #
+  # subject_client_fingerprint do |application|
+  #   application.uid
+  # end
+
   # Protocol to use when generating URIs for the discovery endpoint,
   # for example if you also use HTTPS in development
   # protocol do

@@ -17,6 +17,14 @@ module Doorkeeper
 
         def after_successful_response
           if access_token.includes_scope?("openid")
+            # The password grant has no authorization grant to inherit a policy
+            # from, so pin the client's current subject policy directly onto the
+            # access token. A no-op on installations without the binding columns.
+            SubjectIdentifier.stamp(
+              access_token,
+              SubjectIdentifier.binding_for(access_token.application, resource_owner),
+            )
+
             id_token = Doorkeeper::OpenidConnect.configuration.id_token_model
                                                 .new(access_token, nonce)
             @response.id_token = id_token

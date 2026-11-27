@@ -85,6 +85,40 @@ module Doorkeeper
       option :signing_algorithm, default: :rs256
       option :subject_types_supported, default: [:public]
 
+      # The subject identifier type used for *new* authorizations: `:public`
+      # (the default and the historical behaviour — every client sees the value
+      # the `subject` block returns) or `:pairwise` (each partner sees a
+      # different, uncorrelatable identifier for the same end user).
+      #
+      # The policy in force when a grant/access token is issued is pinned onto
+      # that record (see SubjectIdentifier), so changing this later never
+      # rewrites the identifier an already-issued authorization returns on
+      # refresh or at UserInfo. A record whose pinned policy no longer matches
+      # its client must be re-authorized instead.
+      option :subject_type, default: :public
+
+      # REQUIRED when `subject_type` (or a per-client `subject_type` block)
+      # resolves to `:pairwise`. The secret salt for the HMAC that derives a
+      # pairwise `sub` (OIDC Core §8.1). Rotating it changes every pairwise
+      # identifier, which the binding check surfaces as a re-authorization
+      # requirement rather than a silently swapped `sub`.
+      option :pairwise_subject_salt
+
+      # Optional callable/value that groups several client registrations of one
+      # partner into a single pairwise sector (OIDC Core §8.1's sector
+      # identifier). A callable receives the application; a static value is
+      # used as-is. Defaults to the client registration's own identity, so two
+      # registrations that merely share a redirect host still get unrelated
+      # identifiers.
+      option :pairwise_sector_identifier
+
+      # Optional callable/value identifying the partner behind a client
+      # registration (defaults to the client `uid` plus its Doorkeeper owner).
+      # Changing the registration (a new `uid`) or transferring it to another
+      # owner changes this fingerprint, so grants issued under the previous
+      # identity must be re-authorized rather than handed the old identifier.
+      option :subject_client_fingerprint
+
       option :resource_owner_from_access_token, default: lambda { |*_|
         raise Errors::InvalidConfiguration, I18n.translate("doorkeeper.openid_connect.errors.messages.resource_owner_from_access_token_not_configured")
       }

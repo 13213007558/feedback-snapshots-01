@@ -34,7 +34,16 @@ module Doorkeeper
       private
 
       def subject
-        Doorkeeper::OpenidConnect.configuration.subject.call(resource_owner, application).to_s
+        # Same resolution as `IdToken#subject`, from the binding pinned on the
+        # same access token, so one partner sees one identifier in both the ID
+        # Token and the UserInfo response. The token endpoint already rejects a
+        # record whose binding no longer matches its client before a refreshed
+        # token carrying a stale policy can reach this endpoint.
+        SubjectIdentifier.identifier_for(
+          resource_owner,
+          application,
+          record: @access_token,
+        )
       end
 
       def application

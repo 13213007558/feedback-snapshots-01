@@ -40,6 +40,36 @@ module Doorkeeper
       # https://tools.ietf.org/html/rfc6749#section-4.1.2.1
       class InvalidRequest < AuthorizationError; end
 
+      # Raised when an authorization code is exchanged or an access token is
+      # refreshed whose pinned subject policy no longer matches the client that
+      # authenticated the request (the client moved to/from `pairwise`, its
+      # sector or partner identity changed, or the salt rotated). Reusing the
+      # record would hand one partner the identifier minted for another, so the
+      # request must fail and the end user re-authorize instead.
+      #
+      # Subclassing Doorkeeper's own `DoorkeeperError` lets the token endpoint's
+      # existing `rescue_from` render it through `#response` as an OAuth
+      # `invalid_grant` body (the standard "this authorization is no good, get
+      # a new one" signal) without this gem reaching into Doorkeeper internals.
+      class ReauthorizationRequired < ::Doorkeeper::Errors::DoorkeeperError
+        # Renders the explicit "authorize again" wording instead of Doorkeeper's
+        # generic invalid_grant copy, so the client learns that retrying the
+        # same grant/refresh token can never succeed.
+        class Response < ::Doorkeeper::OAuth::ErrorResponse
+          def description
+            I18n.t("doorkeeper.openid_connect.errors.messages.reauthorization_required")
+          end
+        end
+
+        def type
+          :invalid_grant
+        end
+
+        def response
+          @response ||= Response.new(name: type)
+        end
+      end
+
       # OpenID Connect 1.0 errors
       # http://openid.net/specs/openid-connect-core-1_0.html#AuthError
       class LoginRequired < AuthorizationError; end

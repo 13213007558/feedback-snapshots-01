@@ -1,0 +1,20 @@
+class AddSubjectBindingToOauthGrantsAndTokens < ActiveRecord::Migration<%= migration_version %>
+  def change
+    # The literal subject identifier the record must present, and the policy
+    # that produced it. All four are nullable so rows written before the
+    # migration keep working under the historical `public` behaviour.
+    change_table :oauth_access_grants do |table|
+      table.string :oidc_subject
+      table.string :oidc_subject_type
+      table.string :oidc_subject_sector
+      table.string :oidc_subject_fingerprint
+    end
+
+    change_table :oauth_access_tokens do |table|
+      table.string :oidc_subject
+      table.string :oidc_subject_type
+      table.string :oidc_subject_sector
+      table.string :oidc_subject_fingerprint
+    end
+  end
+end

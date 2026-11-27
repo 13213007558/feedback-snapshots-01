@@ -24,6 +24,7 @@ module Doorkeeper
     autoload :Errors, "doorkeeper/openid_connect/errors"
     autoload :GrantTypesSupportedMixin, "doorkeeper/openid_connect/grant_types_supported_mixin"
     autoload :IdToken, "doorkeeper/openid_connect/id_token"
+    autoload :SubjectIdentifier, "doorkeeper/openid_connect/subject_identifier"
     autoload :TokenEndpointAuthMethodsSupportedMixin,
              "doorkeeper/openid_connect/token_endpoint_auth_methods_supported_mixin"
     autoload :UserInfo, "doorkeeper/openid_connect/user_info"
@@ -90,6 +91,8 @@ require "doorkeeper/openid_connect/oauth/authorization_code_request"
 require "doorkeeper/openid_connect/oauth/password_access_token_request"
 require "doorkeeper/openid_connect/oauth/pre_authorization"
 require "doorkeeper/openid_connect/oauth/token_response"
+require "doorkeeper/openid_connect/oauth/subject_binding"
+require "doorkeeper/openid_connect/oauth/subject_binding_request"
 
 # Defined here rather than in the module body below because the conditional
 # declaration that follows already branches on it.
