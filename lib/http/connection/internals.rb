@@ -58,6 +58,7 @@ module HTTP
         return unless req.uri.https? && req.using_proxy?
 
         @pending_request = true
+        @request_phase   = :proxy_negotiating
 
         req.connect_using_proxy @socket
 
@@ -76,11 +77,56 @@ module HTTP
 
         if @parser.status_code != 200
           @failed_proxy_connect = true
+          @request_phase        = :proxy_refused
           return
         end
 
+        @request_phase = :tunnel_established
+
         @parser.reset
         @pending_response = false
+      end
+
+      # Whether the request body must be held back until the proxy
+      # confirms it is ready to receive it
+      #
+      # Only plain-HTTP requests forwarded through a proxy on a fresh
+      # connection need the handshake: direct connections have no proxy
+      # to confirm with, CONNECT tunnels are confirmed when established,
+      # and an established connection already proved the proxy path.
+      #
+      # @param req [HTTP::Request] the request about to be sent
+      # @return [Boolean]
+      # @api private
+      def proxy_handshake_required?(req)
+        !@established &&
+          req.using_proxy? &&
+          !req.uri.https? &&
+          !req.body.empty?
+      end
+
+      # Wait for the proxy to accept or refuse the request headers
+      #
+      # @return [Boolean] true when the proxy sent `100 Continue`
+      # @raise [ResponseHeaderError] when the proxy closes the connection
+      #   before sending any response
+      # @api private
+      def await_proxy_readiness
+        loop do
+          if @parser.headers?
+            @request_phase = :proxy_refused
+            return false
+          end
+
+          if @parser.informational_status == 100
+            @request_phase = :proxy_ready
+            return true
+          end
+
+          if read_more(BUFFER_SIZE) == :eof
+            raise ResponseHeaderError, "proxy closed connection before responding to request headers"
+          end
+        end
       end
 
       # Resets expiration of persistent connection

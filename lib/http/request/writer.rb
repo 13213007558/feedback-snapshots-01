@@ -55,6 +55,40 @@ module HTTP
         send_request
       end
 
+      # Stream only the request headers to a socket
+      #
+      # Used by the proxy readiness handshake to confirm the proxy
+      # accepts the request before the body is consumed.
+      #
+      # @example
+      #   writer.stream_headers
+      #
+      # @return [void]
+      # @api public
+      def stream_headers
+        add_headers
+        add_body_type_headers
+        write(join_headers)
+      end
+
+      # Stream only the request body to a socket
+      #
+      # Used by the proxy readiness handshake once the proxy has
+      # confirmed it is ready to receive the body.
+      #
+      # @example
+      #   writer.stream_body
+      #
+      # @return [void]
+      # @api public
+      def stream_body
+        @body.each { |chunk| write encode_chunk(chunk) }
+        write CHUNKED_END if chunked?
+      rescue Errno::EPIPE
+        # server doesn't need any more data
+        nil
+      end
+
       # Send headers needed to connect through proxy
       #
       # @example

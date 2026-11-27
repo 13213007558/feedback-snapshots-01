@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Plain-HTTP requests with a body that are forwarded through a proxy on a
+  fresh connection now confirm the proxy is ready before the body is
+  consumed: the headers go out with `Expect: 100-continue` and the body is
+  only streamed after the proxy answers `100 Continue`. If the proxy sends
+  a final response instead (e.g. `407`), the body stream is never read,
+  which keeps one-shot body streams intact. Direct connections, CONNECT
+  tunnels, and already-established connections keep the previous streaming
+  behavior. The new `HTTP::Connection#request_phase` reader reports which
+  stage an exchange reached (`:idle`, `:proxy_negotiating`,
+  `:proxy_refused`, `:proxy_ready`, `:tunnel_established`,
+  `:target_responded`), so callers can tell a proxy refusal apart from a
+  failure past the tunnel and from an error returned by the target.
 - `HTTP.nodelay` (and `HTTP::Session#nodelay`) now accepts an optional boolean,
   so `HTTP.nodelay(false)` disables `TCP_NODELAY` for a session. ([#863])
 

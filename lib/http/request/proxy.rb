@@ -50,6 +50,32 @@ module HTTP
         Writer.new(socket, nil, proxy_connect_headers, proxy_connect_header).connect_through_proxy
       end
 
+      # Stream the request through a proxy, confirming the proxy is ready
+      # before the body is consumed
+      #
+      # Sends the headers with an `Expect: 100-continue` header, then yields
+      # so the caller can check the proxy's interim response. The body is
+      # only streamed when the block returns a truthy value, so one-shot
+      # body streams are never consumed when the proxy refuses the request.
+      #
+      # @example
+      #   request.stream_with_proxy_handshake(socket) { proxy_ready? }
+      #
+      # @return [Boolean] whether the body was streamed
+      # @api public
+      def stream_with_proxy_handshake(socket)
+        include_proxy_headers if using_proxy? && !@uri.https?
+        headers[Headers::EXPECT] ||= "100-continue"
+
+        writer = Writer.new(socket, body, headers, headline)
+        writer.stream_headers
+
+        return false unless yield
+
+        writer.stream_body
+        true
+      end
+
       # Compute HTTP request header SSL proxy connection
       #
       # @example

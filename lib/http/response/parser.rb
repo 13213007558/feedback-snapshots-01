@@ -50,6 +50,11 @@ module HTTP
       # @api private
       attr_reader :http_version
 
+      # The status code of the most recent informational (1xx) response
+      # @return [Integer, nil] the informational status code
+      # @api private
+      attr_reader :informational_status
+
       # Create a new response parser
       # @return [Parser]
       # @api private
@@ -71,6 +76,7 @@ module HTTP
         @chunk = nil
         @status_code = nil
         @http_version = nil
+        @informational_status = nil
       end
 
       # Feed data into the parser
@@ -92,6 +98,7 @@ module HTTP
       # @return [void]
       # @api private
       def reset_for_informational
+        @informational_status = @status_code
         @handler.reset
         @header_finished = false
         @message_finished = false

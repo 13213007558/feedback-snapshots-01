@@ -39,6 +39,28 @@ module HTTP
     # @api public
     attr_reader :proxy_response_headers
 
+    # Which phase of the proxied exchange the connection has reached
+    #
+    # Possible values:
+    #
+    # - `:idle` -- nothing has been sent yet
+    # - `:proxy_negotiating` -- waiting for the proxy (CONNECT or
+    #   `Expect: 100-continue` handshake) to accept the request
+    # - `:proxy_refused` -- the proxy sent a final response before the
+    #   request body was consumed
+    # - `:proxy_ready` -- the proxy accepted the request (`100 Continue`)
+    #   and the body is being streamed
+    # - `:tunnel_established` -- the proxy CONNECT tunnel is up; any
+    #   failure from here on happened past the proxy
+    # - `:target_responded` -- the target server sent its final response
+    #
+    # @example
+    #   connection.request_phase
+    #
+    # @return [Symbol]
+    # @api public
+    attr_reader :request_phase
+
     # Initialize a new connection to an HTTP server
     #
     # @example
@@ -109,7 +131,15 @@ module HTTP
 
       @pending_request = true
 
-      req.stream @socket
+      # A refusal describes the previous exchange; a new request starts fresh
+      @request_phase = :idle if @request_phase == :proxy_refused
+
+      if proxy_handshake_required?(req)
+        @request_phase = :proxy_negotiating
+        req.stream_with_proxy_handshake(@socket) { await_proxy_readiness }
+      else
+        req.stream @socket
+      end
 
       @pending_response = true
       @pending_request  = false
@@ -155,6 +185,10 @@ module HTTP
       end
 
       set_keep_alive
+
+      unless @request_phase == :proxy_negotiating || @request_phase == :proxy_refused
+        @request_phase = :target_responded
+      end
     end
 
     # Callback for when we've reached the end of a response
@@ -165,6 +199,8 @@ module HTTP
     # @return [void]
     # @api public
     def finish_response
+      @established = true
+
       close unless keep_alive?
 
       @parser.reset
@@ -186,6 +222,7 @@ module HTTP
 
       @pending_response = false
       @pending_request  = false
+      @established      = false
     end
 
     # Whether there are no pending requests or responses
@@ -232,6 +269,8 @@ module HTTP
       @pending_request      = false
       @pending_response     = false
       @failed_proxy_connect = false
+      @established          = false
+      @request_phase        = :idle
       @buffer               = "".b
       @parser               = Response::Parser.new
     end

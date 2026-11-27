@@ -166,6 +166,7 @@ class HTTPConnectionTest < Minitest::Test
     req = build_req
     stream_args = nil
     sr_req = Minitest::Mock.new
+    sr_req.expect(:using_proxy?, false)
     sr_req.expect(:stream, nil) do |s|
       stream_args = s
       true

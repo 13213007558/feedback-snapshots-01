@@ -40,6 +40,9 @@ module HTTP
     # often a message digest.
     ETAG = "ETag"
 
+    # Indicates that particular server behaviors are required by the client.
+    EXPECT = "Expect"
+
     # Gives the date/time after which the response is considered stale (in
     # "HTTP-date" format as defined by RFC 7231).
     EXPIRES = "Expires"

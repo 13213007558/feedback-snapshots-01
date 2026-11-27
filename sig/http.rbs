@@ -265,6 +265,7 @@ module HTTP
     CONTENT_TYPE: String
     DATE: String
     ETAG: String
+    EXPECT: String
     EXPIRES: String
     HOST: String
     IF_MODIFIED_SINCE: String
@@ -877,12 +878,15 @@ module HTTP
         def host: () -> untyped
         def version: () -> String
         def using_authenticated_proxy?: () -> bool
+        def body: () -> Request::Body
+        def headline: () -> String
       end
 
       def include_proxy_headers: () -> void
       def include_proxy_authorization_header: () -> void
       def proxy_authorization_header: () -> String
       def connect_using_proxy: (Timeout::Null socket) -> void
+      def stream_with_proxy_handshake: (Timeout::Null socket) { () -> bool } -> bool
       def proxy_connect_header: () -> String
       def proxy_connect_headers: () -> Headers
 
@@ -930,6 +934,8 @@ module HTTP
       def initialize: (Timeout::Null socket, Request::Body? body, Headers headers, String headline) -> void
       def add_headers: () -> void
       def stream: () -> void
+      def stream_headers: () -> void
+      def stream_body: () -> void
       def connect_through_proxy: () -> void
       def add_body_type_headers: () -> void
       def join_headers: () -> String
@@ -1072,11 +1078,13 @@ module HTTP
       @header_finished: bool
       @message_finished: bool
       @chunk: untyped
+      @informational_status: Integer?
 
       attr_reader parser: LLHttp::Parser
       attr_reader headers: Headers
       attr_reader status_code: Integer?
       attr_reader http_version: String?
+      attr_reader informational_status: Integer?
 
       def initialize: () -> void
       def reset: () -> void
@@ -1128,6 +1136,8 @@ module HTTP
     @pending_request: bool
     @pending_response: bool | Response
     @failed_proxy_connect: bool
+    @established: bool
+    @request_phase: Symbol
     @buffer: String
     @parser: Response::Parser
     @socket: untyped
@@ -1135,6 +1145,7 @@ module HTTP
     @conn_expires_at: untyped
 
     attr_reader proxy_response_headers: Headers?
+    attr_reader request_phase: Symbol
 
     def initialize: (Request req, Options options) -> void
     def failed_proxy_connect?: () -> bool
@@ -1177,6 +1188,8 @@ module HTTP
       def start_tls: (Request req, Options options) -> void
       def send_proxy_connect_request: (Request req) -> void
       def handle_proxy_connect_response: () -> void
+      def proxy_handshake_required?: (Request req) -> bool
+      def await_proxy_readiness: () -> bool
       def reset_timer: () -> void
       def set_keep_alive: () -> void
       def body_framed?: () -> bool
