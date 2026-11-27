@@ -116,7 +116,7 @@ from ._better_exceptions import ExceptionFormatter
 from ._colorizer import Colorizer, try_formatting
 from ._contextvars import ContextVar
 from ._datetime import aware_now
-from ._error_interceptor import ErrorInterceptor
+from ._error_interceptor import ErrorInterceptor, parse_error_report
 from ._file_sink import FileSink
 from ._get_frame import get_frame
 from ._handler import Handler
@@ -284,6 +284,7 @@ class Logger:
         enqueue=_defaults.LOGURU_ENQUEUE,
         context=_defaults.LOGURU_CONTEXT,
         catch=_defaults.LOGURU_CATCH,
+        error_report=None,
         **kwargs
     ):
         r"""Add a handler sending log messages to a sink adequately configured.
@@ -326,6 +327,17 @@ class Logger:
             Whether errors occurring while sink handles logs messages should be automatically
             caught. If ``True``, an exception message is displayed on |sys.stderr| but the exception
             is not propagated to the caller, preventing your app to crash.
+        error_report : |str| or |dict|, optional
+            The disclosure policy applied to the error message displayed on |sys.stderr| when an
+            error is caught while the sink handles a log message. If ``"full"`` (the default), the
+            whole record and exception traceback are displayed. If ``"restricted"``, only a safe
+            diagnostic report is displayed: the handler identifier and name, the failing stage, a
+            projection of a few record fields and the exception type. A custom dict can be used to
+            tune the restricted report with the keys ``"fields"`` (list of record keys to display),
+            ``"traceback"`` (whether to show the frame locations) and ``"exception"`` (either
+            ``"type"`` or ``"none"``). A restricted report never displays the record payload
+            (``"message"``, ``"template"`` and ``"extra"``) nor the exception message, it only shows
+            the selected record fields projected to safe values.
         **kwargs
             Additional parameters that are only valid to configure a coroutine or file sink (see
             below).
@@ -846,7 +858,8 @@ class Logger:
             handler_id = self._core.handlers_count
             self._core.handlers_count += 1
 
-        error_interceptor = ErrorInterceptor(catch, handler_id)
+        report_policy = parse_error_report(error_report)
+        error_interceptor = ErrorInterceptor(catch, handler_id, report_policy)
 
         if colorize is None and serialize:
             colorize = False
@@ -1050,6 +1063,8 @@ class Logger:
                 hidden_frames_filename=self.catch.__code__.co_filename,
                 prefix=exception_prefix,
             )
+
+            error_interceptor.set_handler_name(name)
 
             handler = Handler(
                 name=name,

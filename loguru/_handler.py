@@ -125,6 +125,8 @@ class Handler:
             self._lock_acquired.acquired = False
 
     def emit(self, record, level_id, from_decorator, is_raw, colored_message):
+        stage = "filter"
+
         try:
             if self._levelno > record["level"].no:
                 return
@@ -132,6 +134,8 @@ class Handler:
             if self._filter is not None:
                 if not self._filter(record):
                     return
+
+            stage = "format"
 
             if self._is_formatter_dynamic:
                 dynamic_format = self._formatter(record)
@@ -191,11 +195,15 @@ class Handler:
                     formatter_record["message"] = coloring_message
                     formatted = self._format_record(precomputed_format, formatter_record)
 
+            stage = "serialize"
+
             if self._serialize:
                 formatted = self._serialize_record(formatted, record)
 
             str_record = Message(formatted)
             str_record.record = record
+
+            stage = "queue" if self._enqueue else "write"
 
             with self._protected_lock():
                 if self._stopped:
@@ -207,7 +215,7 @@ class Handler:
         except Exception:
             if not self._error_interceptor.should_catch():
                 raise
-            self._error_interceptor.print(record)
+            self._error_interceptor.print(record, stage=stage)
 
     def stop(self):
         with self._protected_lock():
@@ -225,7 +233,7 @@ class Handler:
             except Exception:
                 if not self._error_interceptor.should_catch():
                     raise
-                self._error_interceptor.print(None)
+                self._error_interceptor.print(None, stage="stop")
 
     def complete_queue(self):
         if not self._enqueue:
@@ -323,7 +331,7 @@ class Handler:
                 message = queue.get()
             except Exception:
                 with lock:
-                    self._error_interceptor.print(None)
+                    self._error_interceptor.print(None, stage="queue-get")
                 continue
 
             if message is None:
@@ -337,7 +345,7 @@ class Handler:
                 try:
                     self._sink.write(message)
                 except Exception:
-                    self._error_interceptor.print(message.record)
+                    self._error_interceptor.print(message.record, stage="queued-write")
 
     def __getstate__(self):
         state = self.__dict__.copy()

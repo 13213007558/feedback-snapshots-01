@@ -1,3 +1,9 @@
+`Unreleased`_
+=============
+
+- Add a new ``error_report`` optional argument to ``logger.add()`` to control the disclosure of the diagnostic message printed on ``sys.stderr`` when a handler fails, in particular to avoid leaking log records and exception values to an untrusted stream while still identifying the handler, the failing stage and the related record.
+
+
 `0.8.0`_ (2026-11-11)
 =====================
 

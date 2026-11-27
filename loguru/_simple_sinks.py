@@ -160,7 +160,9 @@ class AsyncSink:
                 return
             if not self._error_interceptor.should_catch():
                 raise future.exception()
-            self._error_interceptor.print(message.record, exception=future.exception())
+            self._error_interceptor.print(
+                message.record, exception=future.exception(), stage="coroutine"
+            )
 
         task.add_done_callback(check_exception)
         self._tasks.add(task)

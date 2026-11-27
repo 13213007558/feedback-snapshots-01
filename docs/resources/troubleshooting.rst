@@ -467,6 +467,49 @@ What you can possibly do in such a situation:
 - configure the ``logger`` with ``logger.add(lambda m: sys.stdout.write(m))`` instead of ``logger.add(sys.stdout)``, so that the stream is dynamically retrieved and therefore not affected by changes.
 
 
+How do I avoid leaking log data in the error message printed by Loguru?
+------------------------------------------------------------------------
+
+When an error is raised while a handler is processing a message, Loguru catches it (unless ``catch=False``) and prints a diagnostic report on |sys.stderr|. By default, this report includes the complete record (all its keys and values) as well as the whole exception traceback. This is helpful during development, but it can disclose sensitive data if |sys.stderr| is not trusted, for example when it is collected by a platform with broader access than the log sinks themselves.
+
+For this reason, each handler can be configured with its own ``error_report`` policy. With ``error_report="restricted"``, the report printed on |sys.stderr| no longer contains the record payload (``message``, ``template`` and ``extra``) nor the exception message. It is replaced with a minimal report identifying the faulty handler, the stage at which the error occurred, a projection of a few non-sensitive record fields, and the exception type. The same policy applies to errors raised during a synchronous write, inside the background thread used with ``enqueue=True``, and inside a coroutine sink (whose exception is reported when the task completes)::
+
+    import sys
+    from loguru import logger
+
+
+    def audit_sink(message):
+        if "secret" in message.record["extra"]:
+            raise RuntimeError("Failed to archive: %s" % message.record["extra"]["secret"])
+
+
+    if __name__ == "__main__":
+        logger.remove()
+        logger.add(sys.stderr, format="{message}", error_report="restricted")
+        logger.add(audit_sink, format="{message}", error_report="restricted")
+
+        logger.bind(secret="INVITATION-CODE-1234").info("Audit event")
+
+The report printed on |sys.stderr| then looks like this, with no trace of the secret value. Note that ``sys.stderr`` is also a handler above, and it emitted its own projection of the record as usual::
+
+    Audit event
+    --- Logging error in Loguru Handler #1 ---
+    Handler: audit_sink
+    Stage: write (synchronous sink write)
+    Record: {'time': '...', 'level': 'INFO', 'name': '__main__', 'module': '<stdin>', 'function': '<module>', 'line': 16, 'thread': "(id=..., name='MainThread')", 'process': "(id=..., name='MainProcess')"}
+    Exception: RuntimeError
+    Traceback (most recent call last):
+      File "...", line 16, in <module>
+      File "...", line 7, in audit_sink
+    --- End of logging error ---
+
+The restricted report can be tuned with a dict. The ``fields`` key lists the record keys to display (they are projected to safe, truncated values, while the payload fields are always redacted), ``traceback`` controls whether the frame locations are shown (source lines are never included), and ``exception`` accepts ``"type"`` (the default) or ``"none"``::
+
+    logger.add(audit_sink, error_report={"fields": ["level", "name"], "traceback": False, "exception": "none"})
+
+Bear in mind that ``error_report`` only governs the diagnostic report emitted on |sys.stderr|. It does not modify the messages delivered to the sinks, so each of them still receives the record according to its own formatting and filtering rules. Use ``error_report="full"`` (the default) to keep the detailed report.
+
+
 How do I prevent "RuntimeError" due to "deadlock avoided"?
 ----------------------------------------------------------
 

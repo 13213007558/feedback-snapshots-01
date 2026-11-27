@@ -292,3 +292,44 @@ def test_logging_not_unpicklable_exception(exception_value):
     assert type_ is ValueError
     assert value is None
     assert traceback_ is None
+
+
+def test_caught_exception_queue_get_restricted(writer, capsys):
+    logger.add(writer, enqueue=True, catch=True, format="{message}", error_report="restricted")
+
+    logger.bind(broken=NotUnpicklable()).info("Bye bye...")
+    logger.complete()
+    logger.remove()
+
+    out, err = capsys.readouterr()
+    lines = err.strip().splitlines()
+
+    assert writer.read() == ""
+    assert out == ""
+    assert lines[0] == "--- Logging error in Loguru Handler #0 ---"
+    assert lines[1] == "Handler: w"
+    assert lines[2] == "Stage: queue-get (dequeue of the record)"
+    assert lines[3] == "Record: None"
+    assert "Exception: UnpicklingError" in lines
+    assert "You shall not de-serialize me!" not in err
+    assert "Bye bye" not in err
+    assert lines[-1] == "--- End of logging error ---"
+
+
+def test_caught_exception_sink_write_restricted_stage(capsys):
+    logger.add(
+        NotWritable(), enqueue=True, catch=True, format="{message}", error_report="restricted"
+    )
+
+    logger.bind(fail=True).info("Bye bye...")
+    logger.complete()
+    logger.remove()
+
+    out, err = capsys.readouterr()
+    lines = err.strip().splitlines()
+
+    assert out == ""
+    assert lines[2] == "Stage: queued-write (background thread sink write)"
+    assert "Exception: RuntimeError" in lines
+    assert "You asked me to fail..." not in err
+    assert "Bye bye" not in err
