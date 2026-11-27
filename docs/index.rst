@@ -57,6 +57,7 @@ into the standard library under the ``venv`` module. For how ``virtualenv`` comp
 - :doc:`how-to/install` — Install virtualenv on your system
 - :doc:`how-to/usage` — Select Python versions, activate environments, configure defaults, and use from Python code
 - :doc:`how-to/verify-release` — Check that a downloaded release came from the virtualenv release workflow
+- :doc:`how-to/update-seed-in-one-environment` — Update one environment's seed packages safely
 
 **Reference** - Technical information
 
@@ -113,6 +114,7 @@ Learn more about virtualenv from these community resources:
     how-to/install
     how-to/usage
     how-to/verify-release
+    how-to/update-seed-in-one-environment
 
 .. toctree::
     :hidden:
