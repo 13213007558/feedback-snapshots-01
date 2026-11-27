@@ -12,8 +12,11 @@ module Doorkeeper
       # The return type of `select_key`: the key material and the algorithm it
       # signs with, kept together so `at_hash` can always be computed with the
       # digest matching the algorithm in the token's actual JOSE header
-      # (OIDC Core §3.2.2.10).
-      SigningKey = Struct.new(:keypair, :kid, :algorithm, keyword_init: true)
+      # (OIDC Core §3.2.2.10). `generation` identifies which keyring generation
+      # produced the token, so issuance that races a rotation boundary can be
+      # attributed to exactly one generation; it is optional so custom
+      # `select_key` overrides keep working unchanged.
+      SigningKey = Struct.new(:keypair, :kid, :algorithm, :generation, keyword_init: true)
 
       # `resource_owner` is exposed so callers can detect a token whose owner no
       # longer resolves (e.g. deleted after issuance) before serializing — the
@@ -81,13 +84,16 @@ module Doorkeeper
       def select_key
         # Resolved once: `signing_key` builds a fresh JWK per call and honors
         # callable configuration, so reading `keypair` and `kid` from separate
-        # calls could pair values from two different keys.
+        # calls could pair values from two different keys. The generation comes
+        # from the same active ring entry, attributing the token to one key
+        # generation even when issuance races a rotation commit.
         jwk = Doorkeeper::OpenidConnect.signing_key
 
         SigningKey.new(
           keypair: jwk.keypair,
           kid: jwk.kid,
           algorithm: Doorkeeper::OpenidConnect.signing_algorithm.to_s,
+          generation: Doorkeeper::OpenidConnect.signing_generation,
         )
       end
 

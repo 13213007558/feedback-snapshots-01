@@ -557,5 +557,56 @@ describe Doorkeeper::OpenidConnect::DiscoveryController, type: :controller do
         expect(kids.uniq).to eq kids
       end
     end
+
+    context "during a key rotation" do
+      let(:predecessor_pem) { OpenSSL::PKey::RSA.generate(2048).to_pem }
+      let(:candidate_pem) { OpenSSL::PKey::RSA.generate(2048).to_pem }
+
+      before do
+        Doorkeeper::OpenidConnect.configure do
+          issuer "dummy"
+          signing_key [predecessor_pem]
+        end
+      end
+
+      it "keeps the pending candidate out of the published JWKS" do
+        pending = Doorkeeper::OpenidConnect.prepare_signing_key(candidate_pem)
+
+        subject
+        data = JSON.parse(response.body)
+
+        expect(data["keys"].size).to eq 1
+        expect(data["keys"].map { |k| k["kid"] }).not_to include(pending.kid)
+      end
+
+      it "publishes both generations after commit, active key first" do
+        predecessor_kid = Doorkeeper::OpenidConnect.signing_key.kid
+        pending = Doorkeeper::OpenidConnect.prepare_signing_key(candidate_pem)
+        Doorkeeper::OpenidConnect.commit_signing_key
+
+        subject
+        data = JSON.parse(response.body)
+
+        expect(data["keys"].size).to eq 2
+        expect(data["keys"].first["kid"]).to eq pending.kid
+        expect(data["keys"].map { |k| k["kid"] })
+          .to contain_exactly(predecessor_kid, pending.kid)
+        expect(data["keys"]).to all(include("use" => "sig", "alg" => "RS256"))
+      end
+
+      it "keeps serving the predecessor JWKS after a failed commit" do
+        Doorkeeper::OpenidConnect.prepare_signing_key(candidate_pem)
+        Doorkeeper::OpenidConnect.key_ring.persister = ->(_snapshot) { raise "down" }
+        expect { Doorkeeper::OpenidConnect.commit_signing_key }.to raise_error(RuntimeError)
+
+        subject
+        data = JSON.parse(response.body)
+
+        expect(data["keys"].size).to eq 1
+        expect(data["keys"].first["kid"]).to eq(
+          Doorkeeper::OpenidConnect.key_ring.published_entries.first.kid,
+        )
+      end
+    end
   end
 end

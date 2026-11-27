@@ -2,6 +2,7 @@ Upgrading? [Migration from Old Versions](https://github.com/doorkeeper-gem/doork
 
 ## Unreleased
 
+- Add an atomic, thread-safe OIDC signing-key rotation ring (`prepare_signing_key` / `commit_signing_key` / `rollback_signing_key`). A candidate key is validated and held in a private pending slot, so it never appears in discovery or the JWKS until committed; a failed validation or persistence step leaves discovery, JWKS and the signing entry point on the previous configuration. The active and still-verifiable predecessor generations are published together in the JWKS, and each issued token is attributable to one key generation via its `kid`
 - Add entry here
 
 ## v2.1.0 (2026-10-20)

@@ -349,6 +349,28 @@ describe Doorkeeper::OpenidConnect::IdToken do
       subject.select_key
     end
 
+    it "attributes the token to the active keyring generation" do
+      expect(subject.select_key.generation).to eq Doorkeeper::OpenidConnect.signing_generation
+    end
+
+    context "during a rotation" do
+      let(:new_pem) { OpenSSL::PKey::RSA.generate(2048).to_pem }
+
+      it "follows the committed generation for newly issued tokens" do
+        baseline = subject.select_key.generation
+
+        Doorkeeper::OpenidConnect.prepare_signing_key(new_pem)
+        # A pending key must not change which generation a new token uses.
+        expect(subject.select_key.generation).to eq baseline
+
+        Doorkeeper::OpenidConnect.commit_signing_key
+
+        key = subject.select_key
+        expect(key.generation).to eq baseline + 1
+        expect(key.kid).to eq Doorkeeper::OpenidConnect.signing_key.kid
+      end
+    end
+
     context "when overridden by a subclass" do
       let(:custom_class) do
         Class.new(described_class) do

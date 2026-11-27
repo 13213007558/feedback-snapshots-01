@@ -9,6 +9,9 @@ module Doorkeeper
       end
 
       @config = Config::Builder.new(&block).build
+      # The signing-key ring caches the resolved `signing_key` entries; rebuild
+      # it on reconfigure so a changed key set takes effect without a restart.
+      OpenidConnect.reset_key_ring!
       validate_issuer_consistency
       # Access grant models that loaded before this point deferred their
       # `openid_request` association because it needs `open_id_request_class`.

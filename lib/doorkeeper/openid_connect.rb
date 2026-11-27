@@ -24,6 +24,7 @@ module Doorkeeper
     autoload :Errors, "doorkeeper/openid_connect/errors"
     autoload :GrantTypesSupportedMixin, "doorkeeper/openid_connect/grant_types_supported_mixin"
     autoload :IdToken, "doorkeeper/openid_connect/id_token"
+    autoload :KeyRing, "doorkeeper/openid_connect/key_ring"
     autoload :TokenEndpointAuthMethodsSupportedMixin,
              "doorkeeper/openid_connect/token_endpoint_auth_methods_supported_mixin"
     autoload :UserInfo, "doorkeeper/openid_connect/user_info"
@@ -145,27 +146,73 @@ module Doorkeeper
       unwrap_callable(configuration.signing_algorithm).to_s.upcase.to_sym
     end
 
+    # The rotation state machine. Rebuilt whenever `configure` runs (see
+    # `.reset_key_ring!`), it is the single source of truth for which key
+    # generation signs new tokens and which generations stay verifiable in the
+    # JWKS. A `signing_key` callable is resolved once per build, mirroring how
+    # the rest of the configuration is snapshotted at configure time.
+    def self.key_ring
+      @key_ring ||= KeyRing.new(entries: resolved_signing_entries, builder: method(:build_jwk))
+    end
+
+    # Drops the cached ring so the next reader rebuilds it from the current
+    # configuration. Called by `.configure`; exposed because specs and host
+    # apps that mutate `signing_key` outside a configure block also need a way
+    # to force the rebuild.
+    def self.reset_key_ring!
+      @key_ring = nil
+    end
+
+    # Prepares a candidate key for rotation: it is validated and held in the
+    # ring's private pending slot, where discovery, JWKS and the signing entry
+    # point cannot observe it. Returns the pending `KeyRing::Entry`.
+    def self.prepare_signing_key(raw)
+      key_ring.prepare(raw)
+    end
+
+    # Atomically promotes the pending key. The configured persister writes a
+    # snapshot first; if that (or validation) fails, the previous generation
+    # stays active and every public surface keeps serving the old config.
+    def self.commit_signing_key
+      key_ring.commit
+    end
+
+    # Discards the pending candidate, leaving the active generation untouched.
+    def self.rollback_signing_key
+      key_ring.rollback
+    end
+
     # Returns the active signing key used when issuing new ID tokens.
     # When multiple keys are configured (see `.signing_keys`), this is the
     # first entry; the remaining keys are exposed via the JWKS endpoint so
     # clients can still validate tokens signed with retired keys during a
     # rotation window.
     def self.signing_key
-      build_jwk(normalize_entry(resolved_signing_entries.first))
+      key_ring.active_entry.jwk
     end
 
-    # Returns every configured key as a `JWT::JWK` instance, in the order
-    # they were declared. The first entry is the active signing key; the
+    # Returns every published key as a `JWT::JWK` instance, active first.
+    # A key parked for rotation is not included until it is committed; the
     # rest are kept for JWKS publication only (e.g. during key rotation).
     def self.signing_keys
-      resolved_signing_entries.map { |entry| build_jwk(normalize_entry(entry)) }
+      key_ring.published_entries.map(&:jwk)
+    end
+
+    # The generation number of the key that currently signs new tokens.
+    def self.signing_generation
+      key_ring.active_entry.generation
+    end
+
+    # The generation a token was signed with, looked up from its JWS `kid`.
+    def self.generation_for_kid(kid)
+      key_ring.generation_for(kid)
     end
 
     def self.signing_key_normalized
       signing_key.export
     end
 
-    # Returns every configured key formatted for inclusion in the JWKS
+    # Returns every published key formatted for inclusion in the JWKS
     # response, with `use` and `alg` already merged. The discovery
     # controller renders this verbatim inside `keys: [...]`.
     #
@@ -201,17 +248,6 @@ module Doorkeeper
       entries
     end
     private_class_method :resolved_signing_entries
-
-    # Normalizes a single entry of the `signing_key` configuration into a
-    # canonical Hash. Today the only recognized shape is the bare key value
-    # (a PEM string for asymmetric algorithms or a shared secret for HMAC),
-    # but this indirection lets future PRs introduce per-key options
-    # (e.g. `{ key:, algorithm:, kid:, use: }`) without touching the
-    # discovery controller or the JWKS rendering path.
-    def self.normalize_entry(entry)
-      entry.is_a?(Hash) ? entry : { key: entry }
-    end
-    private_class_method :normalize_entry
 
     def self.build_jwk(entry)
       key_value = entry.fetch(:key)

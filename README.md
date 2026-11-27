@@ -93,6 +93,18 @@ Configuration and usage are documented in the [wiki](https://github.com/doorkeep
 
 The remaining pages cover scopes and claims, `prompt` and `max_age`, routes and multiple mounts, nonces, RP-Initiated Logout, Dynamic Client Registration, and I18n.
 
+### Signing key rotation
+
+`signing_key` accepts an array: the first entry signs new ID tokens and the rest stay published in the JWKS so clients can still validate tokens signed with a retired key. For a zero-downtime rotation without restarting the process, drive the built-in key ring instead of editing the initializer in place:
+
+```ruby
+Doorkeeper::OpenidConnect.prepare_signing_key(new_pem) # validated, held privately
+# discovery and the JWKS still advertise only the old key here
+Doorkeeper::OpenidConnect.commit_signing_key            # atomic switch
+```
+
+A candidate is validated before it is parked and is invisible to discovery, the JWKS, and the signing entry point until `commit_signing_key`. The commit persists a snapshot before swapping the active generation, so a failed validation or persistence step leaves every endpoint on the previous, still-usable configuration. Use `rollback_signing_key` to discard a parked candidate, and `generation_for_kid(kid)` to attribute any issued token to the exact key generation that signed it. A runnable end-to-end walkthrough lives in [`script/key_rotation_scenario.rb`](script/key_rotation_scenario.rb).
+
 ## Development
 
 Run `bundle install` to setup all development dependencies.

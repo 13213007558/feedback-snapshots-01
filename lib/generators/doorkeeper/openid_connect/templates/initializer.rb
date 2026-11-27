@@ -35,6 +35,24 @@ Doorkeeper::OpenidConnect.configure do
   #   File.read("config/keys/current.pem"),  # active
   #   File.read("config/keys/previous.pem"), # retired but still in JWKS
   # ]
+  #
+  # For a zero-downtime rotation without restarting the process, drive the
+  # built-in key ring instead of editing `signing_key` in place. A candidate is
+  # validated and held privately first, so it never reaches discovery or the
+  # JWKS until it is committed; a failed validation or persistence step leaves
+  # every endpoint serving the previous, still-usable configuration:
+  #
+  #   Doorkeeper::OpenidConnect.prepare_signing_key(new_pem) # validate + park
+  #   # ... discovery/JWKS still advertise only the old key here ...
+  #   Doorkeeper::OpenidConnect.commit_signing_key            # atomic switch
+  #
+  # `commit_signing_key` writes a snapshot through the key ring's persister
+  # before swapping the active generation. The default persister is a no-op;
+  # assign one that durably stores the snapshot if you need the new key to
+  # survive a restart. Use `rollback_signing_key` to discard a parked candidate.
+  # Every issued token carries the signing generation in its `kid`, resolvable
+  # via `Doorkeeper::OpenidConnect.generation_for_kid(kid)`, so issuance that
+  # races the commit boundary is always attributable to exactly one generation.
 
   subject_types_supported [:public]
 

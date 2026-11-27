@@ -311,6 +311,130 @@ describe Doorkeeper::OpenidConnect do
     end
   end
 
+  describe "signing key rotation" do
+    let(:predecessor_pem) { OpenSSL::PKey::RSA.generate(2048).to_pem }
+    let(:candidate_pem) { OpenSSL::PKey::RSA.generate(2048).to_pem }
+
+    before do
+      described_class.configure do
+        issuer "dummy"
+        signing_key [predecessor_pem]
+      end
+    end
+
+    describe ".signing_generation and .generation_for_kid" do
+      it "starts at generation 0 and resolves the active kid back to it" do
+        expect(subject.signing_generation).to eq 0
+        expect(subject.generation_for_kid(subject.signing_key.kid)).to eq 0
+        expect(subject.generation_for_kid("unknown")).to be_nil
+      end
+    end
+
+    describe ".prepare_signing_key" do
+      it "holds a valid candidate out of every public surface" do
+        pending = subject.prepare_signing_key(candidate_pem)
+
+        expect(subject.key_ring).to be_pending
+        expect(subject.signing_keys_normalized.map { |k| k[:kid] }).not_to include(pending.kid)
+        expect(subject.signing_generation).to eq 0
+      end
+
+      it "rejects an unparseable candidate without altering the active config" do
+        active_kid = subject.signing_key.kid
+
+        expect { subject.prepare_signing_key("not-a-valid-pem") }
+          .to raise_error(OpenSSL::PKey::PKeyError)
+
+        expect(subject.key_ring).not_to be_pending
+        expect(subject.signing_key.kid).to eq active_kid
+        expect(subject.signing_keys_normalized.size).to eq 1
+      end
+    end
+
+    describe ".commit_signing_key" do
+      it "publishes the candidate and keeps the predecessor in the JWKS" do
+        predecessor_kid = subject.signing_key.kid
+        pending = subject.prepare_signing_key(candidate_pem)
+
+        subject.commit_signing_key
+
+        expect(subject.signing_key.kid).to eq pending.kid
+        kids = subject.signing_keys_normalized.map { |k| k[:kid] }
+        expect(kids).to contain_exactly(predecessor_kid, pending.kid)
+        expect(subject.generation_for_kid(predecessor_kid)).to eq 0
+        expect(subject.generation_for_kid(pending.kid)).to eq 1
+      end
+
+      it "keeps the old configuration when persistence fails" do
+        subject.prepare_signing_key(candidate_pem)
+        subject.key_ring.persister = ->(_snapshot) { raise "disk full" }
+        predecessor_kid = subject.signing_key.kid
+
+        expect { subject.commit_signing_key }.to raise_error(RuntimeError, "disk full")
+
+        expect(subject.signing_key.kid).to eq predecessor_kid
+        expect(subject.signing_keys_normalized.size).to eq 1
+        expect(subject.key_ring).to be_pending
+      end
+    end
+
+    describe ".rollback_signing_key" do
+      it "drops the pending candidate and leaves the active key intact" do
+        subject.prepare_signing_key(candidate_pem)
+        active_kid = subject.signing_key.kid
+
+        subject.rollback_signing_key
+
+        expect(subject.key_ring).not_to be_pending
+        expect(subject.signing_key.kid).to eq active_kid
+      end
+    end
+
+    describe ".reset_key_ring!" do
+      it "rebuilds the ring from a reconfigured signing_key" do
+        subject.prepare_signing_key(candidate_pem)
+        subject.commit_signing_key
+        expect(subject.signing_keys_normalized.size).to eq 2
+
+        described_class.configure do
+          issuer "dummy"
+          signing_key [predecessor_pem]
+        end
+
+        expect(subject.signing_keys_normalized.size).to eq 1
+        expect(subject.signing_generation).to eq 0
+      end
+    end
+
+    describe "real public-key verification across the boundary" do
+      it "verifies predecessor and current tokens against their published JWKS keys" do
+        predecessor_jwk = subject.signing_key
+        predecessor_token = JWT.encode(
+          { iss: "dummy", sub: "1", aud: "c", exp: Time.now.to_i + 60, iat: Time.now.to_i },
+          predecessor_jwk.keypair, "RS256", kid: predecessor_jwk.kid,
+        )
+
+        pending = subject.prepare_signing_key(candidate_pem)
+        subject.commit_signing_key
+        current_jwk = subject.signing_key
+        current_token = JWT.encode(
+          { iss: "dummy", sub: "2", aud: "c", exp: Time.now.to_i + 60, iat: Time.now.to_i },
+          current_jwk.keypair, "RS256", kid: current_jwk.kid,
+        )
+
+        jwks = { keys: subject.signing_keys_normalized }
+        [predecessor_token, current_token].each do |token|
+          header = JSON.parse(Base64.urlsafe_decode64(token.split(".").first))
+          jwk = jwks[:keys].find { |key| key[:kid] == header["kid"] }
+          public_key = JWT::JWK.import(jwk).verify_key
+          expect { JWT.decode(token, public_key, true, algorithms: ["RS256"]) }.not_to raise_error
+        end
+
+        expect(pending.kid).to eq current_jwk.kid
+      end
+    end
+  end
+
   describe "registering grant flows" do
     describe Doorkeeper::Request do
       it 'uses the correct strategy for "id_token" response types' do
