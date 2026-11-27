@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add `DeviseTwoFactor::OtpRotation` for rotating a TOTP device with an overlap window, per-device replay state and explicit termination of in-flight old-device verifications
+
 # 6.4.1
 
 - Update gem spec metadata sourcecode URI

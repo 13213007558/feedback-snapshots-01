@@ -183,6 +183,37 @@ However you decide to handle enrollment, there are a few important consideration
 
 It sounds like a lot of work, but most of these problems have been very elegantly solved by other people. We recommend taking a look at the excellent workflows used by Heroku and Google for inspiration.
 
+### Rotating a second-factor device
+
+When a user replaces their authenticator, the old device has to keep working during the changeover and the new device must prove itself before it takes over. `DeviseTwoFactor::OtpRotation` models this as independent devices, each with its own secret and replay state, coordinated by a `Rotation`:
+
+```ruby
+old_device = DeviseTwoFactor::OtpRotation::OtpDevice.new(
+  id: :old, otp_secret: current_user.otp_secret, drift: Devise.otp_allowed_drift
+)
+rotation = DeviseTwoFactor::OtpRotation::Rotation.new(old_device: old_device)
+
+# The old device still authenticates while the replacement is pending.
+rotation.validate_and_consume(params[:otp_attempt])
+
+new_device = DeviseTwoFactor::OtpRotation::OtpDevice.new(
+  id: :new, otp_secret: Devise::Models::TwoFactorAuthenticatable.generate_otp_secret,
+  drift: Devise.otp_allowed_drift
+)
+rotation.enroll(new_device)
+
+# A failed check returns :invalid_code without consuming a new-device attempt.
+check = rotation.verify_new_device(params[:new_otp_attempt])
+rotation.commit_rotation! if check.success?
+```
+
+Key guarantees:
+
+* The old device stays usable until `commit_rotation!` retires it; the pending device cannot log in until it is verified and committed.
+* Replay protection is keyed per device (per secret), so two devices that happen to emit the same digits in one window still record distinct consumptions. `Consumption#device_id` and `Consumption#otp_secret` retain the source of every accepted code.
+* A failed new-device check never writes a replay marker, so it does not spend one of the new device's attempts; the old device's already-submitted state is left untouched.
+* A verification can be split with `begin_verification` / `commit_verification`. If a rotation commits while an old-device verification is still in flight, its commit returns a `:retired` `LoginResult` instead of silently landing after the switch.
+
 ### Filtering sensitive parameters from the logs
 
 To prevent two-factor authentication codes from leaking if your application logs get breached, you'll want to filter sensitive parameters from the Rails logs. Add the following to `config/initializers/filter_parameter_logging.rb`:
