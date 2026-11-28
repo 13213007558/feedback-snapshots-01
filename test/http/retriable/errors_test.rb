@@ -4,6 +4,7 @@ require "test_helper"
 
 class HTTPRetriableErrorsTest < Minitest::Test
   cover "HTTP::OutOfRetriesError*"
+  cover "HTTP::DeadlineExceededError*"
 
   def error
     @error ||= HTTP::OutOfRetriesError.new("out of retries")
@@ -67,5 +68,21 @@ class HTTPRetriableErrorsTest < Minitest::Test
     err.cause = explicit
 
     assert_same explicit, err.cause
+  end
+
+  # -- HTTP::DeadlineExceededError --
+
+  def test_deadline_error_is_a_kind_of_out_of_retries_error
+    assert_kind_of HTTP::OutOfRetriesError, HTTP::DeadlineExceededError.new("deadline")
+  end
+
+  def test_deadline_error_inherits_response_and_cause_behavior
+    original = RuntimeError.new("boom")
+    err = HTTP::DeadlineExceededError.new("deadline")
+    err.cause = original
+    err.response = :sentinel
+
+    assert_same original, err.cause
+    assert_equal :sentinel, err.response
   end
 end

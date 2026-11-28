@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `HTTP.retriable` accepts a `deadline:` keyword: a monotonic time (compared
+  against `Process.clock_gettime(Process::CLOCK_MONOTONIC)`) that bounds the
+  whole operation. A retry only starts when both the server/backoff suggested
+  wait and the remaining lease allow it. If the suggested wait would finish
+  after the deadline, or the deadline is reached while waiting, the performer
+  raises `HTTP::DeadlineExceededError` (a subclass of `HTTP::OutOfRetriesError`)
+  instead of making another transmission. The custom `should_retry` predicate
+  can still veto a retry, and the underlying connection is still closed after
+  each failed attempt.
 - `HTTP.nodelay` (and `HTTP::Session#nodelay`) now accepts an optional boolean,
   so `HTTP.nodelay(false)` disables `TCP_NODELAY` for a session. ([#863])
 

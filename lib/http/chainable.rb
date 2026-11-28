@@ -351,13 +351,18 @@ module HTTP
     #   # Retry max 3 times with geometrically progressed delay between retries
     #   HTTP.retriable(tries: 3, delay: proc { |i| 1 + i*i }).get(url)
     #
+    #   # Retry only while the operation deadline (monotonic time) still allows it
+    #   deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 5
+    #   HTTP.retriable(deadline: deadline).get(url)
+    #
     # @param (see Performer#initialize)
     # @return [HTTP::Session]
     # @api public
     def retriable(tries: nil, delay: nil, exceptions: nil, retry_statuses: nil,
-                  on_retry: nil, max_delay: nil, should_retry: nil)
+                  on_retry: nil, max_delay: nil, should_retry: nil, deadline: nil)
       opts = { tries: tries, delay: delay, exceptions: exceptions, retry_statuses: retry_statuses,
-               on_retry: on_retry, max_delay: max_delay, should_retry: should_retry }.compact
+               on_retry: on_retry, max_delay: max_delay, should_retry: should_retry,
+               deadline: deadline }.compact
       branch default_options.with_retriable(opts.empty? || opts)
     end
 

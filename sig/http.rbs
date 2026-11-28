@@ -114,7 +114,7 @@ module HTTP
     def default_options=: (Hash[Symbol, untyped] | Options opts) -> Options
     def nodelay: (?bool enabled) -> Session
     def use: (*(Symbol | Hash[Symbol, Hash[Symbol, untyped]]) features) -> Session
-    def retriable: (?tries: Integer?, ?delay: (Numeric | ^(Integer) -> Numeric)?, ?exceptions: Array[singleton(Exception)]?, ?retry_statuses: untyped, ?on_retry: (^(Request, Exception?, Response?) -> void)?, ?max_delay: Numeric?, ?should_retry: (^(Request, Exception?, Response?, Integer) -> bool)?) -> Session
+    def retriable: (?tries: Integer?, ?delay: (Numeric | ^(Integer) -> Numeric)?, ?exceptions: Array[singleton(Exception)]?, ?retry_statuses: untyped, ?on_retry: (^(Request, Exception?, Response?) -> void)?, ?max_delay: Numeric?, ?should_retry: (^(Request, Exception?, Response?, Integer) -> bool)?, ?deadline: Numeric?) -> Session
 
     private
 
@@ -1496,6 +1496,9 @@ module HTTP
     def cause: () -> Exception?
   end
 
+  class DeadlineExceededError < OutOfRetriesError
+  end
+
   module Timeout
     class Null
       NATIVE_CONNECT_TIMEOUT: bool
@@ -1582,8 +1585,14 @@ module HTTP
   end
 
   module Retriable
+    class Clock
+      def now: () -> Numeric
+      def sleep: (Numeric seconds) -> Numeric
+    end
+
     class Performer
       RETRIABLE_ERRORS: Array[singleton(Exception)]
+      DEFAULT_CLOCK: Clock
 
       @exception_classes: Array[singleton(Exception)]
       @retry_statuses: untyped
@@ -1591,8 +1600,10 @@ module HTTP
       @on_retry: ^(Request, Exception?, Response?) -> void
       @should_retry_proc: untyped
       @delay_calculator: DelayCalculator
+      @deadline: Numeric?
+      @clock: Clock
 
-      def initialize: (?tries: Integer, ?delay: (Numeric | ^(Integer) -> Numeric)?, ?exceptions: Array[singleton(Exception)], ?retry_statuses: untyped, ?on_retry: ^(Request, Exception?, Response?) -> void, ?max_delay: Numeric, ?should_retry: (^(Request, Exception?, Response?, Integer) -> bool)?) -> void
+      def initialize: (?tries: Integer, ?delay: (Numeric | ^(Integer) -> Numeric)?, ?exceptions: Array[singleton(Exception)], ?retry_statuses: untyped, ?on_retry: ^(Request, Exception?, Response?) -> void, ?max_delay: Numeric, ?should_retry: (^(Request, Exception?, Response?, Integer) -> bool)?, ?deadline: Numeric?, ?clock: Clock) -> void
       def perform: (Client client, Request req) { () -> Response? } -> untyped
       def calculate_delay: (Integer iteration, Response? response) -> Float
 
@@ -1605,6 +1616,13 @@ module HTTP
       def retry_exception?: (Exception err) -> bool
       def retry_response?: (untyped res) -> bool
       def wait_for_retry_or_raise: (Request req, Exception? err, Response? res, Integer attempt) -> void
+      def flush_and_raise: (Response? response, Exception error) -> void
+      def remaining_lease: () -> Numeric
+      def deadline?: () -> bool
+      def deadline_exceeded_before_wait?: (Numeric delay) -> bool
+      def deadline_exceeded_after_wait?: () -> bool
+      def deadline_exceeded_error: (Request request, Response? response, Exception? exception) -> DeadlineExceededError
+      def sleep: (Numeric seconds) -> void
       def out_of_retries_error: (Request request, Response? response, Exception? exception) -> OutOfRetriesError
     end
 

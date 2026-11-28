@@ -32,4 +32,13 @@ module HTTP
       @cause || super
     end
   end
+
+  # The operation deadline (lease) elapsed before another attempt could run.
+  #
+  # Unlike {OutOfRetriesError}, this means the client stopped because it ran
+  # out of its own permitted time window, not because the server refused to
+  # accept another attempt. It is a subclass of {OutOfRetriesError} so code
+  # that already rescues that class keeps working.
+  class DeadlineExceededError < OutOfRetriesError
+  end
 end

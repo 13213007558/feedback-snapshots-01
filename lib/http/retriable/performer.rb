@@ -3,6 +3,7 @@
 require "date"
 require "http/retriable/errors"
 require "http/retriable/delay_calculator"
+require "http/retriable/clock"
 require "openssl"
 
 module HTTP
@@ -24,6 +25,9 @@ module HTTP
         IOError
       ].freeze
 
+      # Default time source, shared so no allocation happens per request
+      DEFAULT_CLOCK = Clock.new.freeze
+
       # Create a new retry performer
       #
       # @param [#to_i] tries maximum number of attempts
@@ -33,15 +37,21 @@ module HTTP
       # @param [#call] on_retry callback invoked on each retry
       # @param [#to_f] max_delay maximum delay between retries
       # @param [#call, nil] should_retry custom retry predicate
+      # @param [Numeric, nil] deadline monotonic time after which no further
+      #   attempt may start; the value is compared against the clock
+      # @param [#now, #sleep] clock time source backing the deadline and sleeps
       # @api private
       # @return [HTTP::Retriable::Performer]
       def initialize(tries: 5, delay: nil, exceptions: RETRIABLE_ERRORS, retry_statuses: nil,
-                     on_retry: ->(*_args) {}, max_delay: Float::MAX, should_retry: nil)
+                     on_retry: ->(*_args) {}, max_delay: Float::MAX, should_retry: nil,
+                     deadline: nil, clock: DEFAULT_CLOCK)
         @exception_classes = exceptions
         @retry_statuses = retry_statuses
         @tries = tries.to_i
         @on_retry = on_retry
         @should_retry_proc = should_retry
+        @deadline = deadline
+        @clock = clock
         @delay_calculator = DelayCalculator.new(delay: delay, max_delay: max_delay)
       end
 
@@ -159,18 +169,99 @@ module HTTP
         end
       end
 
-      # Waits for retry delay or raises if out of attempts
+      # Waits for retry delay or raises if out of attempts or past the deadline
       #
       # @api private
       # @return [void]
       def wait_for_retry_or_raise(req, err, res, attempt)
-        if attempt < @tries
-          @on_retry.call(req, err, res)
-          sleep(calculate_delay(attempt, res))
-        else
-          res&.flush
-          raise out_of_retries_error(req, res, err)
+        if attempt >= @tries
+          flush_and_raise(res, out_of_retries_error(req, res, err))
         end
+
+        delay = calculate_delay(attempt, res)
+
+        if deadline_exceeded_before_wait?(delay)
+          flush_and_raise(res, deadline_exceeded_error(req, res, err))
+        end
+
+        @on_retry.call(req, err, res)
+        sleep(delay)
+
+        return unless deadline_exceeded_after_wait?
+
+        flush_and_raise(res, deadline_exceeded_error(req, res, err))
+      end
+
+      # Flushes any pending response body before surfacing a terminal error
+      #
+      # @param response [HTTP::Response, nil]
+      # @param error [Exception]
+      # @api private
+      # @return [void]
+      def flush_and_raise(response, error)
+        response&.flush
+        raise error
+      end
+
+      # Remaining time on the operation lease, in seconds
+      #
+      # @api private
+      # @return [Numeric]
+      def remaining_lease
+        @deadline - @clock.now
+      end
+
+      # Whether a deadline is configured
+      #
+      # @api private
+      # @return [Boolean]
+      def deadline?
+        !@deadline.nil?
+      end
+
+      # The recommended wait would not finish before the lease runs out
+      #
+      # @param [Numeric] delay server/backoff suggested wait
+      # @api private
+      # @return [Boolean]
+      def deadline_exceeded_before_wait?(delay)
+        deadline? && remaining_lease <= delay
+      end
+
+      # Time already reached the deadline while we were waiting
+      #
+      # @api private
+      # @return [Boolean]
+      def deadline_exceeded_after_wait?
+        deadline? && @clock.now >= @deadline
+      end
+
+      # Builds DeadlineExceededError
+      #
+      # @param request [HTTP::Request]
+      # @param response [HTTP::Response, nil]
+      # @param exception [Exception, nil]
+      # @api private
+      # @return [HTTP::DeadlineExceededError]
+      def deadline_exceeded_error(request, response, exception)
+        message = format("%s <%s> deadline exceeded", String(request.verb).upcase, request.uri)
+
+        message += " with #{response.status}" if response
+        message += ":#{exception}" if exception
+
+        DeadlineExceededError.new(message).tap do |ex|
+          ex.cause = exception
+          ex.response = response
+        end
+      end
+
+      # Sleeps using the injected clock so time stays controllable in tests
+      #
+      # @param [Numeric] seconds
+      # @api private
+      # @return [void]
+      def sleep(seconds)
+        @clock.sleep(seconds)
       end
 
       # Builds OutOfRetriesError
