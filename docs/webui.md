@@ -47,6 +47,34 @@ See `lib/sidekiq/web/config.rb` for options.
 There is a sample Web UI extension in `examples/webui-ext` which shows you how to build your own UI extension.
 Sidekiq 8.0 took a number of steps to improve security.
 
+### Scoping an install
+
+By default `register` mounts everything an extension offers: its tabs, its HTTP
+endpoints and its static assets. The mounter can explicitly narrow those surfaces
+with `capabilities:` when an install should only publish a subset, e.g. a public
+install which serves help resources while the extension's operational endpoints
+await separate approval:
+
+```ruby
+Sidekiq::Web.configure do |config|
+  # help-only install: navbar tab and static files, no HTTP endpoints
+  config.register(HelpExt, name: "help", tab: "Help", index: "help/pages/guide.html",
+    root_dir: HelpExt::ROOT, asset_paths: ["pages"],
+    capabilities: %i[menu assets])
+
+  # internal install: the full extension, same as always
+  config.register(HelpExt, name: "help", tab: "Help", index: "help",
+    root_dir: HelpExt::ROOT, asset_paths: ["pages"])
+end
+```
+
+The available capabilities are `:menu` (navbar tabs), `:routes` (HTTP endpoints)
+and `:assets` (static files and locales). Without `:routes`, the extension's
+`registered` hook is never called. Registration is transactional: if an
+extension fails partway through `register`, everything it added is rolled back
+and the error is re-raised, so a half-registered extension never leaks tabs,
+routes or assets into the Web UI.
+
 ### Parameters
 
 Starting in 8.0 we distinguish between URL parameters (query parameters) and route parameters (variables in the URL).

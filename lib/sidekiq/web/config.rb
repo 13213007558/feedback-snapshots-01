@@ -25,6 +25,13 @@ module Sidekiq
         profile_store_url: "https://api.profiler.firefox.com/compressed-store"
       }
 
+      # The surfaces a Web UI extension may publish. The mounter can
+      # restrict an install to a subset, see #register_extension:
+      #   :menu   - add the extension tabs to the navbar
+      #   :routes - mount the extension HTTP endpoints
+      #   :assets - serve the extension static files and load its locales
+      CAPABILITIES = %i[menu routes assets].freeze
+
       ##
       # Allows users to add custom rows to all of the Job
       # tables, e.g. Retries, Dead, Scheduled, with custom
@@ -77,41 +84,90 @@ module Sidekiq
       # @param root_dir [String] directory location to find assets, locales and views, typically `web/` within the gemfile
       # @param asset_paths [Array] one or more directories under {root}/assets/{name} to be publicly served, e.g. ["js", "css", "img"]
       # @param cache_for [Integer] amount of time to cache assets, default one day
+      # @param capabilities [Array] the surfaces this install may publish, a subset of CAPABILITIES;
+      #   defaults to all, preserving the historical "full install" behavior
       #
       # Web extensions will have a root `web/` directory with `locales/`, `assets/`
       # and `views/` subdirectories.
-      def register_extension(extclass, name:, tab:, index:, root_dir: nil, cache_for: 86400, asset_paths: nil)
-        tab = Array(tab)
-        index = Array(index)
-        tab.zip(index).each do |tab, index|
-          tabs[tab] = index
+      #
+      # The mounter can narrow an install with the :capabilities option, e.g. an
+      # extension which should only publish help resources, while its
+      # operational endpoints await separate approval:
+      #
+      #   config.register(HelpExt, name: "help", tab: "Help", index: "help/pages/guide.html",
+      #     root_dir: HelpExt::ROOT, asset_paths: ["pages"],
+      #     capabilities: %i[menu assets])
+      #
+      # Registration is transactional: if the extension fails partway through,
+      # everything it added (tabs, locales, asset middleware, routes) is rolled
+      # back and the error is re-raised. Extensions registered earlier are
+      # not affected.
+      def register_extension(extclass, name:, tab:, index:, root_dir: nil, cache_for: 86400, asset_paths: nil, capabilities: CAPABILITIES)
+        capabilities = Array(capabilities)
+        unknown = capabilities - CAPABILITIES
+        unless unknown.empty?
+          raise ArgumentError, "unknown extension capabilities #{unknown.inspect}, must be a subset of #{CAPABILITIES.inspect}"
         end
-        if root_dir
-          locdir = File.join(root_dir, "locales")
-          locales << locdir if File.directory?(locdir)
 
-          if asset_paths && name
-            # if you have {root}/assets/{name}/js/scripts.js
-            # and {root}/assets/{name}/css/styles.css
-            # you would pass in:
-            #   asset_paths: ["js", "css"]
-            # See script_tag and style_tag in web/helpers.rb
-            assdir = File.join(root_dir, "assets")
-            assurls = Array(asset_paths).map { |x| "/#{name}/#{x}" }
-            assetprops = {
-              urls: assurls,
-              root: assdir,
-              cascade: true
-            }
-            assetprops[:header_rules] = [[:all, {"cache-control" => "private, max-age=#{cache_for.to_i}"}]] if cache_for
-            middlewares << [[Rack::Static, assetprops], nil]
+        # checkpoint so a failed registration can be rolled back completely;
+        # a partially registered extension must not leak tabs, locales,
+        # asset middleware or routes into the Web UI
+        checkpoint = [tabs.dup, locales.dup, middlewares.dup, route_sizes]
+        begin
+          if capabilities.include?(:menu)
+            tab = Array(tab)
+            index = Array(index)
+            tab.zip(index).each do |tab, index|
+              tabs[tab] = index
+            end
           end
-        end
 
-        yield self if block_given?
-        extclass.registered(Web::Application)
+          if root_dir && capabilities.include?(:assets)
+            locdir = File.join(root_dir, "locales")
+            locales << locdir if File.directory?(locdir)
+
+            if asset_paths && name
+              # if you have {root}/assets/{name}/js/scripts.js
+              # and {root}/assets/{name}/css/styles.css
+              # you would pass in:
+              #   asset_paths: ["js", "css"]
+              # See script_tag and style_tag in web/helpers.rb
+              assdir = File.join(root_dir, "assets")
+              assurls = Array(asset_paths).map { |x| "/#{name}/#{x}" }
+              assetprops = {
+                urls: assurls,
+                root: assdir,
+                cascade: true
+              }
+              assetprops[:header_rules] = [[:all, {"cache-control" => "private, max-age=#{cache_for.to_i}"}]] if cache_for
+              middlewares << [[Rack::Static, assetprops], nil]
+            end
+          end
+
+          yield self if block_given?
+          extclass.registered(Web::Application) if capabilities.include?(:routes)
+        rescue Exception
+          rollback(checkpoint)
+          raise
+        end
       end
       alias_method :register, :register_extension
+
+      private
+
+      def route_sizes
+        Web::Application.route_cache.transform_values(&:size)
+      end
+
+      def rollback(checkpoint)
+        saved_tabs, saved_locales, saved_middlewares, saved_route_sizes = checkpoint
+        tabs.replace(saved_tabs)
+        locales.replace(saved_locales)
+        middlewares.replace(saved_middlewares)
+        Web::Application.route_cache.each do |method, routes|
+          routes.slice!(saved_route_sizes[method]..)
+        end
+      end
     end
   end
 end
