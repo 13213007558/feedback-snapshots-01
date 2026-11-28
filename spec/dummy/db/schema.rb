@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema.define(version: 2023_01_01_000000) do
+ActiveRecord::Schema.define(version: 2023_01_01_000001) do
 
   create_table "oauth_access_grants", force: :cascade do |t|
     t.integer "resource_owner_id", null: false
@@ -53,6 +53,10 @@ ActiveRecord::Schema.define(version: 2023_01_01_000000) do
     t.string "owner_type"
     t.boolean "confidential", default: true, null: false
     t.text "post_logout_redirect_uris"
+    t.string "registered_space"
+    t.string "registered_grant_types"
+    t.string "registered_response_types"
+    t.string "registered_token_endpoint_auth_method"
     t.index ["owner_id", "owner_type"], name: "index_oauth_applications_on_owner_id_and_owner_type"
     t.index ["uid"], name: "index_oauth_applications_on_uid", unique: true
   end

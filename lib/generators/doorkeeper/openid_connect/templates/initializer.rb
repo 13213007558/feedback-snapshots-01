@@ -120,6 +120,39 @@ Doorkeeper::OpenidConnect.configure do
   # Enable dynamic client registration (default false)
   # dynamic_client_registration true
 
+  # Per-space client capability policies for dynamic registration.
+  #
+  # Each mount of this engine (`use_doorkeeper_openid_connect as: :admins`)
+  # is a registration space. A registration request may ask for any scope,
+  # grant type, response type or token endpoint authentication method, but
+  # only what its space approves is persisted on the client, advertised by
+  # that space's discovery document, and accepted at the authorize and token
+  # endpoints.
+  #
+  # A capability left undeclared in a space inherits the server's global
+  # setting; a declared capability is intersected with it, so a space can
+  # narrow what Doorkeeper offers but never widen it. Without this option
+  # every mount keeps the previous, unrestricted behaviour.
+  #
+  # client_capabilities do
+  #   space :admins do
+  #     scopes :openid, :profile
+  #     grant_types :authorization_code
+  #     response_types :code
+  #     token_endpoint_auth_methods :client_secret_basic
+  #   end
+  #
+  #   # The default (un-namespaced) mount, when it should be narrower too:
+  #   default_space do
+  #     scopes :openid
+  #   end
+  # end
+  #
+  # Declaring the policy after clients have registered does not change what
+  # those clients can do by itself. `Doorkeeper::OpenidConnect.capability_review`
+  # reports, for a registered client, which of its approved capabilities the
+  # current policy would now require to be approved again.
+
   # Gate the dynamic client registration endpoint (RFC 7591 §3.1). Leave unset
   # (default `nil`) to keep the endpoint open once `dynamic_client_registration`
   # is enabled. Set a block to require authorization: it is evaluated in the

@@ -9,6 +9,9 @@ module Doorkeeper
       end
 
       @config = Config::Builder.new(&block).build
+      # Policies are derived lazily from the active configuration, but a
+      # re-configure must not keep a policy from the previous configuration.
+      @capability_policy_registry = nil
       validate_issuer_consistency
       # Access grant models that loaded before this point deferred their
       # `openid_request` association because it needs `open_id_request_class`.
@@ -22,6 +25,92 @@ module Doorkeeper
     def self.configuration
       @config || (raise Errors::MissingConfiguration)
     end
+
+    # The policy registry for every declared registration space. Built from the
+    # current configuration on first use and rebuilt whenever `configure` runs,
+    # so a development reload cannot leave a stale policy in place.
+    def self.capability_policies
+      @capability_policy_registry ||= CapabilityPolicyRegistry.new.tap do |registry|
+        registry.register_all(configuration.client_capabilities)
+      end
+    end
+
+    # The capability policy of the registration space that received the given
+    # request. Requests outside a declared namespace resolve to the default
+    # space, which is what a single-mount installation has.
+    #
+    # @param request [ActionDispatch::Request]
+    # @return [CapabilityPolicy]
+    def self.capability_policy_for(request, prefix: nil)
+      if prefix.present?
+        capability_policies[prefix] || capability_policies.for_request(request)
+      else
+        capability_policies.for_request(request)
+      end
+    end
+
+    # The policy of a named space (`:admins`), or the default space when no
+    # name is given. An undeclared name falls back to the default policy rather
+    # than nil, so callers can always ask it what it approves.
+    #
+    # @param space [String, Symbol, nil]
+    # @return [CapabilityPolicy]
+    def self.capability_policy(space = nil)
+      capability_policies[space] || capability_policies.default_policy
+    end
+
+    # The request currently being served by a Doorkeeper controller, recorded
+    # by CapabilityPolicyContext. nil when the caller is outside a request
+    # (a console, a background job, or a direct unit instantiation).
+    def self.current_request
+      CapabilityPolicyContext.request
+    end
+
+    # The policy of the space that received the current request. Falls back to
+    # the default space outside a request.
+    def self.current_capability_policy
+      request = current_request
+      request ? capability_policy_for(request) : capability_policies.default_policy
+    end
+
+    # Explains which capabilities of an already-registered client now need
+    # re-approval under its space's current policy. This is the answer to the
+    # operational question a configuration change raises: it reports the
+    # client's approval captured when it registered against the policy that is
+    # in effect now, so operators can see exactly which dimension narrowed.
+    #
+    # @param application [Doorkeeper::Application]
+    # @return [Hash] `space`, `revoked` (empty when still approved) and
+    #   `approved` metadata
+    def self.capability_review(application)
+      space = if application.respond_to?(:registered_space)
+                application.registered_space
+              end
+      policy = capability_policies[space] || capability_policies.default_policy
+      approved = registered_capabilities_for(application)
+      {
+        space: policy.space_name,
+        approved: approved,
+        revoked: policy.capability_review(approved),
+      }
+    end
+
+    # The approved capability metadata of an application, tolerating models
+    # that predate the upgrade migration and therefore expose none of the
+    # registration columns.
+    def self.registered_capabilities_for(application)
+      if application.respond_to?(:approved_client_capabilities)
+        application.approved_client_capabilities
+      else
+        {
+          scopes: application.scopes.all,
+          grant_types: [],
+          response_types: [],
+          token_endpoint_auth_method: nil,
+        }
+      end
+    end
+    private_class_method :registered_capabilities_for
 
     # Whether `Doorkeeper::OpenidConnect.configure` has been run. Guards
     # integrations that must fall back to plain Doorkeeper behaviour (e.g. the
@@ -125,6 +214,26 @@ module Doorkeeper
       }
 
       option :dynamic_client_registration, default: false
+
+      # Per-namespace client capability policies. Each mount of the engine (see
+      # `use_doorkeeper_openid_connect as: :admins`) is a registration space;
+      # a dynamically registered client may ask for capabilities, but only
+      # what its space approves may be persisted, advertised by that space's
+      # discovery document, or exercised by the client afterwards.
+      #
+      #   client_capabilities do
+      #     space :admins do
+      #       scopes :openid, :profile
+      #       grant_types :authorization_code
+      #       response_types :code
+      #       token_endpoint_auth_methods :client_secret_basic
+      #     end
+      #   end
+      #
+      # A capability left undeclared in a space inherits the server's global
+      # setting; a declared capability is intersected with it, so a space can
+      # narrow a capability but never widen one.
+      option :client_capabilities, builder_class: CapabilityPolicyBuilder
 
       # When enabled, the `prompt` authorization parameter (`none`, `login`,
       # `consent`, `select_account`) is honored even on non-OIDC requests,

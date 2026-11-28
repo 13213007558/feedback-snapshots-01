@@ -14,6 +14,64 @@ module Doorkeeper
               "and `rails db:migrate`"
 
             included do
+              # Class-level probe used by the registration controller before it
+              # builds the INSERT. Instance-level `client_capability_columns?`
+              # cannot be asked of a new record without triggering attribute
+              # reads, and a model that has not run the upgrade migration must
+              # be detected without exceptions.
+              def self.column_available_for_capability_approval?
+                %w[
+                  registered_space
+                  registered_grant_types
+                  registered_response_types
+                  registered_token_endpoint_auth_method
+                ].all? { |column| column_names.include?(column) }
+              rescue StandardError
+                false
+              end
+
+              # Dynamic registrations record which space approved them and the
+              # exact capability set that was approved. The columns are
+              # optional: an installation that has not run the upgrade
+              # migration keeps working, with the registration endpoint
+              # enforcing the space of the receiving mount instead.
+              # The registration space (route helper prefix without the trailing
+              # underscore: "admins") this client was approved in, or nil for a
+              # client created before capability policies existed.
+              def registered_space
+                return nil unless has_attribute?(:registered_space)
+
+                read_attribute(:registered_space).presence
+              end
+
+              def registered_grant_types
+                split_registered_list(:registered_grant_types)
+              end
+
+              def registered_response_types
+                split_registered_list(:registered_response_types)
+              end
+
+              def registered_token_endpoint_auth_method
+                return nil unless has_attribute?(:registered_token_endpoint_auth_method)
+
+                read_attribute(:registered_token_endpoint_auth_method).presence
+              end
+
+              # The capability metadata captured at registration, in the shape
+              # CapabilityPolicy#revoked_capabilities expects. A pre-policy
+              # client only carries the capabilities Doorkeeper persists for it
+              # (scopes, and confidentiality as the "none" auth method).
+              def approved_client_capabilities
+                {
+                  scopes: scopes.all,
+                  grant_types: registered_grant_types,
+                  response_types: registered_response_types,
+                  token_endpoint_auth_method: registered_token_endpoint_auth_method ||
+                    (confidential? ? nil : CapabilityPolicy::PUBLIC_CLIENT_AUTH_METHOD),
+                }
+              end
+
               # Validate registered post-logout redirect URIs with exactly the
               # same rules Doorkeeper applies to `redirect_uri`, by delegating
               # to its own `Doorkeeper::RedirectUriValidator`. This keeps the
@@ -83,6 +141,14 @@ module Doorkeeper
                 return false if uri.blank?
 
                 post_logout_redirect_uris.include?(uri.to_s)
+              end
+
+              private
+
+              def split_registered_list(attribute)
+                return [] unless has_attribute?(attribute)
+
+                read_attribute(attribute).to_s.split
               end
             end
           end

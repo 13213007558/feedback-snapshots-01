@@ -27,7 +27,15 @@ module Doorkeeper
         def generate_routes!(options)
           @mapping = Mapper.new.map(&@block)
 
-          routes.scope options[:scope] || "oauth", as: "oauth" do
+          oauth_scope = { as: "oauth" }
+          prefix = route_helper_prefix(options)
+          # The registration and userinfo endpoints need the same Prefix as the
+          # discovery routes so the controller can resolve the space that
+          # received the request. Without it, `/admins/oauth/registration`
+          # would be evaluated against the default space.
+          oauth_scope[:defaults] = { route_helper_prefix: prefix } if prefix.present?
+
+          routes.scope(options[:scope] || "oauth", **oauth_scope) do
             map_oauth_routes
           end
 

@@ -35,6 +35,11 @@ module Doorkeeper
       def provider_response
         doorkeeper = ::Doorkeeper.configuration
         openid_connect = ::Doorkeeper::OpenidConnect.configuration
+        # The capabilities advertised here are the receiving mount's, so a
+        # namespaced discovery document never offers what that space has not
+        # approved. A space that declares nothing inherits the server's global
+        # setting, preserving single-mount output.
+        policy = ::Doorkeeper::OpenidConnect.capability_policy_for(request)
 
         {
           issuer: issuer,
@@ -47,16 +52,17 @@ module Doorkeeper
           end_session_endpoint: instance_exec(&openid_connect.end_session_endpoint),
           registration_endpoint: openid_connect.dynamic_client_registration ? endpoint_url(:oauth_dynamic_client_registration_url, dynamic_client_registration_url_options) : nil,
 
-          scopes_supported: doorkeeper.scopes,
+          scopes_supported: policy.effective_scopes(doorkeeper).all,
 
-          response_types_supported: doorkeeper.authorization_response_types,
-          response_modes_supported: response_modes_supported(doorkeeper),
-          grant_types_supported: grant_types_supported(doorkeeper),
+          response_types_supported: policy.effective_response_types(doorkeeper),
+          response_modes_supported: response_modes_supported(doorkeeper, policy),
+          grant_types_supported: policy.effective_grant_types(doorkeeper),
 
           # TODO: look into doorkeeper-jwt_assertion for these
           #  'client_secret_jwt',
           #  'private_key_jwt'
-          token_endpoint_auth_methods_supported: token_endpoint_auth_methods_supported,
+          token_endpoint_auth_methods_supported:
+            policy.effective_token_endpoint_auth_methods(doorkeeper),
 
           # RFC 9207: mirrors Doorkeeper's own RFC 8414 document — true exactly
           # when Doorkeeper is configured with an issuer and therefore emits the
@@ -85,8 +91,13 @@ module Doorkeeper
       end
       # rubocop:enable Metrics/AbcSize
 
-      def response_modes_supported(doorkeeper)
-        doorkeeper.authorization_response_flows.flat_map(&:response_mode_matches).uniq
+      def response_modes_supported(doorkeeper, policy)
+        approved_response_types = policy.effective_response_types(doorkeeper)
+        flows = doorkeeper.authorization_response_flows.select do |flow|
+          approved_response_types.any? { |type| flow.matches_response_type?(type) }
+        end
+
+        flows.flat_map(&:response_mode_matches).uniq
       end
 
       def code_challenge_methods_supported(doorkeeper)

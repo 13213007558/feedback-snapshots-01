@@ -31,7 +31,7 @@ The following parts of [OpenID Connect Core 1.0](http://openid.net/specs/openid-
 - [UserInfo Endpoint](http://openid.net/specs/openid-connect-core-1_0.html#UserInfo)
 - [Normal Claims](http://openid.net/specs/openid-connect-core-1_0.html#NormalClaims)
 - [OAuth 2.0 Form Post Response Mode](https://openid.net/specs/oauth-v2-form-post-response-mode-1_0.html)
-- [OAuth 2.0 Dynamic Client Registration Protocol](https://datatracker.ietf.org/doc/html/rfc7591)
+- [OAuth 2.0 Dynamic Client Registration Protocol](https://datatracker.ietf.org/doc/html/rfc7591), including per-mount client capability policies (`client_capabilities`)
 - [RP-Initiated Logout 1.0](https://openid.net/specs/openid-connect-rpinitiated-1_0.html) client metadata — per-client `post_logout_redirect_uris` registration and validation; see [RP-Initiated Logout](https://github.com/doorkeeper-gem/doorkeeper-openid_connect/wiki/RP-Initiated-Logout) for the host application's part
 - [RFC 9207](https://www.rfc-editor.org/rfc/rfc9207) `iss` authorization response parameter, emitted when Doorkeeper itself is configured with an `issuer`
 - [RFC 8414 Authorization Server Metadata](https://www.rfc-editor.org/rfc/rfc8414) — see [Routes](https://github.com/doorkeeper-gem/doorkeeper-openid_connect/wiki/Routes) for how this interacts with the metadata endpoint Doorkeeper 6.0 serves itself
@@ -76,6 +76,14 @@ Generate a migration for Active Record (other ORMs are currently not supported):
 
 ```sh
 rails generate doorkeeper:openid_connect:migration
+rails db:migrate
+```
+
+If you already run dynamic client registration and want registrations to
+record the space and capability set that approved them, also run:
+
+```sh
+rails generate doorkeeper:openid_connect:add_client_capabilities
 rails db:migrate
 ```
 

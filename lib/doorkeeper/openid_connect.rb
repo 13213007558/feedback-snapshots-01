@@ -18,6 +18,12 @@ require "jwt"
 module Doorkeeper
   module OpenidConnect
     autoload :AtHashConcern, "doorkeeper/openid_connect/at_hash_concern"
+    autoload :CapabilityPolicy, "doorkeeper/openid_connect/capability_policy"
+    autoload :CapabilitySet, "doorkeeper/openid_connect/capability_set"
+    autoload :CapabilityPolicyBuilder, "doorkeeper/openid_connect/capability_policy_builder"
+    autoload :CapabilityPolicyContext, "doorkeeper/openid_connect/capability_policy_context"
+    autoload :CapabilityPolicyRegistry, "doorkeeper/openid_connect/capability_policy_registry"
+    autoload :CapabilityReview, "doorkeeper/openid_connect/capability_review"
     autoload :ClaimsBuilder, "doorkeeper/openid_connect/claims_builder"
     autoload :ClaimsHash, "doorkeeper/openid_connect/claims_hash"
     autoload :DiscoveryHelpersMixin, "doorkeeper/openid_connect/discovery_helpers_mixin"
@@ -88,8 +94,25 @@ require "doorkeeper/openid_connect/helpers/controller"
 require "doorkeeper/openid_connect/oauth/authorization/code"
 require "doorkeeper/openid_connect/oauth/authorization_code_request"
 require "doorkeeper/openid_connect/oauth/password_access_token_request"
+# The policy-enforcement mixins have to load before the files that include
+# them, so they are required here rather than autoloaded.
+require "doorkeeper/openid_connect/oauth/capability_policy_request"
+require "doorkeeper/openid_connect/oauth/token_request_policy"
 require "doorkeeper/openid_connect/oauth/pre_authorization"
 require "doorkeeper/openid_connect/oauth/token_response"
+
+Doorkeeper::OAuth::AuthorizationCodeRequest.prepend(
+  Doorkeeper::OpenidConnect::OAuth::TokenRequestPolicy,
+)
+Doorkeeper::OAuth::ClientCredentialsRequest.prepend(
+  Doorkeeper::OpenidConnect::OAuth::TokenRequestPolicy,
+)
+Doorkeeper::OAuth::PasswordAccessTokenRequest.prepend(
+  Doorkeeper::OpenidConnect::OAuth::TokenRequestPolicy,
+)
+Doorkeeper::OAuth::RefreshTokenRequest.prepend(
+  Doorkeeper::OpenidConnect::OAuth::TokenRequestPolicy,
+)
 
 # Defined here rather than in the module body below because the conditional
 # declaration that follows already branches on it.

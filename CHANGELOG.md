@@ -2,6 +2,16 @@ Upgrading? [Migration from Old Versions](https://github.com/doorkeeper-gem/doork
 
 ## Unreleased
 
+- Add per-space client capability policies for dynamic registration. Each
+  engine mount (`use_doorkeeper_openid_connect as: :admins`) is a registration
+  space; `client_capabilities` declares the scopes, grant types, response types
+  and token endpoint authentication methods each space approves. Registration,
+  that space's discovery document and the authorize/token endpoints all read
+  the same policy, so a client can never receive a capability its space did not
+  approve. Undeclared spaces keep the previous behaviour, and
+  `Doorkeeper::OpenidConnect.capability_review` reports which capabilities of
+  an existing registration a configuration change now requires re-approval.
+
 - Add entry here
 
 ## v2.1.0 (2026-10-20)

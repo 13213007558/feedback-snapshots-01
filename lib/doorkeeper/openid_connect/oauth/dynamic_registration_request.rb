@@ -24,9 +24,10 @@ module Doorkeeper
         validate :grant_types,                error: :invalid_client_metadata
         validate :scope,                      error: :invalid_client_metadata
 
-        def initialize(server, params)
+        def initialize(server, params, policy: nil)
           @server = server
           @params = params
+          @policy = policy
         end
 
         def token_endpoint_auth_method
@@ -62,17 +63,30 @@ module Doorkeeper
         # 5.8.1+; older versions fall back to plain intersection (dynamic
         # scopes do not exist there, so nothing is lost).
         def permitted_scopes
-          server_scopes = server.scopes
-
-          if server_scopes.respond_to?(:allowed)
-            server_scopes.allowed(effective_requested_scopes).to_s
-          else
-            (server_scopes & effective_requested_scopes).to_s
+          if policy && requested_scopes.present?
+            return policy.permitted_scopes(requested_scopes, server).to_s
           end
+
+          permitted_server_scopes.to_s
+        end
+
+        # Capability metadata the receiving space must approve. When the
+        # registration is evaluated without a policy (a direct call from a
+        # legacy integration) the server's global capabilities apply unchanged.
+        def policy
+          @policy
         end
 
         def error_response
           { error: error.to_s, error_description: @error_description }
+        end
+
+        # The advertised set echoed by the registration response. It must match
+        # the receiving space's discovery document, not the global registry.
+        def advertised_auth_methods
+          return policy.effective_token_endpoint_auth_methods(server) if policy
+
+          token_endpoint_auth_methods_supported
         end
 
         private
@@ -98,22 +112,22 @@ module Doorkeeper
         end
 
         def validate_response_types
-          unsupported = requested_response_types - server_response_types
+          unsupported = requested_response_types - supported_response_types
           return true if unsupported.empty?
 
           @error_description =
             "response_types #{unsupported.join(", ")} are not supported. " \
-            "Supported types: #{server_response_types.join(", ")}"
+            "Supported types: #{supported_response_types.join(", ")}"
           false
         end
 
         def validate_grant_types
-          unsupported = requested_grant_types - server_grant_types
+          unsupported = requested_grant_types - supported_grant_types
           return true if unsupported.empty?
 
           @error_description =
             "grant_types #{unsupported.join(", ")} are not supported. " \
-            "Supported types: #{server_grant_types.join(", ")}"
+            "Supported types: #{supported_grant_types.join(", ")}"
           false
         end
 
@@ -131,7 +145,27 @@ module Doorkeeper
         # while a client that honestly declared a narrow scope stays confined
         # to it.
         def effective_requested_scopes
-          requested_scopes.presence || server.default_scopes
+          requested_scopes.presence || default_registration_scopes
+        end
+
+        # When `scope` is omitted, RFC 7591 §2 registers the client for the
+        # server's default scopes. A space only approves a subset of them, so
+        # its policy narrows that default too; otherwise an omitted scope would
+        # register for scopes the space never approved.
+        def default_registration_scopes
+          return server.default_scopes if policy.nil? || policy.scopes.nil?
+
+          server.default_scopes.allowed(policy.scopes)
+        end
+
+        def permitted_server_scopes
+          server_scopes = server.scopes
+
+          if server_scopes.respond_to?(:allowed)
+            server_scopes.allowed(effective_requested_scopes)
+          else
+            server_scopes & effective_requested_scopes
+          end
         end
 
         # A registration must never persist an empty scope set, whichever way
@@ -141,28 +175,36 @@ module Doorkeeper
         def validate_scope
           return true if permitted_scopes.present?
 
+          supported = policy ? policy.effective_scopes(server).to_s : server.scopes
           @error_description =
             if requested_scopes.present?
               "scope '#{requested_scopes}' contains no scopes supported by this server. " \
-              "Supported scopes: #{server.scopes}"
+              "Supported scopes: #{supported}"
             else
               "scope is required: this server registers no default scopes, so a client " \
-              "must request at least one of its supported scopes: #{server.scopes}"
+              "must request at least one of its supported scopes: #{supported}"
             end
           false
         end
 
-        def server_response_types
+        def supported_response_types
+          return policy.effective_response_types(server) if policy
+
           server.authorization_response_types
         end
 
-        def server_grant_types
+        def supported_grant_types
+          return policy.effective_grant_types(server) if policy
+
           grant_types_supported(server)
         end
 
         def supported_auth_methods
+          return policy.permitted_registration_auth_methods(server) if policy
+
           token_endpoint_auth_methods_supported + [PUBLIC_CLIENT_AUTH_METHOD]
         end
+
       end
     end
   end

@@ -10,6 +10,14 @@ module Doorkeeper
       initializer "doorkeeper.openid_connect.controller_extensions" do |app|
         app.autoloaders.main.on_load("Doorkeeper::AuthorizationsController") do |controller|
           controller.prepend Doorkeeper::OpenidConnect::AuthorizationsExtension
+          controller.prepend Doorkeeper::OpenidConnect::CapabilityPolicyRequestContext
+        end
+
+        # Token requests are served by Doorkeeper's TokensController; the
+        # policy-aware request strategies need the request to know which mount
+        # (registration space) received it.
+        app.autoloaders.main.on_load("Doorkeeper::TokensController") do |controller|
+          controller.prepend Doorkeeper::OpenidConnect::CapabilityPolicyRequestContext
         end
 
         # Doorkeeper >= 6.0 serves its own RFC 8414 metadata document at

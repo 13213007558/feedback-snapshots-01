@@ -6,20 +6,56 @@ module Doorkeeper
       before_action :authorize_dynamic_client_registration!
 
       def register
-        registration = OAuth::DynamicRegistrationRequest.new(::Doorkeeper.configuration, params)
+        registration = OAuth::DynamicRegistrationRequest.new(
+          ::Doorkeeper.configuration,
+          params,
+          policy: capability_policy,
+        )
 
         unless registration.valid?
           render json: registration.error_response, status: :bad_request
           return
         end
 
-        client = Doorkeeper.configuration.application_model.create!(application_params(registration))
+        client = Doorkeeper.configuration.application_model.create!(
+          application_params(registration).merge(approval_attributes(registration)),
+        )
         render json: registration_response(client, registration), status: :created
       rescue ActiveRecord::RecordInvalid => e
         render json: record_invalid_response(e.record), status: :bad_request
       end
 
       private
+
+      # The registration space that received this request. The registration
+      # route carries the mount's `route_helper_prefix` as a route default, so
+      # `/admins/oauth/registration` is evaluated against `admins` and not the
+      # default space. A single-mount installation resolves to the default
+      # policy, which inherits every global capability.
+      def capability_policy
+        ::Doorkeeper::OpenidConnect.capability_policy_for(
+          request,
+          prefix: request.path_parameters[:route_helper_prefix],
+        )
+      end
+
+      # The capability set the space actually approved, never the raw request
+      # declaration, written in the same INSERT as the client so a client is
+      # never observable without the approval it was admitted under. The
+      # columns are optional (see the application mixin): an installation that
+      # has not run the upgrade migration registers clients exactly as before.
+      def approval_attributes(registration)
+        model = Doorkeeper.configuration.application_model
+        return {} unless model.respond_to?(:column_available_for_capability_approval?)
+        return {} unless model.column_available_for_capability_approval?
+
+        {
+          registered_space: capability_policy.default? ? nil : capability_policy.space_name,
+          registered_grant_types: registration.requested_grant_types.join(" "),
+          registered_response_types: registration.requested_response_types.join(" "),
+          registered_token_endpoint_auth_method: registration.token_endpoint_auth_method,
+        }
+      end
 
       def authorize_dynamic_client_registration!
         authorizer = ::Doorkeeper::OpenidConnect.configuration.authorize_dynamic_client_registration
@@ -96,7 +132,7 @@ module Doorkeeper
           client_name: doorkeeper_application.name,
           redirect_uris: doorkeeper_application.redirect_uri.split,
           token_endpoint_auth_method: registration.token_endpoint_auth_method,
-          token_endpoint_auth_methods_supported: registration.token_endpoint_auth_methods_supported,
+          token_endpoint_auth_methods_supported: registration.advertised_auth_methods,
           response_types: registration.requested_response_types,
           grant_types: registration.requested_grant_types,
           scope: doorkeeper_application.scopes.to_s,
