@@ -3,6 +3,7 @@ from __future__ import annotations
 __lazy_modules__ = [
     "argparse",
     f"{__spec__.parent}.cache_migration",  # ty: ignore[missing-union-attribute]  # imported modules have a spec
+    f"{__spec__.parent}.layered",  # ty: ignore[missing-union-attribute]  # imported modules have a spec
     f"{__spec__.parent}.na",  # ty: ignore[missing-union-attribute]  # imported modules have a spec
     f"{__spec__.parent}.read_only",  # ty: ignore[missing-union-attribute]  # imported modules have a spec
     f"{__spec__.parent}.via_disk_folder",  # ty: ignore[missing-union-attribute]  # imported modules have a spec
@@ -16,6 +17,7 @@ from stat import S_IMODE, S_ISGID, S_IWGRP, S_IWOTH
 from typing import TYPE_CHECKING, Final
 
 from .cache_migration import cache_dir_with_migration
+from .layered import LayeredAppData
 from .na import AppDataDisabled
 from .read_only import ReadOnlyAppData
 from .via_disk_folder import AppDataDiskFolder
@@ -71,6 +73,20 @@ def make_app_data(folder: str | None, *, read_only: bool, env: Mapping[str, str]
     return TempAppData()
 
 
+def make_layered_app_data(shared_folder: str, private_folder: str) -> LayeredAppData:
+    """Open a shared read-only cache layered over a project-owned writable staging folder.
+
+    The shared folder is opened read-only and never written to; cache misses are materialised inside the
+    private folder instead. Use it when a build machine ships a pre-filled cache that may not contain every
+    seed image a project needs.
+
+    :param shared_folder: the pre-filled cache, mounted read-only
+    :param private_folder: the writable staging folder for cache misses and locks
+    :returns: the layered app data store
+    """
+    return LayeredAppData(shared_folder, private_folder)
+
+
 def _prepare_permissions(folder: str) -> bool:
     info: Final[os.stat_result] = os.stat(folder)
     if info.st_uid != os.geteuid():
@@ -90,7 +106,9 @@ def _prepare_permissions(folder: str) -> bool:
 __all__ = [
     "AppDataDisabled",
     "AppDataDiskFolder",
+    "LayeredAppData",
     "ReadOnlyAppData",
     "TempAppData",
     "make_app_data",
+    "make_layered_app_data",
 ]

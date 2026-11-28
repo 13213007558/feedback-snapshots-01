@@ -56,6 +56,7 @@ into the standard library under the ``venv`` module. For how ``virtualenv`` comp
 
 - :doc:`how-to/install` — Install virtualenv on your system
 - :doc:`how-to/usage` — Select Python versions, activate environments, configure defaults, and use from Python code
+- :doc:`how-to/layered-read-only-cache` — Serve a read-only shared cache and generate missing seeds in a private staging area
 - :doc:`how-to/verify-release` — Check that a downloaded release came from the virtualenv release workflow
 
 **Reference** - Technical information
@@ -112,6 +113,7 @@ Learn more about virtualenv from these community resources:
 
     how-to/install
     how-to/usage
+    how-to/layered-read-only-cache
     how-to/verify-release
 
 .. toctree::
