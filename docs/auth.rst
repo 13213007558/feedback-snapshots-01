@@ -176,10 +176,47 @@ See `GitLab OAuth2 API`_ and `Group members API`_ documentation for more info.
 .. _Group members API: https://docs.gitlab.com/api/group_members/
 .. _access level: https://docs.gitlab.com/api/access_requests/
 
+Login windows and provider binding
+----------------------------------
+
+Each browser login is a separate, short-lived transaction. Flower records the
+provider that issued the request, the browser session that started it, and the
+post-login target. Returning from the provider only completes the window that
+issued the matching state:
+
+- Two login windows can be open at the same time. Presenting one callback does
+  not consume or cancel the other window.
+- A callback is accepted only by the provider and browser session that started
+  it. A state value from another window cannot be replayed against a different
+  provider or browser.
+- A callback is consumed once. Repeating a finished or failed callback is
+  rejected, and the resulting browser session is not changed.
+- The verified provider and subject are stored with the session. A matching
+  display name from another provider does not inherit the local identity.
+
+To move from an old provider to a new one, configure the new provider with
+:ref:`auth_provider` and list the old handler in :ref:`auth_provider_retired`.
+Login windows started through the old provider before the switch can still
+return and finish once. New logins started through a retired provider are
+rejected; users must start again through the current provider.
+
+.. code-block:: python
+
+    auth_provider = "myproject.auth.NewProvider"
+    auth_provider_retired = ["myproject.auth.OldProvider"]
+
+Machine clients are authenticated separately with :ref:`basic_auth`. A
+machine credential is checked on its own and is not replaced by a browser
+cookie, so an API request with valid Basic credentials keeps working while a
+browser login is in progress. When a request carries an invalid Basic header
+it is rejected even if the browser also has a session; it does not silently
+fall back to the cookie.
+
 Logging out
 -----------
 
 When OAuth is enabled, the navigation bar shows a logout link that ends the Flower session.
+Logging out also ends browser login windows that were started by that session.
 The OAuth provider keeps its own session, so logging in again may not ask for credentials.
 
 .. _custom-authentication:
@@ -207,6 +244,11 @@ Flower uses the handler for its ``/login`` route. The handler must authenticate
 the request, set the secure ``user`` cookie to an identity accepted by
 :ref:`auth`, and redirect the user after a successful login. It is also
 responsible for validating provider responses and rejecting failed logins.
+
+A custom handler that inherits from one of the built-in OAuth handlers gets
+the login-window binding described above. A handler that inherits directly
+from ``BaseHandler`` owns its own flow; its ``user`` cookie is treated as a
+local identity rather than a federated provider.
 
 For example, a handler can delegate authentication to an application function
 that returns a verified identity, or ``None`` when authentication fails:

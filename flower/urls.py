@@ -17,6 +17,9 @@ settings = {
     "static_url_prefix": '/static/',
     "login_url": '/login',
     "xsrf_cookies": True,
+    # Providers listed here keep only callbacks issued before a migration.
+    # New browser logins must be started through the default auth_provider.
+    "oauth_retired_providers": (),
 }
 
 

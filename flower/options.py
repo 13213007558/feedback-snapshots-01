@@ -64,6 +64,8 @@ define("natural_time", type=bool, default=False,
 define("tasks_columns", type=str, default="name,uuid,state,received,runtime,worker",
        help="slugs of columns on /tasks/ page in display order, delimited by comma")
 define("auth_provider", default=None, type=str, help="auth handler class")
+define("auth_provider_retired", type=str, default=None, multiple=True,
+       help="provider classes that may only finish logins started before migration")
 define("url_prefix", type=str, help="base url prefix")
 define("task_runtime_metric_buckets", type=float, default=list(Histogram.DEFAULT_BUCKETS),
        multiple=True, help="histogram latency bucket value")

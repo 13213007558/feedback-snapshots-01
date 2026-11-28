@@ -26,6 +26,8 @@ OPTIONS
   --address                        run on the given address
   --auth                           regexp of emails to grant access
   --auth-provider                  sets authentication provider class
+  --auth-provider-retired          providers that may only finish logins
+                                   started before migration
   --auto-refresh                   refresh workers automatically (default *True*)
   --basic-auth                     colon-separated user-password to enable
                                    basic auth

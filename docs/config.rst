@@ -519,6 +519,23 @@ The buckets represent the upper bounds of the latency intervals.
 You can specify them as integer or float values. The `inf` value represents positive infinity, indicating
 that the last bucket captures all values greater than or equal to the previous bucket.
 
+.. _auth_provider_retired:
+
+auth_provider_retired
+~~~~~~~~~~~~~~~~~~~~~
+
+Default: None
+
+Lists authentication providers that are being retired. A login window that was
+started through one of these providers before the migration can still return
+and finish once. New browser logins started through a retired provider are
+rejected, so users start again through the current :ref:`auth_provider`.
+
+The value is a comma-separated list of provider handler import paths, for
+example ``--auth-provider-retired=myproject.auth.OldProvider``.
+
+See :ref:`authentication` for the full migration behavior.
+
 .. _oauth2_key:
 
 oauth2_key

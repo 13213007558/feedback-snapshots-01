@@ -135,6 +135,9 @@ def extract_settings():
             'redirect_uri': options.oauth2_redirect_uri or os.environ.get('FLOWER_OAUTH2_REDIRECT_URI'),
         }
 
+    if options.auth_provider_retired:
+        settings['oauth_retired_providers'] = tuple(options.auth_provider_retired)
+
     if options.certfile and options.keyfile:
         settings['ssl_options'] = {'certfile': abs_path(options.certfile),
                                    'keyfile': abs_path(options.keyfile)}

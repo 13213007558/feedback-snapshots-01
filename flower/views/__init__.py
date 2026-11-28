@@ -11,7 +11,12 @@ import tornado
 import tornado.auth
 
 from ..utils import bugreport, strtobool, template
-from ..utils.authentication import authenticate
+from ..utils.authentication import (
+    IDENTITY_COOKIE,
+    LoginIdentity,
+    UserIdentity,
+    authenticate,
+)
 from ..utils.broker import Broker
 
 logger = logging.getLogger(__name__)
@@ -125,32 +130,56 @@ class BaseHandler(tornado.web.RequestHandler):
             self.finish()
 
     def get_current_user(self):
-        # Basic Auth
+        authorization = self.request.headers.get("Authorization", "")
+
+        # Basic Auth: a machine credential is independent of any browser
+        # session, so a valid header must not be skipped just because a
+        # browser cookie happens to be present too.
         basic_auth = self.application.options.basic_auth
         if basic_auth:
-            auth_header = self.request.headers.get("Authorization", "")
-            try:
-                basic, credentials = auth_header.split()
-                credentials = b64decode(credentials.encode()).decode()
-                if basic != 'Basic':
+            if not authorization:
+                # A browser session may still authenticate this request;
+                # when no browser login is configured, there is no fallback.
+                if not self.application.options.auth:
                     raise tornado.web.HTTPError(401)
-                for stored_credential in basic_auth:
-                    if hmac.compare_digest(stored_credential, credentials):
-                        break
-                else:
+            else:
+                try:
+                    basic, credentials = authorization.split()
+                    credentials = b64decode(credentials.encode()).decode()
+                    if basic != 'Basic':
+                        raise tornado.web.HTTPError(401)
+                    for stored_credential in basic_auth:
+                        if hmac.compare_digest(stored_credential, credentials):
+                            return True
                     raise tornado.web.HTTPError(401)
-            except ValueError as exc:
-                raise tornado.web.HTTPError(401) from exc
+                except ValueError as exc:
+                    raise tornado.web.HTTPError(401) from exc
 
-        # OAuth2
+        # OAuth2 browser session
         if not self.application.options.auth:
             return True
+        identity = LoginIdentity.from_cookie(
+            self.get_secure_cookie(IDENTITY_COOKIE))
+        if identity is not None:
+            retired = self.application.settings.get(
+                'oauth_retired_providers') or ()
+            if identity.provider in retired:
+                # Sessions issued by a retired source are not renewed; the
+                # user must sign in through the current provider.
+                return None
+            if authenticate(self.application.options.auth, identity.email):
+                return UserIdentity(identity.email, identity.provider,
+                                    identity.subject)
+            return None
+        # A display cookie alone cannot prove which source issued it.  A
+        # custom provider that manages its own local session may still set
+        # only this cookie; it is accepted as a local, non-federated identity.
         user = self.get_secure_cookie('user')
         if user:
             if not isinstance(user, str):
                 user = user.decode()
             if authenticate(self.application.options.auth, user):
-                return user
+                return UserIdentity(user, 'local', user)
         return None
 
     # pylint: disable=too-many-arguments
